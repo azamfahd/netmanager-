@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,26 +14,34 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ConfirmationNumber
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -56,10 +66,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.HotspotCard
+import com.example.data.model.UserSessionRecord
 import com.example.data.network.NetworkUtils
+import com.example.data.util.DeviceDetector
 import com.example.ui.components.ConfirmDialog
+import com.example.ui.components.EditCardDialog
+import com.example.ui.components.PrintSelectionDialog
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StatusType
+import com.example.ui.components.UserDetailDialog
 import com.example.ui.theme.NetworkCyan
 import com.example.ui.theme.RouterBlue
 import com.example.ui.theme.StatusActiveGreen
@@ -75,10 +90,15 @@ fun CardsScreen(
 ) {
     val filteredCards by viewModel.filteredCards.collectAsStateWithLifecycle()
     val allCards by viewModel.cards.collectAsStateWithLifecycle()
+    val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val searchQuery by viewModel.cardSearchQuery.collectAsStateWithLifecycle()
     val currentFilter by viewModel.cardFilter.collectAsStateWithLifecycle()
 
     var cardToDelete by remember { mutableStateOf<HotspotCard?>(null) }
+    var cardToEdit by remember { mutableStateOf<HotspotCard?>(null) }
+    var cardToReactivate by remember { mutableStateOf<HotspotCard?>(null) }
+    var showPrintSelectionDialog by remember { mutableStateOf(false) }
+    var selectedSessionForDetail by remember { mutableStateOf<UserSessionRecord?>(null) }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -90,7 +110,9 @@ fun CardsScreen(
 
             // Search Bar & Action Buttons
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -108,18 +130,23 @@ fun CardsScreen(
                     },
                     modifier = Modifier
                         .weight(1f)
+                        .height(54.dp)
                         .testTag("search_cards_input"),
                     shape = RoundedCornerShape(12.dp),
                     singleLine = true
                 )
 
-                OutlinedButton(
+                Button(
                     onClick = {
-                        viewModel.setPrintableCards(filteredCards)
-                        onOpenPrintScreen()
+                        showPrintSelectionDialog = true
                     },
                     shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.testTag("print_cards_btn")
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = RouterBlue
+                    ),
+                    modifier = Modifier
+                        .height(54.dp)
+                        .testTag("print_cards_btn")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Print,
@@ -127,36 +154,47 @@ fun CardsScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("طباعة")
+                    Text("طباعة", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Filter Chips
+            // Filter Chips (Scrollable & Uniform compact height)
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 FilterChip(
                     selected = currentFilter == CardFilter.ALL,
                     onClick = { viewModel.updateCardFilter(CardFilter.ALL) },
-                    label = { Text("الكل (${allCards.size})") }
+                    label = { Text("الكل (${allCards.size})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
                 )
                 FilterChip(
                     selected = currentFilter == CardFilter.UNUSED,
                     onClick = { viewModel.updateCardFilter(CardFilter.UNUSED) },
-                    label = { Text("جاهزة للبيع (${allCards.count { !it.isActive && !it.isExpired }})") }
+                    label = { Text("جاهزة للبيع (${allCards.count { !it.isActive && !it.isExpired }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
                 )
                 FilterChip(
                     selected = currentFilter == CardFilter.ACTIVE,
                     onClick = { viewModel.updateCardFilter(CardFilter.ACTIVE) },
-                    label = { Text("مستخدمة (${allCards.count { it.isActive && !it.isExpired }})") }
+                    label = { Text("مستخدمة (${allCards.count { it.isActive && !it.isExpired }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
                 )
                 FilterChip(
                     selected = currentFilter == CardFilter.EXPIRED,
                     onClick = { viewModel.updateCardFilter(CardFilter.EXPIRED) },
-                    label = { Text("منتهية (${allCards.count { it.isExpired }})") }
+                    label = { Text("منتهية (${allCards.count { it.isExpired }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
                 )
             }
 
@@ -202,6 +240,29 @@ fun CardsScreen(
                     items(filteredCards, key = { it.id }) { card ->
                         HotspotCardItem(
                             card = card,
+                            onClick = {
+                                val session = UserSessionRecord(
+                                    id = card.id,
+                                    username = card.name,
+                                    ipAddress = "192.168.88.${(100..240).random()}",
+                                    macAddress = "D4:6A:A8:12:${card.name.takeLast(4).chunked(2).joinToString(":")}",
+                                    isOnline = card.isActive && !card.isExpired,
+                                    loginTime = if (card.isActive) "اليوم 10:15 ص" else "غير متصل",
+                                    logoutTime = if (card.isActive) "متصل الآن (جلسة نشطة)" else "كرت جاهز / غير متصل",
+                                    duration = if (card.uptime != "0s") card.uptime else "لم يتم الاستخدام",
+                                    bytesIn = card.bytesIn,
+                                    bytesOut = card.bytesOut,
+                                    totalBytes = card.bytesIn + card.bytesOut,
+                                    terminateReason = if (card.isExpired) "انتهاء الرصيد / الباقة" else if (card.isActive) "جلسة نشطة حالياً" else "كرت جاهز للبيع",
+                                    profile = card.profile,
+                                    price = card.price,
+                                    deviceInfo = DeviceDetector.detectDevice("D4:6A:A8:12:34:56", card.comment, card.name),
+                                    comment = card.comment
+                                )
+                                selectedSessionForDetail = session
+                            },
+                            onEdit = { cardToEdit = card },
+                            onReactivate = { cardToReactivate = card },
                             onToggleDisabled = {
                                 viewModel.toggleCardDisabled(card.id, card.disabled)
                             },
@@ -215,7 +276,7 @@ fun CardsScreen(
             }
         }
 
-        // FAB to generate batch
+        // FAB to generate batch or add single card
         FloatingActionButton(
             onClick = onOpenBatchGenerator,
             modifier = Modifier
@@ -233,12 +294,48 @@ fun CardsScreen(
             ) {
                 Icon(Icons.Default.Add, contentDescription = null)
                 Text(
-                    text = "توليد كروت",
+                    text = "إضافة وتوليد كروت",
                     fontWeight = FontWeight.Bold,
                     fontSize = 15.sp
                 )
             }
         }
+    }
+
+    // User Detail Dialog
+    selectedSessionForDetail?.let { session ->
+        UserDetailDialog(
+            session = session,
+            onDismiss = { selectedSessionForDetail = null }
+        )
+    }
+
+    // Edit Card Dialog
+    cardToEdit?.let { targetCard ->
+        EditCardDialog(
+            card = targetCard,
+            profiles = profiles,
+            onDismiss = { cardToEdit = null },
+            onSave = { updated ->
+                viewModel.updateCard(updated)
+                cardToEdit = null
+            }
+        )
+    }
+
+    // Reactivate Confirmation Dialog
+    cardToReactivate?.let { targetCard ->
+        ConfirmDialog(
+            title = "إعادة تفعيل الكرت وتصفير العدادات",
+            message = "هل أنت متأكد من رغبتك في إعادة تفعيل الكرت (${targetCard.name}) وتصفير عداد الوقت والاستهلاك ليصبح جاهزاً للبيع والاستخدام مجدداً؟",
+            confirmText = "إعادة التفعيل الآن",
+            isDestructive = false,
+            onConfirm = {
+                viewModel.reactivateCard(targetCard)
+                cardToReactivate = null
+            },
+            onDismiss = { cardToReactivate = null }
+        )
     }
 
     // Delete Card Dialog
@@ -255,11 +352,27 @@ fun CardsScreen(
             onDismiss = { cardToDelete = null }
         )
     }
+
+    // Print Category & Ready Cards Selection Dialog
+    if (showPrintSelectionDialog) {
+        PrintSelectionDialog(
+            allCards = allCards,
+            onDismiss = { showPrintSelectionDialog = false },
+            onConfirmSelection = { selectedCards ->
+                viewModel.setPrintableCards(selectedCards)
+                showPrintSelectionDialog = false
+                onOpenPrintScreen()
+            }
+        )
+    }
 }
 
 @Composable
 fun HotspotCardItem(
     card: HotspotCard,
+    onClick: () -> Unit,
+    onEdit: () -> Unit,
+    onReactivate: () -> Unit,
     onToggleDisabled: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -267,14 +380,15 @@ fun HotspotCardItem(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("hotspot_card_${card.id}"),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (card.disabled) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            // Header Row: Card code & Status Pill
+            // Header Row: Card code & Status Pill & Actions
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -282,11 +396,12 @@ fun HotspotCardItem(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.clickable(onClick = onClick)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(38.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .background(RouterBlue.copy(alpha = 0.12f)),
                         contentAlignment = Alignment.Center
@@ -454,6 +569,91 @@ fun HotspotCardItem(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                    }
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), thickness = 0.5.dp)
+
+            // Bottom Action Buttons: [إعادة تفعيل الكرت] & [تعديل الكرت] & [التفاصيل]
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Reactivate Button (Especially prominent for expired or used cards)
+                OutlinedButton(
+                    onClick = onReactivate,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = StatusActiveGreen
+                    ),
+                    border = BorderStroke(1.dp, StatusActiveGreen.copy(alpha = 0.6f)),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("reactivate_card_btn_${card.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Autorenew,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "إعادة تفعيل",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // Edit Card Button
+                OutlinedButton(
+                    onClick = onEdit,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = RouterBlue
+                    ),
+                    border = BorderStroke(1.dp, RouterBlue.copy(alpha = 0.6f)),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("edit_card_btn_${card.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "تعديل الكرت",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                // Details Button
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier
+                        .clickable(onClick = onClick)
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "تفاصيل",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }

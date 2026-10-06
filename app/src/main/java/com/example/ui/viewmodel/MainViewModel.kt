@@ -71,6 +71,95 @@ class MainViewModel(
     val cards: StateFlow<List<HotspotCard>> = repository.cards
     val profiles: StateFlow<List<HotspotProfile>> = repository.profiles
     val ipBindings: StateFlow<List<IpBinding>> = repository.ipBindings
+    val networkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = repository.networkNodes
+    val userSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = repository.userSessions
+    val activityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = repository.activityEvents
+
+    // Session filter & search
+    private val _sessionSearchQuery = MutableStateFlow("")
+    val sessionSearchQuery: StateFlow<String> = _sessionSearchQuery.asStateFlow()
+
+    private val _sessionFilter = MutableStateFlow("ALL") // ALL, ONLINE, OFFLINE, LOGS
+    val sessionFilter: StateFlow<String> = _sessionFilter.asStateFlow()
+
+    val filteredUserSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = combine(
+        userSessions, _sessionSearchQuery, _sessionFilter
+    ) { sessions, query, filter ->
+        sessions.filter { item ->
+            val matchesQuery = query.isBlank() ||
+                    item.username.contains(query, ignoreCase = true) ||
+                    item.ipAddress.contains(query, ignoreCase = true) ||
+                    item.macAddress.contains(query, ignoreCase = true) ||
+                    item.deviceInfo.modelName.contains(query, ignoreCase = true) ||
+                    item.deviceInfo.brand.contains(query, ignoreCase = true) ||
+                    item.comment.contains(query, ignoreCase = true)
+
+            val matchesFilter = when (filter) {
+                "ONLINE" -> item.isOnline
+                "OFFLINE" -> !item.isOnline
+                else -> true
+            }
+
+            matchesQuery && matchesFilter
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val filteredActivityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = combine(
+        activityEvents, _sessionSearchQuery
+    ) { events, query ->
+        if (query.isBlank()) events else {
+            events.filter {
+                it.username.contains(query, ignoreCase = true) ||
+                        it.ipAddress.contains(query, ignoreCase = true) ||
+                        it.macAddress.contains(query, ignoreCase = true) ||
+                        it.eventType.contains(query, ignoreCase = true) ||
+                        it.details.contains(query, ignoreCase = true) ||
+                        it.deviceInfo.brand.contains(query, ignoreCase = true)
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun updateSessionSearch(query: String) {
+        _sessionSearchQuery.value = query
+    }
+
+    fun updateSessionFilter(filter: String) {
+        _sessionFilter.value = filter
+    }
+
+    // Nodes Search, Sorting & Filtering
+    private val _nodeSearchQuery = MutableStateFlow("")
+    val nodeSearchQuery: StateFlow<String> = _nodeSearchQuery.asStateFlow()
+
+    private val _nodeSortOption = MutableStateFlow(com.example.data.model.NodeSortOption.MOST_USERS)
+    val nodeSortOption: StateFlow<com.example.data.model.NodeSortOption> = _nodeSortOption.asStateFlow()
+
+    val filteredNetworkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = combine(
+        networkNodes, _nodeSearchQuery, _nodeSortOption
+    ) { nodes, query, sortOption ->
+        val filtered = if (query.isBlank()) nodes else {
+            nodes.filter {
+                it.name.contains(query, ignoreCase = true) ||
+                        it.ipAddress.contains(query, ignoreCase = true) ||
+                        it.location.contains(query, ignoreCase = true) ||
+                        it.model.contains(query, ignoreCase = true)
+            }
+        }
+
+        when (sortOption) {
+            com.example.data.model.NodeSortOption.FAULTY_FIRST -> filtered.sortedWith(compareByDescending<com.example.data.model.NetworkNode> { it.hasIssue }.thenByDescending { it.connectedUsers })
+            com.example.data.model.NodeSortOption.MOST_USERS -> filtered.sortedByDescending { it.connectedUsers }
+            com.example.data.model.NodeSortOption.HIGHEST_CONSUMPTION -> filtered.sortedByDescending { it.totalBytesConsumed }
+            com.example.data.model.NodeSortOption.HIGHEST_CPU -> filtered.sortedByDescending { it.cpuLoadPercent }
+            com.example.data.model.NodeSortOption.LOWEST_PING -> filtered.sortedBy { it.pingMs }
+            com.example.data.model.NodeSortOption.ONLINE_FIRST -> filtered.sortedWith(compareByDescending<com.example.data.model.NetworkNode> { it.isOnline }.thenByDescending { it.connectedUsers })
+            com.example.data.model.NodeSortOption.NAME_ASC -> filtered.sortedBy { it.name }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun updateNodeSortOption(sortOption: com.example.data.model.NodeSortOption) {
+        _nodeSortOption.value = sortOption
+    }
 
     // Filtering & Search
     private val _cardSearchQuery = MutableStateFlow("")
@@ -266,6 +355,28 @@ class MainViewModel(
         }
     }
 
+    fun reactivateCard(card: HotspotCard) {
+        viewModelScope.launch {
+            val result = repository.reactivateCard(card.id)
+            if (result.isSuccess) {
+                _toastEvent.emit("تمت إعادة تفعيل وتصفير عدادات الكرت (${card.name}) بنجاح!")
+            } else {
+                _toastEvent.emit("فشلت إعادة تفعيل الكرت: ${result.exceptionOrNull()?.message}")
+            }
+        }
+    }
+
+    fun updateCard(updatedCard: HotspotCard) {
+        viewModelScope.launch {
+            val result = repository.updateCard(updatedCard)
+            if (result.isSuccess) {
+                _toastEvent.emit("تم تحديث بيانات الكرت (${updatedCard.name}) بنجاح")
+            } else {
+                _toastEvent.emit("فشل تحديث الكرت")
+            }
+        }
+    }
+
     fun toggleCardDisabled(cardId: String, currentDisabled: Boolean) {
         viewModelScope.launch {
             val result = repository.toggleCardDisabled(cardId, currentDisabled)
@@ -304,6 +415,17 @@ class MainViewModel(
         }
     }
 
+    fun addSingleCard(card: HotspotCard) {
+        viewModelScope.launch {
+            val result = repository.addSingleCard(card)
+            if (result.isSuccess) {
+                _toastEvent.emit("تمت إضافة وتفعيل الكرت (${card.name}) بنجاح!")
+            } else {
+                _toastEvent.emit("فشل إضافة الكرت: ${result.exceptionOrNull()?.message}")
+            }
+        }
+    }
+
     fun createProfile(profile: HotspotProfile) {
         viewModelScope.launch {
             repository.createProfile(profile)
@@ -332,6 +454,36 @@ class MainViewModel(
         viewModelScope.launch {
             database.appDao().deleteSavedRouter(id)
             _toastEvent.emit("تم حذف الراوتر من المحفوظات")
+        }
+    }
+
+    fun updateNodeSearch(query: String) {
+        _nodeSearchQuery.value = query
+    }
+
+    fun addNetworkNode(node: com.example.data.model.NetworkNode) {
+        viewModelScope.launch {
+            repository.addNetworkNode(node)
+            _toastEvent.emit("تمت إضافة نقطة الشبكة (${node.name}) بنجاح!")
+        }
+    }
+
+    fun deleteNetworkNode(nodeId: String) {
+        viewModelScope.launch {
+            repository.deleteNetworkNode(nodeId)
+            _toastEvent.emit("تم حذف النقطة بنجاح")
+        }
+    }
+
+    fun pingNetworkNode(nodeId: String) {
+        viewModelScope.launch {
+            _toastEvent.emit("جاري فحص اتصال النقطة...")
+            val (reachable, ms) = repository.pingNetworkNode(nodeId)
+            if (reachable) {
+                _toastEvent.emit("النقطة متصلة ومستجيبة (زمن الاستجابة: ${ms}ms)")
+            } else {
+                _toastEvent.emit("تنبيه: النقطة غير متصلة أو لا تستجيب للـ Ping!")
+            }
         }
     }
 

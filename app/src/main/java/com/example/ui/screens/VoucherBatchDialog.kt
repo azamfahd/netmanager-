@@ -1,33 +1,62 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ConfirmationNumber
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Dataset
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Tag
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -38,48 +67,246 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.BatchGenerationConfig
 import com.example.data.model.CodeCharType
+import com.example.data.model.HotspotCard
 import com.example.data.model.HotspotProfile
+import com.example.ui.theme.NetworkCyan
+import com.example.ui.theme.RouterBlue
+import com.example.ui.theme.RouterBlueDark
+import com.example.ui.theme.RouterBlueLight
+import com.example.ui.theme.StatusActiveGreen
+import kotlin.random.Random
+
+data class VoucherPreset(
+    val priceValue: Int,
+    val priceLabel: String,
+    val title: String,
+    val timeLimit: String,
+    val timeDisplay: String,
+    val dataLimitMB: Long,
+    val dataDisplay: String,
+    val rateLimit: String,
+    val color: Color
+)
+
+val PRESET_CATEGORIES = listOf(
+    VoucherPreset(
+        priceValue = 200,
+        priceLabel = "200 ر.ي",
+        title = "فئة 200",
+        timeLimit = "2h",
+        timeDisplay = "2 ساعة",
+        dataLimitMB = 500L,
+        dataDisplay = "500 MB",
+        rateLimit = "2M/2M",
+        color = Color(0xFF1976D2)
+    ),
+    VoucherPreset(
+        priceValue = 300,
+        priceLabel = "300 ر.ي",
+        title = "فئة 300",
+        timeLimit = "6h",
+        timeDisplay = "6 ساعات",
+        dataLimitMB = 1024L,
+        dataDisplay = "1 GB",
+        rateLimit = "3M/3M",
+        color = Color(0xFF00897B)
+    ),
+    VoucherPreset(
+        priceValue = 500,
+        priceLabel = "500 ر.ي",
+        title = "فئة 500 (الأكثر طلباً)",
+        timeLimit = "1d",
+        timeDisplay = "1 يوم (24 ساعة)",
+        dataLimitMB = 2560L,
+        dataDisplay = "2.5 GB",
+        rateLimit = "4M/4M",
+        color = Color(0xFFF57C00)
+    ),
+    VoucherPreset(
+        priceValue = 1000,
+        priceLabel = "1000 ر.ي",
+        title = "فئة 1000 (VIP)",
+        timeLimit = "3d",
+        timeDisplay = "3 أيام",
+        dataLimitMB = 6144L,
+        dataDisplay = "6 GB",
+        rateLimit = "6M/6M",
+        color = Color(0xFF7B1FA2)
+    ),
+    VoucherPreset(
+        priceValue = 2500,
+        priceLabel = "2500 ر.ي",
+        title = "فئة 2500 (باقة مميزة)",
+        timeLimit = "10d",
+        timeDisplay = "10 أيام",
+        dataLimitMB = 18432L,
+        dataDisplay = "18 GB",
+        rateLimit = "8M/8M",
+        color = Color(0xFFC2185B)
+    )
+)
+
+enum class VoucherDialogTab {
+    BATCH_GENERATE,
+    SINGLE_MANUAL
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VoucherBatchDialog(
     profiles: List<HotspotProfile>,
     onDismiss: () -> Unit,
-    onGenerate: (BatchGenerationConfig) -> Unit
+    onGenerate: (BatchGenerationConfig) -> Unit,
+    onAddSingleCard: ((HotspotCard) -> Unit)? = null
 ) {
-    var count by remember { mutableIntStateOf(20) }
-    var selectedProfile by remember { mutableStateOf(profiles.firstOrNull()?.name ?: "default") }
+    var selectedTab by remember { mutableStateOf(VoucherDialogTab.BATCH_GENERATE) }
+
+    // Selected preset category (default 500)
+    var selectedPresetIndex by remember { mutableIntStateOf(2) } // default 500
+
+    // Common configuration state
+    var selectedProfile by remember {
+        mutableStateOf(profiles.firstOrNull()?.name ?: "default")
+    }
+    var price by remember { mutableStateOf(PRESET_CATEGORIES[2].priceLabel) }
+    var timeLimit by remember { mutableStateOf(PRESET_CATEGORIES[2].timeLimit) }
+    var dataLimitMB by remember { mutableLongStateOf(PRESET_CATEGORIES[2].dataLimitMB) }
+    var isSingleCode by remember { mutableStateOf(true) }
+
+    // Batch specific state
+    var batchCount by remember { mutableIntStateOf(20) }
     var prefix by remember { mutableStateOf("") }
     var codeLength by remember { mutableIntStateOf(6) }
     var charType by remember { mutableStateOf(CodeCharType.NUMBERS_ONLY) }
-    var isSingleCode by remember { mutableStateOf(true) }
-    var timeLimit by remember { mutableStateOf("1d") }
-    var dataLimitMB by remember { mutableLongStateOf(2048L) }
-    var price by remember { mutableStateOf("500 ر.ي") }
-    var batchComment by remember { mutableStateOf("دفعة كروت جديدة") }
+    var batchComment by remember { mutableStateOf("دفعة فئة 500 ر.ي") }
+
+    // Single card specific state
+    var singleCode by remember { mutableStateOf("849201") }
+    var singlePassword by remember { mutableStateOf("849201") }
+    var singleComment by remember { mutableStateOf("كرت فردي") }
 
     var expandedDropdown by remember { mutableStateOf(false) }
 
+    // Helper to apply preset category
+    fun applyPreset(preset: VoucherPreset) {
+        price = preset.priceLabel
+        timeLimit = preset.timeLimit
+        dataLimitMB = preset.dataLimitMB
+        batchComment = "دفعة ${preset.title}"
+        singleComment = "كرت ${preset.title}"
+        // Find matching profile if available
+        val matchedProfile = profiles.firstOrNull {
+            it.name.contains(preset.priceValue.toString()) ||
+                    it.name.contains(preset.timeLimit, ignoreCase = true) ||
+                    it.price.contains(preset.priceValue.toString())
+        }
+        if (matchedProfile != null) {
+            selectedProfile = matchedProfile.name
+        }
+    }
+
+    // Function to generate random single code
+    fun generateRandomSingleCode() {
+        val pool = if (charType == CodeCharType.NUMBERS_ONLY) "1234567890" else "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+        val code = (1..codeLength).map { pool.random() }.joinToString("")
+        val finalCode = if (prefix.isNotBlank()) "$prefix$code" else code
+        singleCode = finalCode
+        if (isSingleCode) {
+            singlePassword = finalCode
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(22.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
         title = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.ConfirmationNumber,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Text("توليد كروت هوتسبوت بالجملة", fontWeight = FontWeight.Bold)
+            Column {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ConfirmationNumber,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "إدارة وتوليد كروت الهوتسبوت",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "إضافة وتفعيل الكروت في الراوتر مع الباقات المعتمدة",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Mode Selector Tabs: Batch vs Single
+                TabRow(
+                    selectedTabIndex = if (selectedTab == VoucherDialogTab.BATCH_GENERATE) 0 else 1,
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                ) {
+                    Tab(
+                        selected = selectedTab == VoucherDialogTab.BATCH_GENERATE,
+                        onClick = { selectedTab = VoucherDialogTab.BATCH_GENERATE },
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(Icons.Default.Group, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Text("توليد مجموعة كروت", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    )
+                    Tab(
+                        selected = selectedTab == VoucherDialogTab.SINGLE_MANUAL,
+                        onClick = {
+                            selectedTab = VoucherDialogTab.SINGLE_MANUAL
+                            if (singleCode.isBlank() || singleCode == "849201") {
+                                generateRandomSingleCode()
+                            }
+                        },
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Text("إضافة كرت فردي يدوي", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    )
+                }
             }
         },
         text = {
@@ -87,184 +314,538 @@ fun VoucherBatchDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Count Selector
-                Text("عدد الكروت المطلوبة:", style = MaterialTheme.typography.labelMedium)
-                Row(
+                // 1. Live Interactive Card Mockup Preview
+                Card(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF0D47A1)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
                 ) {
-                    listOf(10, 20, 50, 100).forEach { num ->
-                        FilterChip(
-                            selected = count == num,
-                            onClick = { count = num },
-                            label = { Text("$num كرت") }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(
+                                        Color(0xFF0D47A1),
+                                        Color(0xFF1565C0),
+                                        Color(0xFF00838F)
+                                    )
+                                )
+                            )
+                            .padding(14.dp)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            // Top Row: Network & WiFi
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Wifi,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "كرت شبكة ميكروتك",
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                Surface(
+                                    color = Color(0xFFFFD54F),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text(
+                                        text = price,
+                                        color = Color(0xFF3E2723),
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+
+                            // Middle: Card Code / PIN
+                            Surface(
+                                color = Color.Black.copy(alpha = 0.25f),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(8.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "كود الدخول (PIN / Username):",
+                                        color = Color.White.copy(alpha = 0.8f),
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                    Text(
+                                        text = if (selectedTab == VoucherDialogTab.SINGLE_MANUAL) singleCode else "${if (prefix.isNotBlank()) "$prefix" else ""}XXXXXX",
+                                        color = Color.White,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 18.sp,
+                                        letterSpacing = 2.sp
+                                    )
+                                    if (!isSingleCode && selectedTab == VoucherDialogTab.SINGLE_MANUAL) {
+                                        Text(
+                                            text = "كلمة المرور: $singlePassword",
+                                            color = Color.White.copy(alpha = 0.9f),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Bottom Badges: Limits & Profile
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Surface(
+                                        color = Color.White.copy(alpha = 0.18f),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "⏱ $timeLimit",
+                                            color = Color.White,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                    if (dataLimitMB > 0) {
+                                        Surface(
+                                            color = Color.White.copy(alpha = 0.18f),
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Text(
+                                                text = "📦 ${if (dataLimitMB >= 1024) "${dataLimitMB / 1024} GB" else "$dataLimitMB MB"}",
+                                                color = Color.White,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Text(
+                                    text = "باقة: $selectedProfile",
+                                    color = Color.White.copy(alpha = 0.9f),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 2. Predefined Categories (فئات الكروت الشائعة: 200, 300, 500, 1000, 2500)
+                Column {
+                    Text(
+                        text = "اختر فئة الكرت السريعة (الأسعار والصلاحيات):",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        PRESET_CATEGORIES.take(3).forEachIndexed { index, preset ->
+                            FilterChip(
+                                selected = selectedPresetIndex == index,
+                                onClick = {
+                                    selectedPresetIndex = index
+                                    applyPreset(preset)
+                                },
+                                label = {
+                                    Text(
+                                        text = preset.priceLabel,
+                                        fontWeight = if (selectedPresetIndex == index) FontWeight.Bold else FontWeight.Normal,
+                                        fontSize = 12.sp
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = preset.color.copy(alpha = 0.15f),
+                                    selectedLabelColor = preset.color
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        PRESET_CATEGORIES.drop(3).forEachIndexed { idx, preset ->
+                            val actualIndex = idx + 3
+                            FilterChip(
+                                selected = selectedPresetIndex == actualIndex,
+                                onClick = {
+                                    selectedPresetIndex = actualIndex
+                                    applyPreset(preset)
+                                },
+                                label = {
+                                    Text(
+                                        text = preset.priceLabel,
+                                        fontWeight = if (selectedPresetIndex == actualIndex) FontWeight.Bold else FontWeight.Normal,
+                                        fontSize = 12.sp
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = preset.color.copy(alpha = 0.15f),
+                                    selectedLabelColor = preset.color
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
+                // 3. Router Profile Dropdown
+                Column {
+                    Text(
+                        text = "باقة السرعة في الراوتر (Hotspot Profile):",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    ExposedDropdownMenuBox(
+                        expanded = expandedDropdown,
+                        onExpandedChange = { expandedDropdown = !expandedDropdown }
+                    ) {
+                        OutlinedTextField(
+                            value = selectedProfile,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("باقة الراوتر") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedDropdown) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .menuAnchor(),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        ExposedDropdownMenu(
+                            expanded = expandedDropdown,
+                            onDismissRequest = { expandedDropdown = false }
+                        ) {
+                            profiles.forEach { profile ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(profile.name, fontWeight = FontWeight.SemiBold)
+                                            Text(
+                                                "${profile.rateLimit} • ${profile.price}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        selectedProfile = profile.name
+                                        if (profile.price.isNotBlank() && profile.price != "0 ر.ي") {
+                                            price = profile.price
+                                        }
+                                        expandedDropdown = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 4. Tab Specific Content
+                if (selectedTab == VoucherDialogTab.BATCH_GENERATE) {
+                    // ---- BATCH GENERATE MODE ----
+                    // Count Selector
+                    Column {
+                        Text("عدد الكروت المراد توليدها في الدفعة:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(10, 25, 50, 100).forEach { num ->
+                                FilterChip(
+                                    selected = batchCount == num,
+                                    onClick = { batchCount = num },
+                                    label = { Text("$num كرت", fontSize = 12.sp) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+
+                    // Character Type
+                    Column {
+                        Text("نوع الرموز في كود الكرت:", style = MaterialTheme.typography.labelMedium)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FilterChip(
+                                selected = charType == CodeCharType.NUMBERS_ONLY,
+                                onClick = { charType = CodeCharType.NUMBERS_ONLY },
+                                label = { Text("أرقام فقط (PIN)", fontSize = 12.sp) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = charType == CodeCharType.LETTERS_AND_NUMBERS,
+                                onClick = { charType = CodeCharType.LETTERS_AND_NUMBERS },
+                                label = { Text("أرقام وحروف", fontSize = 12.sp) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    // Code Length & Prefix
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = prefix,
+                            onValueChange = { prefix = it.uppercase() },
+                            label = { Text("بادئة الكود (اختياري)") },
+                            placeholder = { Text("VIP-") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        OutlinedTextField(
+                            value = codeLength.toString(),
+                            onValueChange = { len ->
+                                val l = len.filter { it.isDigit() }.toIntOrNull()
+                                if (l != null && l in 3..12) codeLength = l
+                            },
+                            label = { Text("طول الكود") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = batchComment,
+                        onValueChange = { batchComment = it },
+                        label = { Text("اسم الدفعة / ملاحظات") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                } else {
+                    // ---- SINGLE CARD MANUAL MODE ----
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = singleCode,
+                                onValueChange = {
+                                    singleCode = it
+                                    if (isSingleCode) singlePassword = it
+                                },
+                                label = { Text("كود الكرت / اسم المستخدم") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp)
+                            )
+
+                            OutlinedButton(
+                                onClick = { generateRandomSingleCode() },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.height(56.dp)
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = "توليد كود عشوائي")
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("توليد", fontSize = 12.sp)
+                            }
+                        }
+
+                        if (!isSingleCode) {
+                            OutlinedTextField(
+                                value = singlePassword,
+                                onValueChange = { singlePassword = it },
+                                label = { Text("كلمة مرور الكرت") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                        }
+
+                        OutlinedTextField(
+                            value = singleComment,
+                            onValueChange = { singleComment = it },
+                            label = { Text("اسم العميل / ملاحظة الكرت (اختياري)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp)
                         )
                     }
                 }
 
-                // Profile Dropdown
-                ExposedDropdownMenuBox(
-                    expanded = expandedDropdown,
-                    onExpandedChange = { expandedDropdown = !expandedDropdown }
-                ) {
-                    OutlinedTextField(
-                        value = selectedProfile,
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("باقة السرعة (Profile)") },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedDropdown) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .menuAnchor(),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-                    ExposedDropdownMenu(
-                        expanded = expandedDropdown,
-                        onDismissRequest = { expandedDropdown = false }
-                    ) {
-                        profiles.forEach { profile ->
-                            DropdownMenuItem(
-                                text = { Text("${profile.name} (${profile.rateLimit})") },
-                                onClick = {
-                                    selectedProfile = profile.name
-                                    price = profile.price
-                                    expandedDropdown = false
-                                }
-                            )
-                        }
-                    }
-                }
-
-                // Character Type (Numbers vs Letters+Numbers)
-                Text("نوع كود الكرت:", style = MaterialTheme.typography.labelMedium)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    FilterChip(
-                        selected = charType == CodeCharType.NUMBERS_ONLY,
-                        onClick = { charType = CodeCharType.NUMBERS_ONLY },
-                        label = { Text("أرقام فقط") }
-                    )
-                    FilterChip(
-                        selected = charType == CodeCharType.LETTERS_AND_NUMBERS,
-                        onClick = { charType = CodeCharType.LETTERS_AND_NUMBERS },
-                        label = { Text("أرقام وحروف") }
-                    )
-                }
-
-                // Code Length
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("طول الكود:")
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        listOf(4, 5, 6, 8).forEach { len ->
-                            FilterChip(
-                                selected = codeLength == len,
-                                onClick = { codeLength = len },
-                                label = { Text("$len خانات") }
-                            )
-                        }
-                    }
-                }
-
-                // Single PIN mode Checkbox
+                // Single PIN Toggle
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable { isSingleCode = !isSingleCode }
+                    modifier = Modifier.clickable {
+                        isSingleCode = !isSingleCode
+                        if (isSingleCode) singlePassword = singleCode
+                    }
                 ) {
                     Checkbox(
                         checked = isSingleCode,
-                        onCheckedChange = { isSingleCode = it }
+                        onCheckedChange = {
+                            isSingleCode = it
+                            if (it) singlePassword = singleCode
+                        }
                     )
                     Text(
-                        text = "رقم الكرت هو كلمة المرور (كود تسجيل دخول موحد)",
+                        text = "كود موحد (اسم المستخدم هو نفسه كلمة المرور)",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
 
-                // Prefix & Limits
+                // Time Limit & Price Customization Fields
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedTextField(
-                        value = prefix,
-                        onValueChange = { prefix = it },
-                        label = { Text("بادئة (Prefix)") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
                     OutlinedTextField(
                         value = timeLimit,
                         onValueChange = { timeLimit = it },
-                        label = { Text("مهلة الوقت (1d/7d)") },
+                        label = { Text("صلاحية الوقت (Limit)") },
+                        placeholder = { Text("1d أو 2h") },
+                        singleLine = true,
                         modifier = Modifier.weight(1f),
-                        singleLine = true
+                        shape = RoundedCornerShape(10.dp)
                     )
-                }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedTextField(
-                        value = if (dataLimitMB > 0) dataLimitMB.toString() else "",
-                        onValueChange = { dataLimitMB = it.toLongOrNull() ?: 0L },
-                        label = { Text("حجم البيانات (MB)") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
                     OutlinedTextField(
                         value = price,
                         onValueChange = { price = it },
-                        label = { Text("سعر الكرت") },
+                        label = { Text("سعر البيع") },
+                        singleLine = true,
                         modifier = Modifier.weight(1f),
-                        singleLine = true
+                        shape = RoundedCornerShape(10.dp)
                     )
                 }
 
                 OutlinedTextField(
-                    value = batchComment,
-                    onValueChange = { batchComment = it },
-                    label = { Text("ملاحظة أو اسم الدفعة") },
+                    value = if (dataLimitMB > 0) dataLimitMB.toString() else "0",
+                    onValueChange = { d ->
+                        val v = d.filter { it.isDigit() }.toLongOrNull() ?: 0L
+                        dataLimitMB = v
+                    },
+                    label = { Text("حد البيانات بالميجابايت (0 = غير محدود)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
+                    shape = RoundedCornerShape(10.dp)
                 )
             }
         },
         confirmButton = {
-            Button(
-                onClick = {
-                    onGenerate(
-                        BatchGenerationConfig(
-                            count = count,
+            if (selectedTab == VoucherDialogTab.BATCH_GENERATE) {
+                Button(
+                    onClick = {
+                        val config = BatchGenerationConfig(
+                            count = batchCount,
                             profile = selectedProfile,
-                            prefix = prefix.trim(),
+                            prefix = prefix,
                             codeLength = codeLength,
                             characterSet = charType,
                             isSingleCode = isSingleCode,
-                            timeLimit = timeLimit.trim(),
+                            timeLimit = timeLimit,
                             dataLimitMB = dataLimitMB,
-                            price = price.trim(),
-                            batchComment = batchComment.trim()
+                            price = price,
+                            batchComment = batchComment
                         )
+                        onGenerate(config)
+                        onDismiss()
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("confirm_generate_batch_button")
+                ) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "توليد وحفظ ($batchCount كرت) في الراوتر فوراً",
+                        fontWeight = FontWeight.Bold
                     )
-                    onDismiss()
-                },
-                modifier = Modifier.testTag("submit_generate_batch_btn")
-            ) {
-                Text("توليد $count كرت الآن")
+                }
+            } else {
+                Button(
+                    onClick = {
+                        if (singleCode.isNotBlank()) {
+                            val card = HotspotCard(
+                                id = "card_${System.currentTimeMillis()}",
+                                name = singleCode.trim(),
+                                password = if (isSingleCode) singleCode.trim() else singlePassword.trim(),
+                                profile = selectedProfile,
+                                uptime = "0s",
+                                bytesIn = 0,
+                                bytesOut = 0,
+                                limitUptime = timeLimit,
+                                limitBytesTotal = if (dataLimitMB > 0) dataLimitMB * 1024 * 1024L else 0L,
+                                comment = singleComment.ifBlank { "كرت فردي" },
+                                disabled = false,
+                                price = price
+                            )
+                            onAddSingleCard?.invoke(card)
+                            onDismiss()
+                        }
+                    },
+                    enabled = singleCode.isNotBlank(),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("confirm_add_single_card_button")
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "إضافة وتفعيل الكرت الفردي في الراوتر",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         },
         dismissButton = {
-            OutlinedButton(onClick = onDismiss) {
+            OutlinedButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Text("إلغاء")
             }
         }

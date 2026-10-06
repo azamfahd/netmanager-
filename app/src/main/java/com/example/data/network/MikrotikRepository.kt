@@ -54,6 +54,15 @@ class MikrotikRepository {
     private val _ipBindings = MutableStateFlow<List<IpBinding>>(emptyList())
     val ipBindings: StateFlow<List<IpBinding>> = _ipBindings.asStateFlow()
 
+    private val _networkNodes = MutableStateFlow<List<com.example.data.model.NetworkNode>>(emptyList())
+    val networkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = _networkNodes.asStateFlow()
+
+    private val _userSessions = MutableStateFlow<List<com.example.data.model.UserSessionRecord>>(emptyList())
+    val userSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = _userSessions.asStateFlow()
+
+    private val _activityEvents = MutableStateFlow<List<com.example.data.model.UserActivityEvent>>(emptyList())
+    val activityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = _activityEvents.asStateFlow()
+
     init {
         // Initialize default realistic profiles
         _profiles.value = listOf(
@@ -93,6 +102,369 @@ class MikrotikRepository {
         _ipBindings.value = listOf(
             IpBinding("b1", "E8:48:B8:11:22:33", "192.168.88.250", "bypassed", "كاميرا المراقبة الرئيسية"),
             IpBinding("b2", "40:B0:76:44:55:66", "192.168.88.251", "bypassed", "سيرفر المحاسبة")
+        )
+
+        // Initialize realistic Network Nodes & Access Points with rich telemetry & connected active clients
+        _networkNodes.value = listOf(
+            com.example.data.model.NetworkNode(
+                id = "node_ap_main",
+                name = "أكسس بوينت البرج 1 (الرئيسي)",
+                ipAddress = "192.168.88.2",
+                macAddress = "D4:CA:6D:AA:11:01",
+                interfaceName = "ether2",
+                model = "MikroTik NetMetal 5 / Omni",
+                role = "برج إرسال رئيسي (Omni)",
+                isOnline = true,
+                pingMs = 2L,
+                connectedUsers = 18,
+                uptime = "5d 14h",
+                rxSpeedKbps = 8400.0,
+                txSpeedKbps = 3200.0,
+                totalBytesConsumed = 45_200_000_000L,
+                signalDbm = "-54 dBm",
+                location = "برج الإرسال المركزي",
+                cpuLoadPercent = 38,
+                memoryUsagePercent = 42,
+                temperature = "44°C",
+                voltage = "24.1 V",
+                frequency = "5 GHz (5200 MHz)",
+                channelWidth = "20/40/80 MHz",
+                ssid = "YemenNet_Tower_AP1",
+                connectedClients = listOf(
+                    com.example.data.model.NodeConnectedClient(
+                        id = "nc_1", cardName = "784912", ipAddress = "192.168.88.210", macAddress = "D4:6A:A8:12:34:56",
+                        signalDbm = "-52 dBm", ccqRate = "99%", rxRateMbps = 120.0, txRateMbps = 86.0, uptime = "2h 15m",
+                        bytesUsed = 765 * 1024 * 1024L,
+                        deviceInfo = com.example.data.util.DeviceDetector.detectDevice("D4:6A:A8:12:34:56", "Galaxy S23 Ultra", "784912")
+                    ),
+                    com.example.data.model.NodeConnectedClient(
+                        id = "nc_2", cardName = "319405", ipAddress = "192.168.88.145", macAddress = "BC:D1:D3:55:66:77",
+                        signalDbm = "-58 dBm", ccqRate = "95%", rxRateMbps = 72.0, txRateMbps = 54.0, uptime = "4h 10m",
+                        bytesUsed = 1250 * 1024 * 1024L,
+                        deviceInfo = com.example.data.util.DeviceDetector.detectDevice("BC:D1:D3:55:66:77", "iPhone 15 Pro", "319405")
+                    ),
+                    com.example.data.model.NodeConnectedClient(
+                        id = "nc_3", cardName = "901824", ipAddress = "192.168.88.188", macAddress = "00:E0:4C:88:99:AA",
+                        signalDbm = "-61 dBm", ccqRate = "92%", rxRateMbps = 54.0, txRateMbps = 36.0, uptime = "1h 05m",
+                        bytesUsed = 430 * 1024 * 1024L,
+                        deviceInfo = com.example.data.util.DeviceDetector.detectDevice("00:E0:4C:88:99:AA", "Redmi Note 12", "901824")
+                    )
+                )
+            ),
+            com.example.data.model.NetworkNode(
+                id = "node_ap_east",
+                name = "أكسس بوينت الحارة الشرقية",
+                ipAddress = "192.168.88.3",
+                macAddress = "D4:CA:6D:BB:22:02",
+                interfaceName = "ether3",
+                model = "MikroTik cAP ac",
+                role = "أكسس بوينت بث (AP)",
+                isOnline = true,
+                pingMs = 3L,
+                connectedUsers = 11,
+                uptime = "3d 21h",
+                rxSpeedKbps = 5200.0,
+                txSpeedKbps = 2100.0,
+                totalBytesConsumed = 28_100_000_000L,
+                signalDbm = "-62 dBm",
+                location = "المربع الشرقي",
+                cpuLoadPercent = 24,
+                memoryUsagePercent = 32,
+                temperature = "41°C",
+                voltage = "23.8 V",
+                frequency = "2.4 GHz (Channel 6)",
+                channelWidth = "20/40 MHz",
+                ssid = "YemenNet_East_AP",
+                connectedClients = listOf(
+                    com.example.data.model.NodeConnectedClient(
+                        id = "nc_4", cardName = "551209", ipAddress = "192.168.88.132", macAddress = "18:82:A8:77:88:99",
+                        signalDbm = "-59 dBm", ccqRate = "96%", rxRateMbps = 65.0, txRateMbps = 45.0, uptime = "3h 40m",
+                        bytesUsed = 890 * 1024 * 1024L,
+                        deviceInfo = com.example.data.util.DeviceDetector.detectDevice("18:82:A8:77:88:99", "Dell XPS 15", "551209")
+                    )
+                )
+            ),
+            com.example.data.model.NetworkNode(
+                id = "node_starlink",
+                name = "سيرفر Starlink الرئيسي (WAN)",
+                ipAddress = "192.168.1.1",
+                macAddress = "94:10:3E:11:22:33",
+                interfaceName = "ether1-WAN",
+                model = "Starlink Terminal Gen 3",
+                role = "مصدر الإنترنت (Starlink)",
+                isOnline = true,
+                pingMs = 24L,
+                connectedUsers = 4,
+                uptime = "12d 8h",
+                rxSpeedKbps = 24500.0,
+                txSpeedKbps = 6800.0,
+                totalBytesConsumed = 180_000_000_000L,
+                signalDbm = "-48 dBm",
+                location = "السطح الرئيسي",
+                cpuLoadPercent = 15,
+                memoryUsagePercent = 28,
+                temperature = "39°C",
+                voltage = "48.0 V",
+                frequency = "Gigabit Ethernet",
+                channelWidth = "Full Duplex",
+                ssid = "Starlink_Bridge",
+                connectedClients = emptyList()
+            ),
+            com.example.data.model.NetworkNode(
+                id = "node_ap_west",
+                name = "نقطة البث الغربية (القطاع 2)",
+                ipAddress = "192.168.88.4",
+                macAddress = "D4:CA:6D:CC:33:03",
+                interfaceName = "ether4",
+                model = "MikroTik BaseBox 2",
+                role = "أكسس بوينت قطاعي (Sector)",
+                isOnline = true,
+                pingMs = 4L,
+                connectedUsers = 8,
+                uptime = "2d 06h",
+                rxSpeedKbps = 3800.0,
+                txSpeedKbps = 1400.0,
+                totalBytesConsumed = 19_400_000_000L,
+                signalDbm = "-66 dBm",
+                location = "المربع الغربي",
+                cpuLoadPercent = 55,
+                memoryUsagePercent = 60,
+                temperature = "48°C",
+                voltage = "23.5 V",
+                frequency = "5 GHz (5180 MHz)",
+                channelWidth = "20/40 MHz",
+                ssid = "YemenNet_Sector2",
+                connectedClients = emptyList()
+            ),
+            com.example.data.model.NetworkNode(
+                id = "node_ap_north",
+                name = "موجه الفرع الشمالي (مكرر إشارة)",
+                ipAddress = "192.168.88.5",
+                macAddress = "D4:CA:6D:DD:44:04",
+                interfaceName = "wlan1-bridge",
+                model = "MikroTik SXTsq 5",
+                role = "ربط لاسلكي (Point to Point)",
+                isOnline = true,
+                pingMs = 5L,
+                connectedUsers = 6,
+                uptime = "1d 18h",
+                rxSpeedKbps = 2600.0,
+                txSpeedKbps = 900.0,
+                totalBytesConsumed = 12_800_000_000L,
+                signalDbm = "-59 dBm",
+                location = "الفرع الشمالي",
+                cpuLoadPercent = 18,
+                memoryUsagePercent = 25,
+                temperature = "40°C",
+                voltage = "24.0 V",
+                frequency = "5 GHz (5745 MHz)",
+                channelWidth = "40 MHz",
+                ssid = "PTP_North_Link",
+                connectedClients = emptyList()
+            )
+        )
+
+        // Initialize detailed user session logs (Active + Inactive/Disconnected)
+        _userSessions.value = listOf(
+            com.example.data.model.UserSessionRecord(
+                id = "sess_1",
+                username = "784912",
+                ipAddress = "192.168.88.210",
+                macAddress = "D4:6A:A8:12:34:56",
+                isOnline = true,
+                loginTime = "اليوم 10:15 ص",
+                logoutTime = "متصل الآن (جلسة نشطة)",
+                duration = "2h 15m",
+                bytesIn = 145 * 1024 * 1024L,
+                bytesOut = 620 * 1024 * 1024L,
+                totalBytes = (145 + 620) * 1024 * 1024L,
+                terminateReason = "جلسة نشطة حالياً",
+                profile = "فئة 500 (يومي 2.5GB)",
+                price = "500 ر.ي",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("D4:6A:A8:12:34:56", "Galaxy S23 Ultra", "784912"),
+                comment = "مستخدم متصل - برج 1"
+            ),
+            com.example.data.model.UserSessionRecord(
+                id = "sess_2",
+                username = "319405",
+                ipAddress = "192.168.88.145",
+                macAddress = "BC:D1:D3:55:66:77",
+                isOnline = true,
+                loginTime = "اليوم 11:48 ص",
+                logoutTime = "متصل الآن (جلسة نشطة)",
+                duration = "42m",
+                bytesIn = 35 * 1024 * 1024L,
+                bytesOut = 280 * 1024 * 1024L,
+                totalBytes = (35 + 280) * 1024 * 1024L,
+                terminateReason = "جلسة نشطة حالياً",
+                profile = "فئة 200 (ساعتان 500MB)",
+                price = "200 ر.ي",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("BC:D1:D3:55:66:77", "iPhone 14 Pro", "319405"),
+                comment = "مستخدم متصل - أكسس بوينت شرق"
+            ),
+            com.example.data.model.UserSessionRecord(
+                id = "sess_3",
+                username = "849201",
+                ipAddress = "192.168.88.199",
+                macAddress = "70:85:C2:88:99:AA",
+                isOnline = true,
+                loginTime = "أمس 08:30 ص",
+                logoutTime = "متصل الآن (جلسة نشطة)",
+                duration = "1d 4h",
+                bytesIn = 420 * 1024 * 1024L,
+                bytesOut = 2450 * 1024 * 1024L,
+                totalBytes = (420 + 2450) * 1024 * 1024L,
+                terminateReason = "جلسة نشطة حالياً",
+                profile = "فئة 2000 (أسبوعي VIP)",
+                price = "2000 ر.ي",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("70:85:C2:88:99:AA", "Dell XPS 15 Laptop", "849201"),
+                comment = "مستخدم دائم VIP"
+            ),
+            com.example.data.model.UserSessionRecord(
+                id = "sess_4",
+                username = "651829",
+                ipAddress = "192.168.88.172",
+                macAddress = "38:F9:D3:BB:CC:DD",
+                isOnline = true,
+                loginTime = "اليوم 07:20 ص",
+                logoutTime = "متصل الآن (جلسة نشطة)",
+                duration = "5h 10m",
+                bytesIn = 80 * 1024 * 1024L,
+                bytesOut = 890 * 1024 * 1024L,
+                totalBytes = (80 + 890) * 1024 * 1024L,
+                terminateReason = "جلسة نشطة حالياً",
+                profile = "فئة 500 (يومي 2.5GB)",
+                price = "500 ر.ي",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("38:F9:D3:BB:CC:DD", "Xiaomi Redmi Note 12", "651829"),
+                comment = "مستخدم متصل - نقطة الغرب"
+            ),
+            // Disconnected / Inactive Sessions (users who used the card or part of it)
+            com.example.data.model.UserSessionRecord(
+                id = "sess_disc_1",
+                username = "390124",
+                ipAddress = "192.168.88.160",
+                macAddress = "00:EC:0A:99:AA:BB",
+                isOnline = false,
+                loginTime = "اليوم 09:10 ص",
+                logoutTime = "اليوم 10:10 ص",
+                duration = "1h 00m",
+                bytesIn = 95 * 1024 * 1024L,
+                bytesOut = 415 * 1024 * 1024L,
+                totalBytes = 510 * 1024 * 1024L,
+                terminateReason = "انتهاء وقت الباقة المحدد (1 ساعة)",
+                profile = "فئة 200 (ساعتان 500MB)",
+                price = "200 ر.ي",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("00:EC:0A:99:AA:BB", "Infinix Hot 30", "390124"),
+                comment = "كرت منتهي - مستخدم غير متصل"
+            ),
+            com.example.data.model.UserSessionRecord(
+                id = "sess_disc_2",
+                username = "481029",
+                ipAddress = "192.168.88.163",
+                macAddress = "A4:99:9B:44:55:66",
+                isOnline = false,
+                loginTime = "أمس 18:20 م",
+                logoutTime = "أمس 22:45 م",
+                duration = "4h 25m",
+                bytesIn = 110 * 1024 * 1024L,
+                bytesOut = 1240 * 1024 * 1024L,
+                totalBytes = 1350 * 1024 * 1024L,
+                terminateReason = "تسجيل خروج يدوي من المستخدم (رصيد متبقي 700MB)",
+                profile = "فئة 500 (يومي 2.5GB)",
+                price = "500 ر.ي",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("A4:99:9B:44:55:66", "Huawei Nova 11", "481029"),
+                comment = "كرت مستخدم جزئياً - رصيد صالح"
+            ),
+            com.example.data.model.UserSessionRecord(
+                id = "sess_disc_3",
+                username = "950281",
+                ipAddress = "192.168.88.188",
+                macAddress = "24:4B:FE:77:88:99",
+                isOnline = false,
+                loginTime = "أمس 14:00 م",
+                logoutTime = "أمس 19:30 م",
+                duration = "5h 30m",
+                bytesIn = 230 * 1024 * 1024L,
+                bytesOut = 2330 * 1024 * 1024L,
+                totalBytes = 2560 * 1024 * 1024L,
+                terminateReason = "استهلاك كامل حجم البيانات (2.5 GB)",
+                profile = "فئة 500 (يومي 2.5GB)",
+                price = "500 ر.ي",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("24:4B:FE:77:88:99", "Realme 11 Pro", "950281"),
+                comment = "كرت منتهي الاستهلاك"
+            ),
+            com.example.data.model.UserSessionRecord(
+                id = "sess_disc_4",
+                username = "172948",
+                ipAddress = "192.168.88.155",
+                macAddress = "B4:2E:99:11:00:22",
+                isOnline = false,
+                loginTime = "قبل يومين 16:00",
+                logoutTime = "قبل يومين 18:30",
+                duration = "2h 30m",
+                bytesIn = 65 * 1024 * 1024L,
+                bytesOut = 540 * 1024 * 1024L,
+                totalBytes = 605 * 1024 * 1024L,
+                terminateReason = "انقطاع إشارة الواي فاي / خروج من التغطية",
+                profile = "فئة 300 (6 ساعات 1GB)",
+                price = "300 ر.ي",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("B4:2E:99:11:00:22", "HP Laptop Windows 11", "172948"),
+                comment = "كرت مستخدم جزئياً"
+            )
+        )
+
+        // Activity Events Log
+        _activityEvents.value = listOf(
+            com.example.data.model.UserActivityEvent(
+                id = "evt_1",
+                username = "319405",
+                eventType = "تسجيل دخول",
+                timestamp = "اليوم 11:48 ص",
+                details = "تسجيل دخول ناجح عبر HTTP-CHAP (باقة 200 ر.ي)",
+                ipAddress = "192.168.88.145",
+                macAddress = "BC:D1:D3:55:66:77",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("BC:D1:D3:55:66:77", "iPhone 14 Pro", "319405")
+            ),
+            com.example.data.model.UserActivityEvent(
+                id = "evt_2",
+                username = "784912",
+                eventType = "تسجيل دخول",
+                timestamp = "اليوم 10:15 ص",
+                details = "تسجيل دخول ناجح (باقة 500 ر.ي - يوم كامل)",
+                ipAddress = "192.168.88.210",
+                macAddress = "D4:6A:A8:12:34:56",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("D4:6A:A8:12:34:56", "Galaxy S23 Ultra", "784912")
+            ),
+            com.example.data.model.UserActivityEvent(
+                id = "evt_3",
+                username = "390124",
+                eventType = "تسجيل خروج",
+                timestamp = "اليوم 10:10 ص",
+                details = "انتهاء مدة الجلسة المحددة (1 ساعة) واستهلاك 510MB",
+                ipAddress = "192.168.88.160",
+                macAddress = "00:EC:0A:99:AA:BB",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("00:EC:0A:99:AA:BB", "Infinix Hot 30", "390124")
+            ),
+            com.example.data.model.UserActivityEvent(
+                id = "evt_4",
+                username = "651829",
+                eventType = "تسجيل دخول",
+                timestamp = "اليوم 07:20 ص",
+                details = "تسجيل دخول نشط عبر البرج الغربي",
+                ipAddress = "192.168.88.172",
+                macAddress = "38:F9:D3:BB:CC:DD",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("38:F9:D3:BB:CC:DD", "Xiaomi Redmi Note 12", "651829")
+            ),
+            com.example.data.model.UserActivityEvent(
+                id = "evt_5",
+                username = "481029",
+                eventType = "تسجيل خروج",
+                timestamp = "أمس 22:45 م",
+                details = "تسجيل خروج من المستخدم، رصيد متبقي 700MB",
+                ipAddress = "192.168.88.163",
+                macAddress = "A4:99:9B:44:55:66",
+                deviceInfo = com.example.data.util.DeviceDetector.detectDevice("A4:99:9B:44:55:66", "Huawei Nova 11", "481029")
+            )
         )
     }
 
@@ -452,6 +824,78 @@ class MikrotikRepository {
         }
     }
 
+    suspend fun reactivateCard(cardId: String): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            val config = activeConfig
+            if (config != null && !config.isDemoMode) {
+                try {
+                    val protocol = if (config.useHttps) "https" else "http"
+                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                    val credential = Credentials.basic(config.username, config.password)
+                    val jsonBody = JSONObject().apply {
+                        put("disabled", "false")
+                        put("uptime", "0s")
+                        put("bytes-in", "0")
+                        put("bytes-out", "0")
+                    }
+                    val req = Request.Builder()
+                        .url("$baseUrl/rest/ip/hotspot/user/$cardId")
+                        .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+                        .header("Authorization", credential)
+                        .build()
+                    httpClient.newCall(req).execute()
+                } catch (_: Exception) {}
+            }
+            // Update in local state
+            _cards.value = _cards.value.map {
+                if (it.id == cardId) {
+                    it.copy(
+                        bytesIn = 0L,
+                        bytesOut = 0L,
+                        uptime = "0s",
+                        disabled = false
+                    )
+                } else it
+            }
+            Result.success(true)
+        }
+    }
+
+    suspend fun updateCard(updatedCard: HotspotCard): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            val config = activeConfig
+            if (config != null && !config.isDemoMode) {
+                try {
+                    val protocol = if (config.useHttps) "https" else "http"
+                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                    val credential = Credentials.basic(config.username, config.password)
+                    val jsonBody = JSONObject().apply {
+                        put("name", updatedCard.name)
+                        put("password", updatedCard.password)
+                        put("profile", updatedCard.profile)
+                        put("comment", updatedCard.comment)
+                        if (updatedCard.limitUptime.isNotBlank()) {
+                            put("limit-uptime", updatedCard.limitUptime)
+                        }
+                        if (updatedCard.limitBytesTotal > 0) {
+                            put("limit-bytes-total", updatedCard.limitBytesTotal.toString())
+                        }
+                    }
+                    val req = Request.Builder()
+                        .url("$baseUrl/rest/ip/hotspot/user/${updatedCard.id}")
+                        .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+                        .header("Authorization", credential)
+                        .build()
+                    httpClient.newCall(req).execute()
+                } catch (_: Exception) {}
+            }
+            _cards.value = _cards.value.map {
+                if (it.id == updatedCard.id) updatedCard else it
+            }
+            Result.success(true)
+        }
+    }
+
     suspend fun toggleCardDisabled(cardId: String, currentDisabled: Boolean): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             val newStatus = !currentDisabled
@@ -589,6 +1033,52 @@ class MikrotikRepository {
         }
     }
 
+    suspend fun addSingleCard(card: HotspotCard): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            val routerConfig = activeConfig
+            if (routerConfig != null && !routerConfig.isDemoMode) {
+                if (isApiSocketMode) {
+                    val socketRes = routerOsApiClient.addCard(card)
+                    if (!socketRes.isSuccess) {
+                        return@withContext socketRes
+                    }
+                } else {
+                    try {
+                        val protocol = if (routerConfig.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${routerConfig.ipAddress}:${routerConfig.port}"
+                        val credential = Credentials.basic(routerConfig.username, routerConfig.password)
+
+                        val jsonBody = JSONObject().apply {
+                            put("name", card.name)
+                            put("password", card.password)
+                            put("profile", card.profile)
+                            if (card.limitUptime.isNotBlank()) put("limit-uptime", card.limitUptime)
+                            if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal)
+                            put("comment", card.comment)
+                        }.toString()
+
+                        val putReq = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user")
+                            .put(jsonBody.toRequestBody("application/json".toMediaType()))
+                            .header("Authorization", credential)
+                            .build()
+                        val resp = httpClient.newCall(putReq).execute()
+                        if (!resp.isSuccessful) {
+                            return@withContext Result.failure(Exception("استجاب الراوتر برمز خطأ ${resp.code}"))
+                        }
+                    } catch (e: Exception) {
+                        return@withContext Result.failure(e)
+                    }
+                }
+            }
+
+            val currentList = _cards.value.toMutableList()
+            currentList.add(0, card)
+            _cards.value = currentList
+            Result.success(true)
+        }
+    }
+
     suspend fun createProfile(profile: HotspotProfile): Result<Boolean> {
         val config = activeConfig
         if (config != null && !config.isDemoMode) {
@@ -621,6 +1111,38 @@ class MikrotikRepository {
         current.add(profile)
         _profiles.value = current
         return Result.success(true)
+    }
+
+    suspend fun addNetworkNode(node: com.example.data.model.NetworkNode): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            val list = _networkNodes.value.toMutableList()
+            list.add(0, node)
+            _networkNodes.value = list
+            Result.success(true)
+        }
+    }
+
+    suspend fun deleteNetworkNode(nodeId: String): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            _networkNodes.value = _networkNodes.value.filter { it.id != nodeId }
+            Result.success(true)
+        }
+    }
+
+    suspend fun pingNetworkNode(nodeId: String): Pair<Boolean, Long> {
+        return withContext(Dispatchers.IO) {
+            val node = _networkNodes.value.firstOrNull { it.id == nodeId }
+            if (node != null) {
+                val (reachable, ms) = NetworkUtils.pingHost(node.ipAddress, timeoutMs = 1500)
+                val effectiveMs = if (reachable && ms > 0) ms else if (reachable) 3L else -1L
+                _networkNodes.value = _networkNodes.value.map {
+                    if (it.id == nodeId) it.copy(isOnline = reachable, pingMs = if (reachable) effectiveMs else 0L) else it
+                }
+                Pair(reachable, effectiveMs)
+            } else {
+                Pair(false, -1L)
+            }
+        }
     }
 
     suspend fun rebootRouter(): Result<Boolean> {

@@ -1,57 +1,121 @@
 package com.example.ui.screens
 
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ConfirmationNumber
-import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.FormatSize
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.ViewModule
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.HotspotCard
-import com.example.data.network.NetworkUtils
 import com.example.ui.theme.NetworkCyan
 import com.example.ui.theme.RouterBlue
+import com.example.ui.theme.RouterBlueDark
+import com.example.ui.theme.StatusActiveGreen
+import com.example.ui.util.CardDesignConfig
+import com.example.ui.util.CardTemplateType
+import com.example.ui.util.VoucherPrintUtils
+import kotlinx.coroutines.launch
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,6 +125,62 @@ fun VoucherPrintScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    // Design Customization State matching the uploaded image
+    var offsetX by remember { mutableFloatStateOf(0f) } // horizontal offset in px/dp
+    var offsetY by remember { mutableFloatStateOf(0f) } // vertical offset in px/dp
+    var fontSizeSp by remember { mutableFloatStateOf(15f) } // font size in px/sp
+    var cardHeightMm by remember { mutableFloatStateOf(15f) } // height mm
+    var cardWidthMm by remember { mutableFloatStateOf(50f) } // width mm
+
+    var columns by remember { mutableIntStateOf(4) } // عدد الكروت بالعرض
+    var rows by remember { mutableIntStateOf(15) } // عدد الكروت بالطول
+
+    var templateType by remember { mutableStateOf(CardTemplateType.SCOUD_BLUE) }
+    var customImageUri by remember { mutableStateOf<Uri?>(null) }
+    var networkName by remember { mutableStateOf("سكود نت") }
+    var contactPhone by remember { mutableStateOf("777000111") }
+
+    // Pagination
+    var currentPageIndex by remember { mutableIntStateOf(0) }
+    val cardsPerPage = max(1, columns * rows)
+    val totalPages = max(1, (cards.size + cardsPerPage - 1) / cardsPerPage)
+
+    // Ensure currentPageIndex is valid
+    val safePageIndex = min(currentPageIndex, totalPages - 1)
+
+    // Photo picker for custom card template
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            customImageUri = uri
+            templateType = CardTemplateType.CUSTOM_IMAGE
+            Toast.makeText(context, "تم اختيار صورة تصميم الكرت بنجاح", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val currentConfig = CardDesignConfig(
+        templateType = templateType,
+        customImageUri = customImageUri,
+        networkName = networkName,
+        contactPhone = contactPhone,
+        offsetXPercent = offsetX / 100f,
+        offsetYPercent = offsetY / 50f,
+        fontSizeSp = fontSizeSp,
+        columns = columns,
+        rows = rows,
+        cardWidthMm = cardWidthMm,
+        cardHeightMm = cardHeightMm
+    )
+
+    // Get cards for current page
+    val startIndex = safePageIndex * cardsPerPage
+    val pageCards = cards.drop(startIndex).take(cardsPerPage)
+
+    // Mobile tabs (Preview vs Customization controls)
+    var mobileTab by remember { mutableIntStateOf(0) } // 0: Preview Sheet, 1: Design Controls
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -69,12 +189,12 @@ fun VoucherPrintScreen(
                 title = {
                     Column {
                         Text(
-                            text = "معاينة وطباعة الكروت",
+                            text = "معاينة وتصميم طباعة الكروت",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "${cards.size} كرت جاهز للطباعة والتوزيع",
+                            text = "${cards.size} كرت | صفحة ${safePageIndex + 1} من $totalPages (${cardsPerPage} كرت/صفحة)",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -89,32 +209,68 @@ fun VoucherPrintScreen(
                     }
                 },
                 actions = {
-                    Button(
+                    // Export PDF Button
+                    IconButton(
                         onClick = {
-                            val shareText = buildString {
-                                appendLine("=== كروت شبكة نت مانجر ميكروتك ===")
-                                cards.take(50).forEachIndexed { index, card ->
-                                    appendLine("${index + 1}) كود: ${card.name} | السعر: ${card.price} | الباقة: ${card.profile}")
+                            Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
+                            VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
+                                if (file != null) {
+                                    VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
+                                } else {
+                                    Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
                                 }
                             }
-                            val intent = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, shareText)
-                            }
-                            context.startActivity(Intent.createChooser(intent, "مشاركة قائمة الكروت"))
                         },
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .padding(end = 8.dp)
-                            .testTag("share_cards_btn")
+                        modifier = Modifier.testTag("export_pdf_top_btn")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Share,
+                            imageVector = Icons.Default.PictureAsPdf,
+                            contentDescription = "تصدير كـ PDF",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+
+                    // Export Image Button
+                    IconButton(
+                        onClick = {
+                            Toast.makeText(context, "جاري تصدير الصفحة الحالية كصورة...", Toast.LENGTH_SHORT).show()
+                            VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
+                                if (file != null) {
+                                    VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
+                                } else {
+                                    Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.testTag("export_img_top_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Image,
+                            contentDescription = "تصدير كصورة",
+                            tint = RouterBlue
+                        )
+                    }
+
+                    // Print Button
+                    Button(
+                        onClick = {
+                            VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = RouterBlue
+                        ),
+                        modifier = Modifier
+                            .padding(end = 8.dp)
+                            .testTag("direct_print_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Print,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("مشاركة الكروت")
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("طباعة", fontWeight = FontWeight.Bold)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -123,133 +279,900 @@ fun VoucherPrintScreen(
             )
         }
     ) { innerPadding ->
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            items(cards, key = { it.id }) { card ->
-                PrintableVoucherCard(card = card)
+            val isWideScreen = maxWidth >= 800.dp
+
+            if (isWideScreen) {
+                // Wide Screen: Dual Pane (Left Sheet Preview, Right Control Panel matching image)
+                Row(modifier = Modifier.fillMaxSize()) {
+                    // Left 65%: Sheet Preview & Pagination
+                    Box(
+                        modifier = Modifier
+                            .weight(0.68f)
+                            .fillMaxHeight()
+                            .background(Color(0xFFF0F4F8))
+                            .padding(16.dp),
+                        contentAlignment = Alignment.TopCenter
+                    ) {
+                        SheetPreviewArea(
+                            pageCards = pageCards,
+                            columns = columns,
+                            rows = rows,
+                            offsetX = offsetX,
+                            offsetY = offsetY,
+                            fontSizeSp = fontSizeSp,
+                            templateType = templateType,
+                            customImageUri = customImageUri,
+                            networkName = networkName,
+                            contactPhone = contactPhone,
+                            safePageIndex = safePageIndex,
+                            totalPages = totalPages,
+                            onPrevPage = { if (safePageIndex > 0) currentPageIndex-- },
+                            onNextPage = { if (safePageIndex < totalPages - 1) currentPageIndex++ },
+                            context = context
+                        )
+                    }
+
+                    // Right 32%: Dark Blue Control Panel matching user's image exactly!
+                    Box(
+                        modifier = Modifier
+                            .weight(0.32f)
+                            .fillMaxHeight()
+                            .background(Color(0xFF0D253A))
+                    ) {
+                        CustomizationControlPanel(
+                            offsetX = offsetX,
+                            onOffsetXChange = { offsetX = it },
+                            offsetY = offsetY,
+                            onOffsetYChange = { offsetY = it },
+                            fontSizeSp = fontSizeSp,
+                            onFontSizeChange = { fontSizeSp = it },
+                            cardHeightMm = cardHeightMm,
+                            onCardHeightMmChange = { cardHeightMm = it },
+                            cardWidthMm = cardWidthMm,
+                            onCardWidthMmChange = { cardWidthMm = it },
+                            columns = columns,
+                            onColumnsChange = { columns = it },
+                            rows = rows,
+                            onRowsChange = { rows = it },
+                            cardsCount = cards.size,
+                            cardsPerPage = cardsPerPage,
+                            totalPages = totalPages,
+                            templateType = templateType,
+                            onTemplateTypeChange = { templateType = it },
+                            customImageUri = customImageUri,
+                            onSelectImageClick = {
+                                photoPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            },
+                            onClearCustomImage = {
+                                customImageUri = null
+                                templateType = CardTemplateType.SCOUD_BLUE
+                            },
+                            networkName = networkName,
+                            onNetworkNameChange = { networkName = it },
+                            contactPhone = contactPhone,
+                            onContactPhoneChange = { contactPhone = it },
+                            onPrintClick = {
+                                VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                            },
+                            onExportPdfClick = {
+                                Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
+                                VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
+                                    if (file != null) {
+                                        VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
+                                    } else {
+                                        Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            onExportImageClick = {
+                                Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
+                                VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
+                                    if (file != null) {
+                                        VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
+                                    } else {
+                                        Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            } else {
+                // Mobile Screen: Tabbed view for Sheet Preview & Control Panel
+                Column(modifier = Modifier.fillMaxSize()) {
+                    TabRow(
+                        selectedTabIndex = mobileTab,
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Tab(
+                            selected = mobileTab == 0,
+                            onClick = { mobileTab = 0 },
+                            text = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(Icons.Default.ViewModule, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Text("معاينة صفحة الكروت")
+                                }
+                            }
+                        )
+                        Tab(
+                            selected = mobileTab == 1,
+                            onClick = { mobileTab = 1 },
+                            text = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Text("أدوات التخصيص والتصميم")
+                                }
+                            }
+                        )
+                    }
+
+                    if (mobileTab == 0) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0xFFF0F4F8))
+                                .padding(8.dp)
+                        ) {
+                            SheetPreviewArea(
+                                pageCards = pageCards,
+                                columns = columns,
+                                rows = rows,
+                                offsetX = offsetX,
+                                offsetY = offsetY,
+                                fontSizeSp = fontSizeSp,
+                                templateType = templateType,
+                                customImageUri = customImageUri,
+                                networkName = networkName,
+                                contactPhone = contactPhone,
+                                safePageIndex = safePageIndex,
+                                totalPages = totalPages,
+                                onPrevPage = { if (safePageIndex > 0) currentPageIndex-- },
+                                onNextPage = { if (safePageIndex < totalPages - 1) currentPageIndex++ },
+                                context = context
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0xFF0D253A))
+                        ) {
+                            CustomizationControlPanel(
+                                offsetX = offsetX,
+                                onOffsetXChange = { offsetX = it },
+                                offsetY = offsetY,
+                                onOffsetYChange = { offsetY = it },
+                                fontSizeSp = fontSizeSp,
+                                onFontSizeChange = { fontSizeSp = it },
+                                cardHeightMm = cardHeightMm,
+                                onCardHeightMmChange = { cardHeightMm = it },
+                                cardWidthMm = cardWidthMm,
+                                onCardWidthMmChange = { cardWidthMm = it },
+                                columns = columns,
+                                onColumnsChange = { columns = it },
+                                rows = rows,
+                                onRowsChange = { rows = it },
+                                cardsCount = cards.size,
+                                cardsPerPage = cardsPerPage,
+                                totalPages = totalPages,
+                                templateType = templateType,
+                                onTemplateTypeChange = { templateType = it },
+                                customImageUri = customImageUri,
+                                onSelectImageClick = {
+                                    photoPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                onClearCustomImage = {
+                                    customImageUri = null
+                                    templateType = CardTemplateType.SCOUD_BLUE
+                                },
+                                networkName = networkName,
+                                onNetworkNameChange = { networkName = it },
+                                contactPhone = contactPhone,
+                                onContactPhoneChange = { contactPhone = it },
+                                onPrintClick = {
+                                    VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                                },
+                                onExportPdfClick = {
+                                    Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
+                                    VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
+                                        if (file != null) {
+                                            VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
+                                        } else {
+                                            Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                onExportImageClick = {
+                                    Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
+                                    VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
+                                        if (file != null) {
+                                            VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
+                                        } else {
+                                            Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
             }
         }
     }
 }
 
+/**
+ * The Printable Sheet Preview Component (Grid of vouchers on A4 white sheet)
+ */
 @Composable
-fun PrintableVoucherCard(card: HotspotCard) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant,
-                shape = RoundedCornerShape(12.dp)
-            ),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+fun SheetPreviewArea(
+    pageCards: List<HotspotCard>,
+    columns: Int,
+    rows: Int,
+    offsetX: Float,
+    offsetY: Float,
+    fontSizeSp: Float,
+    templateType: CardTemplateType,
+    customImageUri: Uri?,
+    networkName: String,
+    contactPhone: String,
+    safePageIndex: Int,
+    totalPages: Int,
+    onPrevPage: () -> Unit,
+    onNextPage: () -> Unit,
+    context: Context
+) {
+    val customBitmap = remember(customImageUri) {
+        VoucherPrintUtils.loadBitmapFromUri(context, customImageUri)
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Column(
-            modifier = Modifier.padding(10.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+        // Pagination & Navigation Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Header: Wi-Fi Icon & Network Title
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            OutlinedButton(
+                onClick = onPrevPage,
+                enabled = safePageIndex > 0,
+                shape = RoundedCornerShape(8.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.Wifi,
-                    contentDescription = null,
-                    tint = RouterBlue,
-                    modifier = Modifier.size(16.dp)
-                )
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "السابق")
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("الصفحة السابقة")
+            }
+
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color.White,
+                shadowElevation = 2.dp
+            ) {
                 Text(
-                    text = "شبكة نت مانجر",
-                    fontSize = 12.sp,
+                    text = "صفحة ${safePageIndex + 1} من $totalPages",
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Bold,
-                    color = RouterBlue
+                    color = RouterBlueDark
                 )
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // Card Code Box (Dashed / Prominent Monospace)
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth()
+            OutlinedButton(
+                onClick = onNextPage,
+                enabled = safePageIndex < totalPages - 1,
+                shape = RoundedCornerShape(8.dp)
             ) {
+                Text("الصفحة التالية")
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "التالي")
+            }
+        }
+
+        // A4 Paper Container with White Background & Border
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .shadow(6.dp, RoundedCornerShape(6.dp))
+                .background(Color.White, RoundedCornerShape(6.dp))
+                .border(1.dp, Color(0xFFD0DCE5), RoundedCornerShape(6.dp))
+                .padding(8.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                for (r in 0 until rows) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        for (c in 0 until columns) {
+                            val cardIndex = r * columns + c
+                            val card = pageCards.getOrNull(cardIndex)
+
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(42.dp)
+                                    .border(0.8.dp, Color(0xFFB0C4DE), RoundedCornerShape(3.dp))
+                                    .background(Color.White)
+                                    .padding(1.dp)
+                            ) {
+                                if (card != null) {
+                                    SingleCardRender(
+                                        card = card,
+                                        offsetX = offsetX,
+                                        offsetY = offsetY,
+                                        fontSizeSp = fontSizeSp,
+                                        templateType = templateType,
+                                        customBitmap = customBitmap,
+                                        networkName = networkName,
+                                        contactPhone = contactPhone
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Individual Voucher Card Rendering inside the Preview Grid
+ */
+@Composable
+fun SingleCardRender(
+    card: HotspotCard,
+    offsetX: Float,
+    offsetY: Float,
+    fontSizeSp: Float,
+    templateType: CardTemplateType,
+    customBitmap: Bitmap?,
+    networkName: String,
+    contactPhone: String
+) {
+    val priceNum = card.price.replace(Regex("[^0-9]"), "").ifEmpty { "500" }
+    val timeLimit = if (card.limitUptime.isNotBlank()) card.limitUptime else "20 ساعة"
+    val quotaMb = if (card.limitBytesTotal > 0) "${card.limitBytesTotal / (1024 * 1024)} ميجا" else "1024 ميجا"
+
+    val badgeColor = when (templateType) {
+        CardTemplateType.VIP_GOLD -> Color(0xFFD4A017)
+        CardTemplateType.EMERALD_GREEN -> Color(0xFF00897B)
+        else -> Color(0xFF0277BD)
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // If user uploaded a custom background image
+        if (customBitmap != null && templateType == CardTemplateType.CUSTOM_IMAGE) {
+            Image(
+                bitmap = customBitmap.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.FillBounds
+            )
+        } else {
+            // Default Scoud Net style template as shown in user's image
+            Row(modifier = Modifier.fillMaxSize()) {
+                // Left decorative rocket/wifi bar
+                Box(
+                    modifier = Modifier
+                        .width(3.dp)
+                        .fillMaxHeight()
+                        .background(badgeColor)
+                )
+
+                // Middle Content
                 Column(
-                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .padding(horizontal = 2.dp, vertical = 1.dp),
+                    verticalArrangement = Arrangement.SpaceBetween,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    // Header text: "20 ساعة . 1024 ميجا . 20 يوم"
                     Text(
-                        text = "رقم الكرت / PIN",
-                        fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                        text = "$timeLimit . $quotaMb",
+                        fontSize = 5.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF1E1E1E),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-                    Text(
-                        text = card.name,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontFamily = FontFamily.Monospace,
-                        letterSpacing = 2.sp,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                    if (card.password != card.name && card.password.isNotBlank()) {
+
+                    // Login Code with custom offsets & font size
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .offset {
+                                IntOffset(
+                                    x = (offsetX * 0.4f).roundToInt(),
+                                    y = (offsetY * 0.2f).roundToInt()
+                                )
+                            }
+                    ) {
                         Text(
-                            text = "كلمة السر: ${card.password}",
-                            fontSize = 11.sp,
+                            text = "رمز الدخول: ",
+                            fontSize = 5.sp,
+                            color = Color(0xFF0277BD),
+                            fontWeight = FontWeight.Normal
+                        )
+                        Text(
+                            text = card.name,
+                            fontSize = (fontSizeSp * 0.5f).sp,
+                            fontWeight = FontWeight.Black,
                             fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold
+                            color = Color(0xFF0D1B2A)
+                        )
+                    }
+
+                    // Footer text: Network name & phone
+                    Text(
+                        text = "$networkName  📞$contactPhone",
+                        fontSize = 4.5.sp,
+                        color = Color(0xFF555555),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // Right Price Badge (e.g., 500 ريال)
+                Box(
+                    modifier = Modifier
+                        .width(16.dp)
+                        .fillMaxHeight()
+                        .background(badgeColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = priceNum,
+                            fontSize = 6.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "ريال",
+                            fontSize = 4.sp,
+                            color = Color.White
                         )
                     }
                 }
             }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(6.dp))
+/**
+ * The Dark Blue Customization Control Panel (Identical in structure & styling to the user's uploaded image!)
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CustomizationControlPanel(
+    offsetX: Float,
+    onOffsetXChange: (Float) -> Unit,
+    offsetY: Float,
+    onOffsetYChange: (Float) -> Unit,
+    fontSizeSp: Float,
+    onFontSizeChange: (Float) -> Unit,
+    cardHeightMm: Float,
+    onCardHeightMmChange: (Float) -> Unit,
+    cardWidthMm: Float,
+    onCardWidthMmChange: (Float) -> Unit,
+    columns: Int,
+    onColumnsChange: (Int) -> Unit,
+    rows: Int,
+    onRowsChange: (Int) -> Unit,
+    cardsCount: Int,
+    cardsPerPage: Int,
+    totalPages: Int,
+    templateType: CardTemplateType,
+    onTemplateTypeChange: (CardTemplateType) -> Unit,
+    customImageUri: Uri?,
+    onSelectImageClick: () -> Unit,
+    onClearCustomImage: () -> Unit,
+    networkName: String,
+    onNetworkNameChange: (String) -> Unit,
+    contactPhone: String,
+    onContactPhoneChange: (String) -> Unit,
+    onPrintClick: () -> Unit,
+    onExportPdfClick: () -> Unit,
+    onExportImageClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(14.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // Section 1: تغيير حجم الخط و موقع رقم الكرت (Font & Code Position)
+        Text(
+            text = "تغيير حجم الخط و موقع رقم الكرت",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
 
-            // Details: Profile & Price
-            Text(
-                text = card.profile,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center
-            )
-
-            if (card.price.isNotBlank()) {
-                Text(
-                    text = card.price,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            // Decorative Barcode simulation
+        // افقياً Slider
+        Column {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(14.dp)
-                    .background(Color.Black.copy(alpha = 0.05f), RoundedCornerShape(2.dp)),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                repeat(12) { i ->
-                    Box(
-                        modifier = Modifier
-                            .width(if (i % 3 == 0) 3.dp else 1.5.dp)
-                            .height(10.dp)
-                            .background(Color.DarkGray.copy(alpha = 0.7f))
+                Text(text = "افقيا :", color = Color(0xFFB0BEC5), fontSize = 13.sp)
+                Text(text = "${offsetX.roundToInt()}px", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            Slider(
+                value = offsetX,
+                onValueChange = onOffsetXChange,
+                valueRange = -50f..100f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color(0xFF0288D1),
+                    inactiveTrackColor = Color(0xFF1E3A5F)
+                )
+            )
+        }
+
+        // عمودياً Slider
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(text = "عموديا :", color = Color(0xFFB0BEC5), fontSize = 13.sp)
+                Text(text = "${offsetY.roundToInt()}px", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            Slider(
+                value = offsetY,
+                onValueChange = onOffsetYChange,
+                valueRange = -30f..50f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color(0xFF0288D1),
+                    inactiveTrackColor = Color(0xFF1E3A5F)
+                )
+            )
+        }
+
+        // حجم الخط Slider
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(text = "حجم الخط :", color = Color(0xFFB0BEC5), fontSize = 13.sp)
+                Text(text = "${fontSizeSp.roundToInt()}px", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            Slider(
+                value = fontSizeSp,
+                onValueChange = onFontSizeChange,
+                valueRange = 10f..26f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color(0xFF0288D1),
+                    inactiveTrackColor = Color(0xFF1E3A5F)
+                )
+            )
+        }
+
+        HorizontalDivider(color = Color(0xFF1E3A5F), thickness = 1.dp)
+
+        // Section 2: تغيير حجم الكرت (Card Dimensions)
+        Text(
+            text = "تغيير حجم الكرت",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+
+        // الطول Slider
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(text = "الطول :", color = Color(0xFFB0BEC5), fontSize = 13.sp)
+                Text(text = "${cardHeightMm.roundToInt()}mm", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            Slider(
+                value = cardHeightMm,
+                onValueChange = onCardHeightMmChange,
+                valueRange = 10f..35f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color(0xFF0288D1),
+                    inactiveTrackColor = Color(0xFF1E3A5F)
+                )
+            )
+        }
+
+        // العرض Slider
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(text = "العرض :", color = Color(0xFFB0BEC5), fontSize = 13.sp)
+                Text(text = "${cardWidthMm.roundToInt()}mm", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            Slider(
+                value = cardWidthMm,
+                onValueChange = onCardWidthMmChange,
+                valueRange = 30f..80f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color(0xFF0288D1),
+                    inactiveTrackColor = Color(0xFF1E3A5F)
+                )
+            )
+        }
+
+        HorizontalDivider(color = Color(0xFF1E3A5F), thickness = 1.dp)
+
+        // Section 3: أو تحديد عدد الكروت (Grid Count / Sheet Layout)
+        Text(
+            text = "او تحديد عدد الكروت",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = "عدد الكروت بالعرض :", color = Color(0xFFB0BEC5), fontSize = 13.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { if (columns > 2) onColumnsChange(columns - 1) }) {
+                    Text("-", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                }
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = "$columns",
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
+                        color = Color.Black,
+                        fontWeight = FontWeight.Bold
                     )
                 }
+                IconButton(onClick = { if (columns < 6) onColumnsChange(columns + 1) }) {
+                    Text("+", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = "عدد الكروت بالطول :", color = Color(0xFFB0BEC5), fontSize = 13.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { if (rows > 5) onRowsChange(rows - 1) }) {
+                    Text("-", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                }
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = "$rows",
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
+                        color = Color.Black,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                IconButton(onClick = { if (rows < 25) onRowsChange(rows + 1) }) {
+                    Text("+", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        // Summary Text matching image
+        Text(
+            text = "عدد الكروت بالصفحة الواحدة هو : $cardsPerPage كرت تقريباً",
+            color = Color(0xFF81D4FA),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Text(
+            text = "و عدد الصفحات هو : $totalPages صفحة",
+            color = Color(0xFF81D4FA),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium
+        )
+
+        HorizontalDivider(color = Color(0xFF1E3A5F), thickness = 1.dp)
+
+        // Section 4: تصميم الكرت (Templates & Photo Picker)
+        Text(
+            text = "تصميم الكرت",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+
+        // Photo Picker Button
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = onSelectImageClick,
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.White,
+                    contentColor = Color.Black
+                ),
+                modifier = Modifier.testTag("pick_card_template_btn")
+            ) {
+                Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("اختيار الملف", fontWeight = FontWeight.Bold)
+            }
+
+            Text(
+                text = if (customImageUri != null) "تم اختيار صورة" else "لم يتم اختيار ملف",
+                color = Color(0xFFB0BEC5),
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f)
+            )
+
+            if (customImageUri != null) {
+                IconButton(onClick = onClearCustomImage) {
+                    Icon(Icons.Default.Close, contentDescription = "مسح الصورة", tint = Color.Red)
+                }
+            }
+        }
+
+        // Predefined Templates
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(
+                CardTemplateType.SCOUD_BLUE to "سكود نت (الأزرق)",
+                CardTemplateType.VIP_GOLD to "VIP الذهبي",
+                CardTemplateType.EMERALD_GREEN to "تيربو الأخضر"
+            ).forEach { (tType, label) ->
+                FilterChip(
+                    selected = templateType == tType,
+                    onClick = { onTemplateTypeChange(tType) },
+                    label = { Text(label, fontSize = 11.sp) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Color(0xFF0288D1),
+                        selectedLabelColor = Color.White,
+                        containerColor = Color(0xFF15334E),
+                        labelColor = Color(0xFFECEFF1)
+                    )
+                )
+            }
+        }
+
+        // Network Name & Contact Text Fields
+        OutlinedTextField(
+            value = networkName,
+            onValueChange = onNetworkNameChange,
+            label = { Text("اسم الشبكة في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
+            singleLine = true,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = Color(0xFF0288D1),
+                unfocusedBorderColor = Color(0xFF2E5370)
+            ),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = contactPhone,
+            onValueChange = onContactPhoneChange,
+            label = { Text("رقم التواصل في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
+            singleLine = true,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = Color(0xFF0288D1),
+                unfocusedBorderColor = Color(0xFF2E5370)
+            ),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Section 5: Big Action Buttons
+        Button(
+            onClick = onPrintClick,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .testTag("panel_print_btn"),
+            shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF0288D1)
+            )
+        ) {
+            Icon(Icons.Default.Print, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("طباعة", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = onExportPdfClick,
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = Color.White
+                ),
+                border = BorderStroke(1.dp, Color(0xFFE53935)),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("panel_export_pdf_btn")
+            ) {
+                Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = Color(0xFFE53935), modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("تصدير PDF", fontSize = 12.sp)
+            }
+
+            OutlinedButton(
+                onClick = onExportImageClick,
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = Color.White
+                ),
+                border = BorderStroke(1.dp, Color(0xFF0288D1)),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("panel_export_image_btn")
+            ) {
+                Icon(Icons.Default.Image, contentDescription = null, tint = Color(0xFF81D4FA), modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("تصدير كصورة", fontSize = 12.sp)
             }
         }
     }

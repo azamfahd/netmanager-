@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ConfirmationNumber
 import androidx.compose.material.icons.filled.Dashboard
@@ -70,7 +71,8 @@ import kotlinx.coroutines.flow.collectLatest
 
 enum class AppTab(val title: String, val icon: ImageVector) {
     DASHBOARD("الرئيسية", Icons.Default.Dashboard),
-    ACTIVE_USERS("المستخدمين", Icons.Default.Group),
+    ACTIVE_USERS("المتصلين", Icons.Default.Group),
+    NODES("النقاط", Icons.Default.CellTower),
     CARDS("الكروت", Icons.Default.ConfirmationNumber),
     PROFILES("الباقات", Icons.Default.Tune),
     TOOLS("الأدوات", Icons.Default.Build)
@@ -84,6 +86,7 @@ fun MainScreen(
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     val activeUsers by viewModel.activeUsers.collectAsStateWithLifecycle()
+    val networkNodes by viewModel.networkNodes.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val printableCards by viewModel.printableCards.collectAsStateWithLifecycle()
 
@@ -129,7 +132,8 @@ fun MainScreen(
                     Text(
                         text = when (currentTab) {
                             AppTab.DASHBOARD -> routerTitle
-                            AppTab.ACTIVE_USERS -> "المستخدمين النشطون ($routerIp)"
+                            AppTab.ACTIVE_USERS -> "المستخدمين المتصلين ($routerIp)"
+                            AppTab.NODES -> "نقاط وأبراج الشبكة (${networkNodes.size})"
                             AppTab.CARDS -> "إدارة كروت الشبكة"
                             AppTab.PROFILES -> "باقات السرعات والأسعار"
                             AppTab.TOOLS -> "أدوات فحص وتحكم الشبكة"
@@ -166,6 +170,12 @@ fun MainScreen(
                                 }) {
                                     Icon(tab.icon, contentDescription = tab.title)
                                 }
+                            } else if (tab == AppTab.NODES && networkNodes.isNotEmpty()) {
+                                BadgedBox(badge = {
+                                    Badge { Text("${networkNodes.count { it.isOnline }}") }
+                                }) {
+                                    Icon(tab.icon, contentDescription = tab.title)
+                                }
                             } else {
                                 Icon(tab.icon, contentDescription = tab.title)
                             }
@@ -173,7 +183,8 @@ fun MainScreen(
                         label = {
                             Text(
                                 text = tab.title,
-                                fontWeight = if (currentTab == tab) FontWeight.Bold else FontWeight.Normal
+                                fontWeight = if (currentTab == tab) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 11.sp
                             )
                         },
                         colors = NavigationBarItemDefaults.colors(
@@ -208,6 +219,12 @@ fun MainScreen(
                     modifier = Modifier.padding(innerPadding)
                 )
             }
+            AppTab.NODES -> {
+                NetworkNodesScreen(
+                    viewModel = viewModel,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
             AppTab.CARDS -> {
                 CardsScreen(
                     viewModel = viewModel,
@@ -237,6 +254,9 @@ fun MainScreen(
             onDismiss = { showBatchGeneratorDialog = false },
             onGenerate = { config ->
                 viewModel.generateBatch(config)
+            },
+            onAddSingleCard = { card ->
+                viewModel.addSingleCard(card)
             }
         )
     }
