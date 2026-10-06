@@ -59,7 +59,9 @@ jobs:
           fi
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace -Djava.awt.headless=true
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug --no-daemon --stacktrace -Djava.awt.headless=true 2>&1 | sed -e '/AWT-EventQueue-0/d' -e '/ksp\.com\.intellij/d'
 
       - name: Locate and Rename APK
         run: |

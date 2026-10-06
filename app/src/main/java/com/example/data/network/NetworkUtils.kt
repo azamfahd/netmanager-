@@ -35,16 +35,38 @@ object NetworkUtils {
             if (activeNetwork != null) {
                 val linkProperties = connectivityManager.getLinkProperties(activeNetwork)
                 if (linkProperties != null) {
+                    // Check routes for default gateway (destination 0.0.0.0/0 or destination with prefix 0)
                     for (route in linkProperties.routes) {
-                        val gateway = route.gateway
-                        if (gateway != null && !gateway.isAnyLocalAddress && gateway.hostAddress != null) {
-                            val host = gateway.hostAddress ?: ""
-                            if (host.contains(".") && host != "0.0.0.0") { // IPv4
-                                gatewayIp = host
+                        val gw = route.gateway?.hostAddress
+                        if (!gw.isNullOrBlank() && gw.contains(".") && gw != "0.0.0.0") {
+                            if (route.isDefaultRoute) {
+                                gatewayIp = gw
+                                break
+                            } else if (gatewayIp == null) {
+                                gatewayIp = gw
+                            }
+                        }
+                    }
+
+                    // Android 11+ (API 30+) DHCP Server address
+                    if (gatewayIp.isNullOrBlank() && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                        val dhcpServer = linkProperties.dhcpServerAddress?.hostAddress
+                        if (!dhcpServer.isNullOrBlank() && dhcpServer.contains(".") && dhcpServer != "0.0.0.0") {
+                            gatewayIp = dhcpServer
+                        }
+                    }
+
+                    // Local DNS server as router fallback
+                    if (gatewayIp.isNullOrBlank()) {
+                        for (dns in linkProperties.dnsServers) {
+                            val dnsHost = dns.hostAddress ?: ""
+                            if (dnsHost.startsWith("192.168.") || dnsHost.startsWith("10.") || dnsHost.startsWith("172.")) {
+                                gatewayIp = dnsHost
                                 break
                             }
                         }
                     }
+
                     for (linkAddress in linkProperties.linkAddresses) {
                         val addr = linkAddress.address
                         if (addr != null && !addr.isLoopbackAddress && addr.hostAddress != null) {
@@ -64,6 +86,9 @@ object NetworkUtils {
                 if (dhcpInfo != null) {
                     if (gatewayIp.isNullOrBlank() && dhcpInfo.gateway != 0) {
                         gatewayIp = intToIp(dhcpInfo.gateway)
+                    }
+                    if (gatewayIp.isNullOrBlank() && dhcpInfo.serverAddress != 0) {
+                        gatewayIp = intToIp(dhcpInfo.serverAddress)
                     }
                     if (deviceIp.isNullOrBlank() && dhcpInfo.ipAddress != 0) {
                         deviceIp = intToIp(dhcpInfo.ipAddress)
@@ -102,31 +127,38 @@ object NetworkUtils {
             val gateway = netInfo.gatewayIp ?: "192.168.88.1"
             val ssid = netInfo.wifiSsid ?: "الشبكة الحالية"
 
-            // Probe standard MikroTik ports
-            val portsToTest = listOf(80, 443, 8728, 8080)
-            var activePort = 80
+            // Target candidates to probe: detected gateway first, then standard 192.168.88.1 if gateway is different
+            val ipCandidates = if (gateway != "192.168.88.1") listOf(gateway, "192.168.88.1") else listOf(gateway)
+            val portsToTest = listOf(8728, 80, 443, 8080)
+
+            var resolvedIp = gateway
+            var activePort = 8728
             var isHttps = false
             var foundReachable = false
 
-            for (port in portsToTest) {
-                if (testSocketConnection(gateway, port, timeoutMs = 800)) {
-                    activePort = port
-                    isHttps = (port == 443)
-                    foundReachable = true
-                    break
+            for (targetIp in ipCandidates) {
+                for (port in portsToTest) {
+                    if (testSocketConnection(targetIp, port, timeoutMs = 600)) {
+                        resolvedIp = targetIp
+                        activePort = port
+                        isHttps = (port == 443)
+                        foundReachable = true
+                        break
+                    }
                 }
+                if (foundReachable) break
             }
 
             DiscoveredRouter(
-                ip = gateway,
+                ip = resolvedIp,
                 port = activePort,
                 isReachable = foundReachable,
                 useHttps = isHttps,
                 networkSsid = ssid,
                 statusMessage = if (foundReachable)
-                    "تم اكتشاف راوتر ميكروتك النشط على العنوان $gateway:$activePort"
+                    "تم اكتشاف راوتر ميكروتك النشط بنجاح على العنوان $resolvedIp:$activePort"
                 else
-                    "تم التعرف على عنوان بوابة الشبكة ($gateway) تلقائياً"
+                    "تم التعرف على عنوان بوابة الشبكة ($resolvedIp) تلقائياً من شبكتك المتصلة"
             )
         }
     }

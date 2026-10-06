@@ -147,6 +147,10 @@ class MainViewModel(
     }
 
     fun checkLocalNetwork(context: Context) {
+        refreshDiscovery(context, showToast = false)
+    }
+
+    fun refreshDiscovery(context: Context, showToast: Boolean = true) {
         viewModelScope.launch {
             _isDiscovering.value = true
             val info = NetworkUtils.getLocalNetworkInfo(context)
@@ -160,6 +164,9 @@ class MainViewModel(
                 useHttps = discovered.useHttps
             )
             _isDiscovering.value = false
+            if (showToast) {
+                _toastEvent.emit("تم تحديث الشبكة واكتشاف الراوتر: ${discovered.ip} (المنفذ ${discovered.port})")
+            }
         }
     }
 

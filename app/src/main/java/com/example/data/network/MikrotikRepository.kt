@@ -1,6 +1,5 @@
 package com.example.data.network
 
-import android.util.Base64
 import com.example.data.model.BatchGenerationConfig
 import com.example.data.model.CodeCharType
 import com.example.data.model.HotspotActiveUser
@@ -29,10 +28,13 @@ import kotlin.random.Random
 class MikrotikRepository {
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(6, TimeUnit.SECONDS)
-        .writeTimeout(6, TimeUnit.SECONDS)
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .writeTimeout(5, TimeUnit.SECONDS)
         .build()
+
+    private val routerOsApiClient = RouterOsApiClient()
+    private var isApiSocketMode = false
 
     private var activeConfig: RouterConnectionConfig? = null
 
@@ -60,7 +62,6 @@ class MikrotikRepository {
             HotspotProfile("3", "Weekly - 10GB", rateLimit = "6M/6M", sharedUsers = 2, sessionTimeout = "7d", price = "2000 ر.ي"),
             HotspotProfile("4", "Monthly - VIP 30GB", rateLimit = "10M/10M", sharedUsers = 3, sessionTimeout = "30d", price = "6000 ر.ي")
         )
-        // Initialize sample demo cards
         populateInitialSampleData()
     }
 
@@ -68,19 +69,16 @@ class MikrotikRepository {
         val sampleCards = mutableListOf<HotspotCard>()
         val sampleProfiles = _profiles.value
 
-        // Active connected users
         sampleCards.add(HotspotCard("c1", "784912", "784912", sampleProfiles[1].name, uptime = "2h 15m", bytesIn = 145 * 1024 * 1024L, bytesOut = 620 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي"))
         sampleCards.add(HotspotCard("c2", "319405", "319405", sampleProfiles[0].name, uptime = "42m", bytesIn = 35 * 1024 * 1024L, bytesOut = 280 * 1024 * 1024L, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي"))
         sampleCards.add(HotspotCard("c3", "849201", "849201", sampleProfiles[2].name, uptime = "1d 4h", bytesIn = 420 * 1024 * 1024L, bytesOut = 2450 * 1024 * 1024L, limitUptime = "7d", limitBytesTotal = 10240 * 1024 * 1024L, price = "2000 ر.ي"))
         sampleCards.add(HotspotCard("c4", "651829", "651829", sampleProfiles[1].name, uptime = "5h 10m", bytesIn = 80 * 1024 * 1024L, bytesOut = 890 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي"))
 
-        // Unused ready cards
         sampleCards.add(HotspotCard("c5", "492018", "492018", sampleProfiles[1].name, uptime = "0s", bytesIn = 0, bytesOut = 0, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي"))
         sampleCards.add(HotspotCard("c6", "910283", "910283", sampleProfiles[1].name, uptime = "0s", bytesIn = 0, bytesOut = 0, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي"))
         sampleCards.add(HotspotCard("c7", "182940", "182940", sampleProfiles[0].name, uptime = "0s", bytesIn = 0, bytesOut = 0, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي"))
         sampleCards.add(HotspotCard("c8", "502914", "502914", sampleProfiles[2].name, uptime = "0s", bytesIn = 0, bytesOut = 0, limitUptime = "7d", limitBytesTotal = 10240 * 1024 * 1024L, price = "2000 ر.ي"))
 
-        // Expired card
         sampleCards.add(HotspotCard("c9", "390124", "390124", sampleProfiles[0].name, uptime = "1h", bytesIn = 95 * 1024 * 1024L, bytesOut = 415 * 1024 * 1024L, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي"))
 
         _cards.value = sampleCards
@@ -103,42 +101,116 @@ class MikrotikRepository {
             try {
                 activeConfig = config
                 if (config.isDemoMode) {
-                    // Quick simulated verification steps
                     delay(300)
                     return@withContext Result.success(true)
                 }
 
-                // Real Connection Attempt
+                // 1. If user explicitly specified port 8728, connect directly via native RouterOS API socket
+                if (config.port == 8728) {
+                    val socketResult = routerOsApiClient.connectAndLogin(
+                        host = config.ipAddress,
+                        port = 8728,
+                        username = config.username,
+                        password = config.password
+                    )
+                    if (socketResult.isSuccess) {
+                        isApiSocketMode = true
+                        fetchLiveRouterDataFromSocket()
+                        return@withContext Result.success(true)
+                    } else {
+                        return@withContext socketResult
+                    }
+                }
+
+                // 2. If port 80 / 443: Attempt RouterOS v7 REST API first
+                var restConnected = false
+                var is404Response = false
                 val protocol = if (config.useHttps) "https" else "http"
                 val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                 val credential = Credentials.basic(config.username, config.password)
 
-                val request = Request.Builder()
-                    .url("$baseUrl/rest/system/resource")
-                    .header("Authorization", credential)
-                    .build()
+                try {
+                    val request = Request.Builder()
+                        .url("$baseUrl/rest/system/resource")
+                        .header("Authorization", credential)
+                        .build()
 
-                val response = httpClient.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val body = response.body?.string() ?: ""
-                    parseResource(body)
-                    fetchLiveRouterData(baseUrl, credential)
-                    Result.success(true)
-                } else if (response.code == 401 || response.code == 403) {
-                    Result.failure(Exception("خطأ في المصادقة: اسم المستخدم أو كلمة المرور غير صحيحة (رمز ${response.code})"))
+                    val response = httpClient.newCall(request).execute()
+                    if (response.isSuccessful) {
+                        val body = response.body?.string() ?: ""
+                        parseResource(body)
+                        fetchLiveRouterData(baseUrl, credential)
+                        isApiSocketMode = false
+                        restConnected = true
+                    } else if (response.code == 404) {
+                        is404Response = true
+                    } else if (response.code == 401 || response.code == 403) {
+                        return@withContext Result.failure(Exception("خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة (رمز ${response.code}). يرجى التحقق من كتابة الحساب وكلمة السر بدقة."))
+                    }
+                } catch (_: Exception) {
+                    // HTTP connection failed, fallback to native API socket
+                }
+
+                if (restConnected) {
+                    return@withContext Result.success(true)
+                }
+
+                // 3. AUTOMATIC FALLBACK TO NATIVE ROUTEROS API (PORT 8728):
+                // If REST is 404 (common on RouterOS v6.x or routers without /rest mapped),
+                // seamlessly connect via MikroTik's native RouterOS API on port 8728!
+                val socketResult = routerOsApiClient.connectAndLogin(
+                    host = config.ipAddress,
+                    port = 8728,
+                    username = config.username,
+                    password = config.password
+                )
+
+                if (socketResult.isSuccess) {
+                    isApiSocketMode = true
+                    fetchLiveRouterDataFromSocket()
+                    return@withContext Result.success(true)
+                }
+
+                // If both REST and API Socket failed, give a clear explanation
+                val socketErr = socketResult.exceptionOrNull()?.message.orEmpty()
+                val errorMsg = if (socketErr.contains("بيانات الدخول") || socketErr.contains("المصادقة") || socketErr.contains("كلمة المرور")) {
+                    socketErr
+                } else if (is404Response) {
+                    "استجاب الراوتر على منفذ الويب برمز 404 (RouterOS v6)، كما تعذر الاتصال بمنفذ API (8728). يرجى التأكد من تفعيل خدمة API في الراوتر عبر Winbox من القائمة: IP -> Services -> api"
                 } else {
-                    Result.failure(Exception("استجاب الراوتر برمز خطأ غير متوقع: ${response.code}"))
+                    "تعذر الاتصال بعنوان الراوتر (${config.ipAddress}:${config.port}). يرجى التأكد من أن هاتفك متصل بشبكة الواي فاي التابعة للراوتر، أو مراجعة إعدادات IP والمنفذ."
                 }
-            } catch (e: Exception) {
-                // If real connection fails, report detailed error
-                val errorMsg = when {
-                    e.message?.contains("Failed to connect") == true ->
-                        "تعذر الاتصال بعنوان IP (${config.ipAddress}:${config.port}). تأكد من أنك متصل بنفس شبكة الراوتر وأن خدمة REST/Webfig مفعلة."
-                    e.message?.contains("timeout") == true ->
-                        "انتهت مهلة الاتصال بالراوتر (${config.ipAddress}). تأكد من صحة IP والمنفذ."
-                    else -> "فشل الاتصال: ${e.localizedMessage ?: e.message}"
-                }
+
                 Result.failure(Exception(errorMsg))
+            } catch (e: Exception) {
+                Result.failure(Exception("فشل الاتصال: ${e.localizedMessage ?: e.message}"))
+            }
+        }
+    }
+
+    private suspend fun fetchLiveRouterDataFromSocket() {
+        withContext(Dispatchers.IO) {
+            val resResult = routerOsApiClient.getSystemResource()
+            if (resResult.isSuccess) {
+                _resourceState.value = resResult.getOrThrow()
+            }
+            val activeResult = routerOsApiClient.getActiveHotspotUsers()
+            if (activeResult.isSuccess) {
+                _activeUsers.value = activeResult.getOrThrow()
+            }
+            val cardsResult = routerOsApiClient.getHotspotUsers()
+            if (cardsResult.isSuccess) {
+                _cards.value = cardsResult.getOrThrow()
+            }
+            val profResult = routerOsApiClient.getHotspotProfiles()
+            if (profResult.isSuccess) {
+                val list = profResult.getOrThrow()
+                if (list.isNotEmpty()) _profiles.value = list
+            }
+            val bindResult = routerOsApiClient.getIpBindings()
+            if (bindResult.isSuccess) {
+                val list = bindResult.getOrThrow()
+                if (list.isNotEmpty()) _ipBindings.value = list
             }
         }
     }
@@ -160,7 +232,7 @@ class MikrotikRepository {
         } catch (_: Exception) {}
     }
 
-    suspend fun fetchLiveRouterData(baseUrl: String, credential: String) {
+    private suspend fun fetchLiveRouterData(baseUrl: String, credential: String) {
         withContext(Dispatchers.IO) {
             try {
                 // Fetch active users
@@ -283,13 +355,17 @@ class MikrotikRepository {
     suspend fun refreshData() {
         val config = activeConfig ?: return
         if (config.isDemoMode) {
-            // Simulate realistic micro fluctuations in network speed & CPU load
             val current = _resourceState.value
             _resourceState.value = current.copy(
                 cpuLoad = (current.cpuLoad + Random.nextInt(-3, 4)).coerceIn(5, 75),
                 rxSpeedKbps = (current.rxSpeedKbps + Random.nextDouble(-400.0, 500.0)).coerceAtLeast(400.0),
                 txSpeedKbps = (current.txSpeedKbps + Random.nextDouble(-200.0, 300.0)).coerceAtLeast(200.0)
             )
+            return
+        }
+
+        if (isApiSocketMode) {
+            fetchLiveRouterDataFromSocket()
             return
         }
 
@@ -312,6 +388,13 @@ class MikrotikRepository {
         return withContext(Dispatchers.IO) {
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
+                if (isApiSocketMode) {
+                    val socketRes = routerOsApiClient.kickUser(user.id)
+                    if (socketRes.isSuccess) {
+                        _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
+                    }
+                    return@withContext socketRes
+                }
                 try {
                     val protocol = if (config.useHttps) "https" else "http"
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
@@ -330,7 +413,6 @@ class MikrotikRepository {
                     return@withContext Result.failure(e)
                 }
             }
-            // Demo mode / local update
             _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
             Result.success(true)
         }
@@ -340,6 +422,13 @@ class MikrotikRepository {
         return withContext(Dispatchers.IO) {
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
+                if (isApiSocketMode) {
+                    val socketRes = routerOsApiClient.deleteCard(cardId)
+                    if (socketRes.isSuccess) {
+                        _cards.value = _cards.value.filter { it.id != cardId }
+                    }
+                    return@withContext socketRes
+                }
                 try {
                     val protocol = if (config.useHttps) "https" else "http"
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
@@ -368,6 +457,15 @@ class MikrotikRepository {
             val newStatus = !currentDisabled
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
+                if (isApiSocketMode) {
+                    val socketRes = routerOsApiClient.toggleCardDisabled(cardId, currentDisabled)
+                    if (socketRes.isSuccess) {
+                        _cards.value = _cards.value.map {
+                            if (it.id == cardId) it.copy(disabled = newStatus) else it
+                        }
+                    }
+                    return@withContext socketRes
+                }
                 try {
                     val protocol = if (config.useHttps) "https" else "http"
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
@@ -447,37 +545,42 @@ class MikrotikRepository {
                 }
             }
 
-            // Sync with real router if connected live
+            // Sync with real router
             val routerConfig = activeConfig
             if (routerConfig != null && !routerConfig.isDemoMode) {
                 withContext(Dispatchers.IO) {
-                    val protocol = if (routerConfig.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${routerConfig.ipAddress}:${routerConfig.port}"
-                    val credential = Credentials.basic(routerConfig.username, routerConfig.password)
+                    if (isApiSocketMode) {
+                        for (card in generatedCards) {
+                            routerOsApiClient.addCard(card)
+                        }
+                    } else {
+                        val protocol = if (routerConfig.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${routerConfig.ipAddress}:${routerConfig.port}"
+                        val credential = Credentials.basic(routerConfig.username, routerConfig.password)
 
-                    for (card in generatedCards) {
-                        try {
-                            val jsonBody = JSONObject().apply {
-                                put("name", card.name)
-                                put("password", card.password)
-                                put("profile", card.profile)
-                                if (card.limitUptime.isNotBlank()) put("limit-uptime", card.limitUptime)
-                                if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal)
-                                put("comment", card.comment)
-                            }.toString()
+                        for (card in generatedCards) {
+                            try {
+                                val jsonBody = JSONObject().apply {
+                                    put("name", card.name)
+                                    put("password", card.password)
+                                    put("profile", card.profile)
+                                    if (card.limitUptime.isNotBlank()) put("limit-uptime", card.limitUptime)
+                                    if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal)
+                                    put("comment", card.comment)
+                                }.toString()
 
-                            val putReq = Request.Builder()
-                                .url("$baseUrl/rest/ip/hotspot/user")
-                                .put(jsonBody.toRequestBody("application/json".toMediaType()))
-                                .header("Authorization", credential)
-                                .build()
-                            httpClient.newCall(putReq).execute()
-                        } catch (_: Exception) {}
+                                val putReq = Request.Builder()
+                                    .url("$baseUrl/rest/ip/hotspot/user")
+                                    .put(jsonBody.toRequestBody("application/json".toMediaType()))
+                                    .header("Authorization", credential)
+                                    .build()
+                                httpClient.newCall(putReq).execute()
+                            } catch (_: Exception) {}
+                        }
                     }
                 }
             }
 
-            // Add to in-memory state
             val currentList = _cards.value.toMutableList()
             currentList.addAll(0, generatedCards)
             _cards.value = currentList
@@ -490,24 +593,28 @@ class MikrotikRepository {
         val config = activeConfig
         if (config != null && !config.isDemoMode) {
             withContext(Dispatchers.IO) {
-                try {
-                    val protocol = if (config.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-                    val credential = Credentials.basic(config.username, config.password)
-                    val jsonBody = JSONObject().apply {
-                        put("name", profile.name)
-                        put("rate-limit", profile.rateLimit)
-                        put("shared-users", profile.sharedUsers.toString())
-                        if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
-                    }.toString()
+                if (isApiSocketMode) {
+                    routerOsApiClient.addProfile(profile)
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val jsonBody = JSONObject().apply {
+                            put("name", profile.name)
+                            put("rate-limit", profile.rateLimit)
+                            put("shared-users", profile.sharedUsers.toString())
+                            if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
+                        }.toString()
 
-                    val putReq = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/profile")
-                        .put(jsonBody.toRequestBody("application/json".toMediaType()))
-                        .header("Authorization", credential)
-                        .build()
-                    httpClient.newCall(putReq).execute()
-                } catch (_: Exception) {}
+                        val putReq = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/profile")
+                            .put(jsonBody.toRequestBody("application/json".toMediaType()))
+                            .header("Authorization", credential)
+                            .build()
+                        httpClient.newCall(putReq).execute()
+                    } catch (_: Exception) {}
+                }
             }
         }
         val current = _profiles.value.toMutableList()
@@ -520,6 +627,9 @@ class MikrotikRepository {
         return withContext(Dispatchers.IO) {
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
+                if (isApiSocketMode) {
+                    return@withContext routerOsApiClient.rebootRouter()
+                }
                 try {
                     val protocol = if (config.useHttps) "https" else "http"
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
@@ -543,6 +653,10 @@ class MikrotikRepository {
 
     fun disconnect() {
         activeConfig = null
+        if (isApiSocketMode) {
+            routerOsApiClient.close()
+            isApiSocketMode = false
+        }
     }
 
     fun getActiveConfig(): RouterConnectionConfig? = activeConfig
