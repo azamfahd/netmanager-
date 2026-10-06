@@ -13,8 +13,10 @@ permissions:
   contents: write
 
 env:
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
   JAVA_TOOL_OPTIONS: "-Djava.awt.headless=true -Dapple.awt.UIElement=true"
-  GRADLE_OPTS: "-Djava.awt.headless=true"
+  GRADLE_OPTS: "-Djava.awt.headless=true -Dorg.gradle.jvmargs=\"-Xmx4g -Dfile.encoding=UTF-8 -Djava.awt.headless=true\""
 
 jobs:
   build:
@@ -32,8 +34,11 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK Licenses
+        run: |
+          if [ -d "$ANDROID_HOME/cmdline-tools/latest/bin" ]; then
+            yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          fi
 
       - name: Make Gradle Wrapper Executable
         run: chmod +x ./gradlew
