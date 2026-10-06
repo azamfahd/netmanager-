@@ -1,0 +1,6 @@
+{
+  "name": "NetManager",
+  "description": "نظام إدارة شبكات ميكروتك وكروت الهوتسبوت ومراقبة المستخدمين النشطين وإدارة الراوتر",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
