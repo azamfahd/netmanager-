@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,7 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Payment
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
@@ -29,6 +30,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -50,8 +52,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.HotspotProfile
+import com.example.ui.theme.CyberGreenBright
+import com.example.ui.theme.CyberGreenPrimary
 import com.example.ui.theme.NetworkCyan
-import com.example.ui.theme.RouterBlue
 import com.example.ui.viewmodel.MainViewModel
 
 @Composable
@@ -61,6 +64,7 @@ fun ProfilesScreen(
 ) {
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     var showAddDialog by remember { mutableStateOf(false) }
+    var profileToEdit by remember { mutableStateOf<HotspotProfile?>(null) }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -76,7 +80,7 @@ fun ProfilesScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "تحديد سرعة الرفع والتحميل، مدة الجلسة، وعدد الأجهزة لكل كرت",
+                text = "جلب وتعديل سرعة الرفع والتحميل، مدة الجلسة، والأسعار المتزامنة مع السيرفر",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -88,7 +92,10 @@ fun ProfilesScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(profiles, key = { it.id }) { profile ->
-                    ProfileCardItem(profile = profile)
+                    ProfileCardItem(
+                        profile = profile,
+                        onEditClick = { profileToEdit = profile }
+                    )
                 }
                 item {
                     Spacer(modifier = Modifier.height(80.dp))
@@ -102,7 +109,7 @@ fun ProfilesScreen(
                 .align(Alignment.BottomEnd)
                 .padding(24.dp)
                 .testTag("fab_add_profile"),
-            containerColor = MaterialTheme.colorScheme.primary,
+            containerColor = CyberGreenPrimary,
             contentColor = Color.White,
             shape = RoundedCornerShape(16.dp)
         ) {
@@ -129,16 +136,31 @@ fun ProfilesScreen(
             }
         )
     }
+
+    profileToEdit?.let { profile ->
+        EditProfileDialog(
+            profile = profile,
+            onDismiss = { profileToEdit = null },
+            onConfirm = { updated ->
+                viewModel.updateProfile(updated)
+                profileToEdit = null
+            }
+        )
+    }
 }
 
 @Composable
-fun ProfileCardItem(profile: HotspotProfile) {
+fun ProfileCardItem(
+    profile: HotspotProfile,
+    onEditClick: () -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
+        border = BorderStroke(1.dp, CyberGreenPrimary.copy(alpha = 0.25f)),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
@@ -149,40 +171,67 @@ fun ProfileCardItem(profile: HotspotProfile) {
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
                     Box(
                         modifier = Modifier
                             .size(36.dp)
                             .clip(CircleShape)
-                            .background(NetworkCyan.copy(alpha = 0.12f)),
+                            .background(CyberGreenBright.copy(alpha = 0.12f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.Tune,
                             contentDescription = null,
-                            tint = NetworkCyan,
+                            tint = CyberGreenBright,
                             modifier = Modifier.size(20.dp)
                         )
                     }
-                    Text(
-                        text = profile.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Column {
+                        Text(
+                            text = profile.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (profile.downloadLimit.isNotBlank() && profile.downloadLimit != "غير محدد") {
+                            Text(
+                                text = "التحميل: ${profile.downloadLimit} • الرفع: ${profile.uploadLimit}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
 
-                Surface(
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = RoundedCornerShape(8.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        text = profile.price,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        fontWeight = FontWeight.Bold
-                    )
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = profile.price.ifBlank { "500 ر.ي" },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onEditClick,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "تعديل الباقة",
+                            tint = CyberGreenPrimary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
 
@@ -201,7 +250,7 @@ fun ProfileCardItem(profile: HotspotProfile) {
                         imageVector = Icons.Default.Speed,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp),
-                        tint = RouterBlue
+                        tint = CyberGreenPrimary
                     )
                     Column {
                         Text(
@@ -272,6 +321,93 @@ fun ProfileCardItem(profile: HotspotProfile) {
 }
 
 @Composable
+fun EditProfileDialog(
+    profile: HotspotProfile,
+    onDismiss: () -> Unit,
+    onConfirm: (HotspotProfile) -> Unit
+) {
+    var rateLimit by remember { mutableStateOf(profile.rateLimit) }
+    var sharedUsers by remember { mutableIntStateOf(profile.sharedUsers) }
+    var sessionTimeout by remember { mutableStateOf(profile.sessionTimeout) }
+    var price by remember { mutableStateOf(profile.price) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("تعديل باقة: ${profile.name}", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = price,
+                    onValueChange = { price = it },
+                    label = { Text("سعر الباقة (مثال: 500 ر.ي)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("edit_profile_price_input")
+                )
+
+                OutlinedTextField(
+                    value = rateLimit,
+                    onValueChange = { rateLimit = it },
+                    label = { Text("السرعة Rx/Tx (مثال: 2M/4M أو 1024k/2048k)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("عدد الأجهزة:")
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf(1, 2, 3, 5).forEach { num ->
+                            OutlinedButton(
+                                onClick = { sharedUsers = num },
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = "$num",
+                                    fontWeight = if (sharedUsers == num) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = sessionTimeout,
+                    onValueChange = { sessionTimeout = it },
+                    label = { Text("مهلة الجلسة (مثال: 1h, 1d, 7d)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onConfirm(
+                        profile.copy(
+                            rateLimit = rateLimit.trim(),
+                            sharedUsers = sharedUsers,
+                            sessionTimeout = sessionTimeout.trim(),
+                            price = price.trim()
+                        )
+                    )
+                },
+                modifier = Modifier.testTag("save_profile_btn")
+            ) {
+                Text("حفظ التعديلات في الراوتر")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("إلغاء")
+            }
+        }
+    )
+}
+
+@Composable
 fun AddProfileDialog(
     onDismiss: () -> Unit,
     onConfirm: (HotspotProfile) -> Unit
@@ -293,6 +429,14 @@ fun AddProfileDialog(
                     label = { Text("اسم الباقة (مثال: Daily 2GB)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("profile_name_input")
+                )
+
+                OutlinedTextField(
+                    value = price,
+                    onValueChange = { price = it },
+                    label = { Text("السعر المقترح (مثال: 500 ر.ي)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("profile_price_input")
                 )
 
                 OutlinedTextField(
@@ -330,14 +474,6 @@ fun AddProfileDialog(
                     label = { Text("مهلة الجلسة (مثال: 1h, 1d, 7d)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = price,
-                    onValueChange = { price = it },
-                    label = { Text("السعر المقترح (مثال: 500 ر.ي)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("profile_price_input")
                 )
             }
         },

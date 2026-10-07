@@ -6,8 +6,14 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [SavedRouterEntity::class, BatchHistoryEntity::class],
-    version = 1,
+    entities = [
+        SavedRouterEntity::class,
+        BatchHistoryEntity::class,
+        PosAgentEntity::class,
+        PosCardAssignmentEntity::class,
+        PosPaymentEntity::class
+    ],
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

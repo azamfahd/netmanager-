@@ -31,7 +31,58 @@ data class RouterResource(
     val totalMemoryBytes: Long = 1024 * 1024 * 1024L,
     val architecture: String = "arm64",
     val rxSpeedKbps: Double = 3450.0,
-    val txSpeedKbps: Double = 1820.0
+    val txSpeedKbps: Double = 1820.0,
+    val voltage: String = "24.1 V",
+    val temperature: String = "42°C",
+    val cpuFrequency: String = "1400 MHz",
+    val hddFreeBytes: Long = 512 * 1024 * 1024L
+)
+
+data class RouterBoardInfo(
+    val model: String = "RB4011iGS+",
+    val serialNumber: String = "H93A012345",
+    val currentFirmware: String = "7.15.2",
+    val upgradeFirmware: String = "7.15.2",
+    val routerboard: Boolean = true
+)
+
+data class HotspotServerInfo(
+    val id: String,
+    val name: String = "hotspot1",
+    val interfaceName: String = "bridge-hotspot",
+    val profile: String = "hsprof1",
+    val addressPool: String = "hs-pool",
+    val addressesPerMac: Int = 1,
+    val disabled: Boolean = false
+)
+
+data class SystemLogEntry(
+    val id: String,
+    val time: String,
+    val topics: String,
+    val message: String
+)
+
+data class IpPoolInfo(
+    val id: String,
+    val name: String,
+    val ranges: String
+)
+
+data class InterfaceStats(
+    val id: String,
+    val name: String,
+    val type: String,
+    val macAddress: String = "",
+    val rxBytes: Long = 0L,
+    val txBytes: Long = 0L,
+    val rxPackets: Long = 0L,
+    val txPackets: Long = 0L,
+    val rxSpeedKbps: Double = 0.0,
+    val txSpeedKbps: Double = 0.0,
+    val isRunning: Boolean = true,
+    val disabled: Boolean = false,
+    val comment: String = ""
 )
 
 data class HotspotActiveUser(
@@ -44,7 +95,11 @@ data class HotspotActiveUser(
     val bytesOut: Long,
     val loginBy: String = "http-chap",
     val sessionTimeLeft: String = "",
-    val comment: String = ""
+    val comment: String = "",
+    val hostName: String = "",
+    val serverName: String = "",
+    val nodeName: String = "",
+    val deviceModel: String = ""
 )
 
 data class HotspotCard(
@@ -59,16 +114,23 @@ data class HotspotCard(
     val limitBytesTotal: Long = 0L,
     val comment: String = "",
     val disabled: Boolean = false,
-    val price: String = ""
+    val price: String = "",
+    val posAgent: String = ""
 ) {
     val isExpired: Boolean
         get() {
+            if (disabled) return true
             if (limitBytesTotal > 0 && (bytesIn + bytesOut) >= limitBytesTotal) return true
+            if (limitUptime.isNotBlank() && uptime.isNotBlank() && uptime == limitUptime) return true
+            if (comment.contains("expired", ignoreCase = true) || comment.contains("منتهي", ignoreCase = true)) return true
             return false
         }
 
     val isActive: Boolean
-        get() = !disabled && (bytesIn > 0 || bytesOut > 0 || uptime != "0s")
+        get() = !disabled && (bytesIn > 0 || bytesOut > 0 || (uptime.isNotBlank() && uptime != "0s")) && !isExpired
+
+    val isUnused: Boolean
+        get() = !disabled && (uptime.isBlank() || uptime == "0s") && bytesIn == 0L && bytesOut == 0L
 }
 
 data class HotspotProfile(
@@ -78,7 +140,9 @@ data class HotspotProfile(
     val sharedUsers: Int = 1,
     val sessionTimeout: String = "1d",
     val keepaliveTimeout: String = "5m",
-    val price: String = "500 ر.ي"
+    val price: String = "500 ر.ي",
+    val uploadLimit: String = "",
+    val downloadLimit: String = ""
 )
 
 data class LocalNetworkInfo(
@@ -104,7 +168,10 @@ data class BatchGenerationConfig(
     val timeLimit: String = "1d",
     val dataLimitMB: Long = 1024L,
     val price: String = "500 ر.ي",
-    val batchComment: String = "دفعة اليوم"
+    val batchComment: String = "دفعة اليوم",
+    val posAgentId: Long = 0L,
+    val posAgentName: String = "",
+    val discountPercent: Double = 0.0
 )
 
 data class IpBinding(

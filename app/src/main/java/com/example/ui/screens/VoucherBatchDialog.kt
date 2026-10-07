@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
@@ -77,6 +78,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.local.PosAgentEntity
 import com.example.data.model.BatchGenerationConfig
 import com.example.data.model.CodeCharType
 import com.example.data.model.HotspotCard
@@ -167,6 +169,8 @@ enum class VoucherDialogTab {
 @Composable
 fun VoucherBatchDialog(
     profiles: List<HotspotProfile>,
+    posAgents: List<PosAgentEntity> = emptyList(),
+    preselectedAgentId: Long = 0L,
     onDismiss: () -> Unit,
     onGenerate: (BatchGenerationConfig) -> Unit,
     onAddSingleCard: ((HotspotCard) -> Unit)? = null
@@ -175,6 +179,10 @@ fun VoucherBatchDialog(
 
     // Selected preset category (default 500)
     var selectedPresetIndex by remember { mutableIntStateOf(2) } // default 500
+
+    // POS Agent selection
+    var selectedAgentId by remember { mutableLongStateOf(preselectedAgentId) }
+    var expandedAgentDropdown by remember { mutableStateOf(false) }
 
     // Common configuration state
     var selectedProfile by remember {
@@ -576,6 +584,70 @@ fun VoucherBatchDialog(
                     }
                 }
 
+                // 4. POS Agent Assignment (نقطة البيع والموزع)
+                if (posAgents.isNotEmpty()) {
+                    Column {
+                        Text(
+                            text = "تخصيص لنقطة بيع / موزع (اختياري):",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val currentAgent = posAgents.find { it.id == selectedAgentId }
+                        ExposedDropdownMenuBox(
+                            expanded = expandedAgentDropdown,
+                            onExpandedChange = { expandedAgentDropdown = !expandedAgentDropdown }
+                        ) {
+                            OutlinedTextField(
+                                value = currentAgent?.let { "${it.name} (عمولة ${it.discountPercent.toInt()}%)" } ?: "بدون تخصيص (كروت للمالك)",
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("نقطة البيع المستلمة للدفعة") },
+                                leadingIcon = { Icon(Icons.Default.Store, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedAgentDropdown) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .menuAnchor(),
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            ExposedDropdownMenu(
+                                expanded = expandedAgentDropdown,
+                                onDismissRequest = { expandedAgentDropdown = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("بدون تخصيص (كروت المالك المباشرة)") },
+                                    onClick = {
+                                        selectedAgentId = 0L
+                                        expandedAgentDropdown = false
+                                    }
+                                )
+                                posAgents.forEach { agent ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(agent.name, fontWeight = FontWeight.SemiBold)
+                                                Text(
+                                                    "عمولة ${agent.discountPercent.toInt()}%",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        },
+                                        onClick = {
+                                            selectedAgentId = agent.id
+                                            expandedAgentDropdown = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 4. Tab Specific Content
                 if (selectedTab == VoucherDialogTab.BATCH_GENERATE) {
                     // ---- BATCH GENERATE MODE ----
@@ -774,6 +846,7 @@ fun VoucherBatchDialog(
             if (selectedTab == VoucherDialogTab.BATCH_GENERATE) {
                 Button(
                     onClick = {
+                        val selectedAgent = posAgents.find { it.id == selectedAgentId }
                         val config = BatchGenerationConfig(
                             count = batchCount,
                             profile = selectedProfile,
@@ -784,7 +857,10 @@ fun VoucherBatchDialog(
                             timeLimit = timeLimit,
                             dataLimitMB = dataLimitMB,
                             price = price,
-                            batchComment = batchComment
+                            batchComment = if (selectedAgent != null) "${batchComment} (نقطة: ${selectedAgent.name})" else batchComment,
+                            posAgentId = selectedAgent?.id ?: 0L,
+                            posAgentName = selectedAgent?.name.orEmpty(),
+                            discountPercent = selectedAgent?.discountPercent ?: 0.0
                         )
                         onGenerate(config)
                         onDismiss()

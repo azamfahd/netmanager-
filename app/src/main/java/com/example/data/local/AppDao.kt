@@ -25,4 +25,58 @@ interface AppDao {
 
     @Query("DELETE FROM batch_history WHERE batchId = :batchId")
     suspend fun deleteBatch(batchId: String)
+
+    // ==========================================
+    // POS Agents & Resellers
+    // ==========================================
+    @Query("SELECT * FROM pos_agents ORDER BY name ASC")
+    fun getAllPosAgents(): Flow<List<PosAgentEntity>>
+
+    @Query("SELECT * FROM pos_agents WHERE id = :agentId")
+    suspend fun getPosAgentById(agentId: Long): PosAgentEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPosAgent(agent: PosAgentEntity): Long
+
+    @Query("DELETE FROM pos_agents WHERE id = :agentId")
+    suspend fun deletePosAgent(agentId: Long)
+
+    // ==========================================
+    // POS Card Assignments
+    // ==========================================
+    @Query("SELECT * FROM pos_card_assignments ORDER BY assignedAt DESC")
+    fun getAllCardAssignments(): Flow<List<PosCardAssignmentEntity>>
+
+    @Query("SELECT * FROM pos_card_assignments WHERE agentId = :agentId ORDER BY assignedAt DESC")
+    fun getAssignmentsByAgent(agentId: Long): Flow<List<PosCardAssignmentEntity>>
+
+    @Query("SELECT * FROM pos_card_assignments WHERE cardName = :cardName LIMIT 1")
+    suspend fun getAssignmentByCardName(cardName: String): PosCardAssignmentEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCardAssignments(assignments: List<PosCardAssignmentEntity>)
+
+    @Query("UPDATE pos_card_assignments SET isSold = 1, soldAt = :soldAt WHERE cardName = :cardName AND isSold = 0")
+    suspend fun markCardAsSold(cardName: String, soldAt: Long)
+
+    @Query("DELETE FROM pos_card_assignments WHERE id = :assignmentId")
+    suspend fun deleteCardAssignment(assignmentId: Long)
+
+    @Query("DELETE FROM pos_card_assignments WHERE agentId = :agentId")
+    suspend fun deleteAssignmentsByAgent(agentId: Long)
+
+    // ==========================================
+    // POS Payments
+    // ==========================================
+    @Query("SELECT * FROM pos_payments ORDER BY paymentDate DESC")
+    fun getAllPosPayments(): Flow<List<PosPaymentEntity>>
+
+    @Query("SELECT * FROM pos_payments WHERE agentId = :agentId ORDER BY paymentDate DESC")
+    fun getPaymentsByAgent(agentId: Long): Flow<List<PosPaymentEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPosPayment(payment: PosPaymentEntity): Long
+
+    @Query("DELETE FROM pos_payments WHERE id = :paymentId")
+    suspend fun deletePosPayment(paymentId: Long)
 }

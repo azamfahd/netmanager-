@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.ConfirmationNumber
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
@@ -48,6 +49,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -74,6 +76,7 @@ enum class AppTab(val title: String, val icon: ImageVector) {
     ACTIVE_USERS("المتصلين", Icons.Default.Group),
     NODES("النقاط", Icons.Default.CellTower),
     CARDS("الكروت", Icons.Default.ConfirmationNumber),
+    POS_AGENTS("نقاط البيع", Icons.Default.Store),
     PROFILES("الباقات", Icons.Default.Tune),
     TOOLS("الأدوات", Icons.Default.Build)
 }
@@ -89,9 +92,11 @@ fun MainScreen(
     val networkNodes by viewModel.networkNodes.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val printableCards by viewModel.printableCards.collectAsStateWithLifecycle()
+    val posAgents by viewModel.posAgents.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(AppTab.DASHBOARD) }
     var showBatchGeneratorDialog by remember { mutableStateOf(false) }
+    var preselectedAgentIdForBatch by remember { mutableLongStateOf(0L) }
     var isShowingPrintScreen by remember { mutableStateOf(false) }
     var showWelcomeDialog by remember { mutableStateOf(true) }
     val allCards by viewModel.cards.collectAsStateWithLifecycle()
@@ -135,6 +140,7 @@ fun MainScreen(
                             AppTab.ACTIVE_USERS -> "المستخدمين المتصلين ($routerIp)"
                             AppTab.NODES -> "نقاط وأبراج الشبكة (${networkNodes.size})"
                             AppTab.CARDS -> "إدارة كروت الشبكة"
+                            AppTab.POS_AGENTS -> "نقاط البيع والموزعين (${posAgents.size})"
                             AppTab.PROFILES -> "باقات السرعات والأسعار"
                             AppTab.TOOLS -> "أدوات فحص وتحكم الشبكة"
                         },
@@ -228,8 +234,21 @@ fun MainScreen(
             AppTab.CARDS -> {
                 CardsScreen(
                     viewModel = viewModel,
-                    onOpenBatchGenerator = { showBatchGeneratorDialog = true },
+                    onOpenBatchGenerator = {
+                        preselectedAgentIdForBatch = 0L
+                        showBatchGeneratorDialog = true
+                    },
                     onOpenPrintScreen = { isShowingPrintScreen = true },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            AppTab.POS_AGENTS -> {
+                PosAgentsScreen(
+                    viewModel = viewModel,
+                    onOpenBatchGeneratorForAgent = { agent ->
+                        preselectedAgentIdForBatch = agent.id
+                        showBatchGeneratorDialog = true
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -251,7 +270,12 @@ fun MainScreen(
     if (showBatchGeneratorDialog) {
         VoucherBatchDialog(
             profiles = profiles,
-            onDismiss = { showBatchGeneratorDialog = false },
+            posAgents = posAgents,
+            preselectedAgentId = preselectedAgentIdForBatch,
+            onDismiss = {
+                showBatchGeneratorDialog = false
+                preselectedAgentIdForBatch = 0L
+            },
             onGenerate = { config ->
                 viewModel.generateBatch(config)
             },

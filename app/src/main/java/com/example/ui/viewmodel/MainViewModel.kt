@@ -6,6 +6,10 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.AppDatabase
 import com.example.data.local.BatchHistoryEntity
+import com.example.data.local.PosAgentEntity
+import com.example.data.local.PosAgentSummary
+import com.example.data.local.PosCardAssignmentEntity
+import com.example.data.local.PosPaymentEntity
 import com.example.data.local.SavedRouterEntity
 import com.example.data.model.BatchGenerationConfig
 import com.example.data.model.ConnectionState
@@ -27,6 +31,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
@@ -67,6 +72,11 @@ class MainViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val resourceState: StateFlow<RouterResource> = repository.resourceState
+    val routerBoardInfo: StateFlow<com.example.data.model.RouterBoardInfo> = repository.routerBoardInfo
+    val hotspotServers: StateFlow<List<com.example.data.model.HotspotServerInfo>> = repository.hotspotServers
+    val systemLogs: StateFlow<List<com.example.data.model.SystemLogEntry>> = repository.systemLogs
+    val ipPools: StateFlow<List<com.example.data.model.IpPoolInfo>> = repository.ipPools
+    val interfaceStats: StateFlow<List<com.example.data.model.InterfaceStats>> = repository.interfaceStats
     val activeUsers: StateFlow<List<HotspotActiveUser>> = repository.activeUsers
     val cards: StateFlow<List<HotspotCard>> = repository.cards
     val profiles: StateFlow<List<HotspotProfile>> = repository.profiles
@@ -74,6 +84,147 @@ class MainViewModel(
     val networkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = repository.networkNodes
     val userSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = repository.userSessions
     val activityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = repository.activityEvents
+
+    // POS Database StateFlows & Calculations
+    val posAgents: StateFlow<List<PosAgentEntity>> = database.appDao().getAllPosAgents()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val posAssignments: StateFlow<List<PosCardAssignmentEntity>> = database.appDao().getAllCardAssignments()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val posPayments: StateFlow<List<PosPaymentEntity>> = database.appDao().getAllPosPayments()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val posSummaries: StateFlow<List<PosAgentSummary>> = combine(
+        posAgents, posAssignments, posPayments
+    ) { agents, assignments, payments ->
+        agents.map { agent ->
+            val agentAssignments = assignments.filter { it.agentId == agent.id }
+            val agentPayments = payments.filter { it.agentId == agent.id }
+            val totalAssigned = agentAssignments.size
+            val soldCount = agentAssignments.count { it.isSold }
+            val remainingCount = (totalAssigned - soldCount).coerceAtLeast(0)
+
+            val totalSalesVolume = agentAssignments.filter { it.isSold }.sumOf { it.priceAmount }
+            val discountRate = agent.discountPercent / 100.0
+            val totalCommission = totalSalesVolume * discountRate
+            val totalDueToOwner = totalSalesVolume - totalCommission
+            val totalPaid = agentPayments.sumOf { it.amount }
+            val netDebt = (totalDueToOwner - totalPaid).coerceAtLeast(0.0)
+
+            PosAgentSummary(
+                agent = agent,
+                totalAssignedCards = totalAssigned,
+                soldCardsCount = soldCount,
+                remainingCardsCount = remainingCount,
+                totalSalesVolume = totalSalesVolume,
+                totalAgentCommission = totalCommission,
+                totalDueToOwner = totalDueToOwner,
+                totalPaidByAgent = totalPaid,
+                netRemainingDebt = netDebt,
+                assignedCards = agentAssignments,
+                payments = agentPayments
+            )
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    init {
+        viewModelScope.launch {
+            cards.collectLatest { cardList ->
+                checkAndMarkSoldCards(cardList)
+            }
+        }
+        viewModelScope.launch {
+            activeUsers.collectLatest { activeList ->
+                if (activeList.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    activeList.forEach { user ->
+                        database.appDao().markCardAsSold(user.user, now)
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            seedInitialPosDataIfEmpty()
+        }
+    }
+
+    private suspend fun seedInitialPosDataIfEmpty() {
+        try {
+            val existingAgents = database.appDao().getPosAgentById(1L)
+            if (existingAgents == null) {
+                val agent1Id = database.appDao().insertPosAgent(
+                    PosAgentEntity(
+                        name = "بقالة ياسين",
+                        phone = "771234567",
+                        location = "شارع جمال - بجانب المستوصف",
+                        discountPercent = 15.0,
+                        notes = "نقطة بيع رئيسية"
+                    )
+                )
+                val agent2Id = database.appDao().insertPosAgent(
+                    PosAgentEntity(
+                        name = "مكتبة الأمل",
+                        phone = "734567890",
+                        location = "الحارة الشرقية - أمام المدرسة",
+                        discountPercent = 12.0,
+                        notes = "بائع معتمد"
+                    )
+                )
+                val agent3Id = database.appDao().insertPosAgent(
+                    PosAgentEntity(
+                        name = "محمد (موزع الحارة الغربية)",
+                        phone = "778901234",
+                        location = "الحارة الغربية",
+                        discountPercent = 15.0,
+                        notes = "موزع كروت متجول"
+                    )
+                )
+
+                // Assign initial sample cards to agents
+                val sampleAssignments = listOf(
+                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "784912", profileName = "فئة 500", priceAmount = 500.0, discountPercent = 15.0, isSold = true, soldAt = System.currentTimeMillis() - 7200000),
+                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "319405", profileName = "فئة 200", priceAmount = 200.0, discountPercent = 15.0, isSold = true, soldAt = System.currentTimeMillis() - 3600000),
+                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "849201", profileName = "فئة 2000", priceAmount = 2000.0, discountPercent = 15.0, isSold = true, soldAt = System.currentTimeMillis() - 86400000),
+                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "510938", profileName = "فئة 500", priceAmount = 500.0, discountPercent = 15.0, isSold = false),
+                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "928341", profileName = "فئة 500", priceAmount = 500.0, discountPercent = 15.0, isSold = false),
+                    PosCardAssignmentEntity(agentId = agent2Id, agentName = "مكتبة الأمل", cardName = "651829", profileName = "فئة 500", priceAmount = 500.0, discountPercent = 12.0, isSold = true, soldAt = System.currentTimeMillis() - 18000000),
+                    PosCardAssignmentEntity(agentId = agent2Id, agentName = "مكتبة الأمل", cardName = "401928", profileName = "فئة 300", priceAmount = 300.0, discountPercent = 12.0, isSold = false),
+                    PosCardAssignmentEntity(agentId = agent2Id, agentName = "مكتبة الأمل", cardName = "719304", profileName = "فئة 300", priceAmount = 300.0, discountPercent = 12.0, isSold = false),
+                    PosCardAssignmentEntity(agentId = agent3Id, agentName = "محمد (موزع الحارة الغربية)", cardName = "390124", profileName = "فئة 200", priceAmount = 200.0, discountPercent = 15.0, isSold = true, soldAt = System.currentTimeMillis() - 3600000),
+                    PosCardAssignmentEntity(agentId = agent3Id, agentName = "محمد (موزع الحارة الغربية)", cardName = "882910", profileName = "فئة 200", priceAmount = 200.0, discountPercent = 15.0, isSold = false)
+                )
+                database.appDao().insertCardAssignments(sampleAssignments)
+
+                // Record initial sample payments received
+                database.appDao().insertPosPayment(
+                    PosPaymentEntity(
+                        agentId = agent1Id,
+                        agentName = "بقالة ياسين",
+                        amount = 1500.0,
+                        paymentDate = System.currentTimeMillis() - 86400000,
+                        paymentNote = "دفعة نقدية سابقة"
+                    )
+                )
+            }
+        } catch (_: Exception) {}
+    }
+
+    private suspend fun checkAndMarkSoldCards(cardList: List<HotspotCard>) {
+        val usedCards = cardList.filter {
+            (it.uptime.isNotBlank() && it.uptime != "0s") ||
+                    it.bytesIn > 0L ||
+                    it.bytesOut > 0L ||
+                    it.isExpired ||
+                    it.isActive
+        }
+        if (usedCards.isNotEmpty()) {
+            val now = System.currentTimeMillis()
+            usedCards.forEach { card ->
+                database.appDao().markCardAsSold(card.name, now)
+            }
+        }
+    }
 
     // Session filter & search
     private val _sessionSearchQuery = MutableStateFlow("")
@@ -169,18 +320,20 @@ class MainViewModel(
     val cardFilter: StateFlow<CardFilter> = _cardFilter.asStateFlow()
 
     val filteredCards: StateFlow<List<HotspotCard>> = combine(
-        cards, _cardSearchQuery, _cardFilter
-    ) { allCards, query, filter ->
+        cards, activeUsers, _cardSearchQuery, _cardFilter
+    ) { allCards, liveActiveUsers, query, filter ->
+        val activeNames = liveActiveUsers.map { it.user }.toSet()
         allCards.filter { card ->
             val matchesQuery = query.isBlank() ||
                     card.name.contains(query, ignoreCase = true) ||
                     card.comment.contains(query, ignoreCase = true) ||
                     card.profile.contains(query, ignoreCase = true)
 
+            val isCurrentlyOnline = activeNames.contains(card.name) || card.isActive
             val matchesFilter = when (filter) {
                 CardFilter.ALL -> true
-                CardFilter.ACTIVE -> card.isActive && !card.isExpired
-                CardFilter.UNUSED -> !card.isActive && !card.isExpired
+                CardFilter.ACTIVE -> isCurrentlyOnline && !card.isExpired
+                CardFilter.UNUSED -> !isCurrentlyOnline && !card.isExpired && card.isUnused
                 CardFilter.EXPIRED -> card.isExpired
             }
 
@@ -407,6 +560,27 @@ class MainViewModel(
                         cardsJson = jsonArr.toString()
                     )
                 )
+
+                // If assigned to a POS Agent, save assignments
+                if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
+                    val priceNum = config.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                    val assignments = cards.map { card ->
+                        PosCardAssignmentEntity(
+                            agentId = config.posAgentId,
+                            agentName = config.posAgentName,
+                            cardName = card.name,
+                            batchId = batchId,
+                            profileName = config.profile,
+                            priceAmount = priceNum,
+                            discountPercent = config.discountPercent,
+                            assignedAt = System.currentTimeMillis(),
+                            isSold = false
+                        )
+                    }
+                    database.appDao().insertCardAssignments(assignments)
+                    _toastEvent.emit("تم تخصيص وتسليم ${cards.size} كرت لنقطة (${config.posAgentName}) بنجاح!")
+                }
+
                 // Set printable cards for instant preview
                 _printableCards.value = cards
             } else {
@@ -426,10 +600,91 @@ class MainViewModel(
         }
     }
 
+    // ==========================================
+    // POS Agent Operations
+    // ==========================================
+    fun addPosAgent(agent: PosAgentEntity) {
+        viewModelScope.launch {
+            database.appDao().insertPosAgent(agent)
+            _toastEvent.emit("تمت إضافة نقطة البيع (${agent.name}) بنجاح")
+        }
+    }
+
+    fun updatePosAgent(agent: PosAgentEntity) {
+        viewModelScope.launch {
+            database.appDao().insertPosAgent(agent)
+            _toastEvent.emit("تم حفظ وتحديث بيانات نقطة البيع (${agent.name})")
+        }
+    }
+
+    fun deletePosAgent(agentId: Long) {
+        viewModelScope.launch {
+            database.appDao().deletePosAgent(agentId)
+            database.appDao().deleteAssignmentsByAgent(agentId)
+            _toastEvent.emit("تم حذف نقطة البيع وسجلاتها")
+        }
+    }
+
+    fun recordPosPayment(agentId: Long, agentName: String, amount: Double, note: String) {
+        viewModelScope.launch {
+            database.appDao().insertPosPayment(
+                PosPaymentEntity(
+                    agentId = agentId,
+                    agentName = agentName,
+                    amount = amount,
+                    paymentDate = System.currentTimeMillis(),
+                    paymentNote = note.ifBlank { "دفعة نقدية / سداد" }
+                )
+            )
+            _toastEvent.emit("تم تسجيل سند قبض بمبلغ ${amount.toInt()} ر.ي بنجاح")
+        }
+    }
+
+    fun deletePosPayment(paymentId: Long) {
+        viewModelScope.launch {
+            database.appDao().deletePosPayment(paymentId)
+            _toastEvent.emit("تم حذف السند المالي")
+        }
+    }
+
+    fun assignCardsToAgent(
+        agentId: Long,
+        agentName: String,
+        cardsToAssign: List<HotspotCard>,
+        discountPercent: Double,
+        batchId: String = ""
+    ) {
+        viewModelScope.launch {
+            val assignments = cardsToAssign.map { card ->
+                val priceNum = card.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                PosCardAssignmentEntity(
+                    agentId = agentId,
+                    agentName = agentName,
+                    cardName = card.name,
+                    batchId = batchId,
+                    profileName = card.profile,
+                    priceAmount = priceNum,
+                    discountPercent = discountPercent,
+                    assignedAt = System.currentTimeMillis(),
+                    isSold = card.isActive || card.isExpired || (card.uptime.isNotBlank() && card.uptime != "0s")
+                )
+            }
+            database.appDao().insertCardAssignments(assignments)
+            _toastEvent.emit("تم تسليم وتخصيص ${cardsToAssign.size} كرت لنقطة ($agentName)")
+        }
+    }
+
     fun createProfile(profile: HotspotProfile) {
         viewModelScope.launch {
             repository.createProfile(profile)
             _toastEvent.emit("تم إنشاء باقة: ${profile.name}")
+        }
+    }
+
+    fun updateProfile(profile: HotspotProfile) {
+        viewModelScope.launch {
+            repository.updateProfile(profile)
+            _toastEvent.emit("تم حفظ وتحديث باقة: ${profile.name}")
         }
     }
 

@@ -68,6 +68,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.HotspotCard
 import com.example.data.model.UserSessionRecord
 import com.example.data.network.NetworkUtils
+import com.example.ui.theme.RouterBlue
+import com.example.ui.theme.RouterBlueDark
+import com.example.ui.theme.CyberGreenNeon
+import com.example.ui.theme.CyberGreenDark
+import com.example.ui.theme.StatusActiveGreen
+import com.example.ui.theme.StatusActiveGreenBg
+import com.example.ui.theme.StatusErrorRed
+import com.example.ui.theme.StatusErrorRedBg
+import com.example.ui.theme.StatusWarningAmber
+import com.example.ui.theme.StatusWarningAmberBg
 import com.example.data.util.DeviceDetector
 import com.example.ui.components.ConfirmDialog
 import com.example.ui.components.EditCardDialog
@@ -75,8 +85,9 @@ import com.example.ui.components.PrintSelectionDialog
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StatusType
 import com.example.ui.components.UserDetailDialog
+import com.example.ui.theme.CyberGreenBright
+import com.example.ui.theme.CyberGreenPrimary
 import com.example.ui.theme.NetworkCyan
-import com.example.ui.theme.RouterBlue
 import com.example.ui.theme.StatusActiveGreen
 import com.example.ui.viewmodel.CardFilter
 import com.example.ui.viewmodel.MainViewModel
@@ -90,6 +101,7 @@ fun CardsScreen(
 ) {
     val filteredCards by viewModel.filteredCards.collectAsStateWithLifecycle()
     val allCards by viewModel.cards.collectAsStateWithLifecycle()
+    val activeUsers by viewModel.activeUsers.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val searchQuery by viewModel.cardSearchQuery.collectAsStateWithLifecycle()
     val currentFilter by viewModel.cardFilter.collectAsStateWithLifecycle()
@@ -99,6 +111,8 @@ fun CardsScreen(
     var cardToReactivate by remember { mutableStateOf<HotspotCard?>(null) }
     var showPrintSelectionDialog by remember { mutableStateOf(false) }
     var selectedSessionForDetail by remember { mutableStateOf<UserSessionRecord?>(null) }
+
+    val activeUsernames = remember(activeUsers) { activeUsers.map { it.user }.toSet() }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -142,7 +156,7 @@ fun CardsScreen(
                     },
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = RouterBlue
+                        containerColor = CyberGreenPrimary
                     ),
                     modifier = Modifier
                         .height(54.dp)
@@ -178,14 +192,14 @@ fun CardsScreen(
                 FilterChip(
                     selected = currentFilter == CardFilter.UNUSED,
                     onClick = { viewModel.updateCardFilter(CardFilter.UNUSED) },
-                    label = { Text("جاهزة للبيع (${allCards.count { !it.isActive && !it.isExpired }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    label = { Text("جاهزة للبيع (${allCards.count { !activeUsernames.contains(it.name) && !it.isExpired && it.isUnused }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.height(36.dp)
                 )
                 FilterChip(
                     selected = currentFilter == CardFilter.ACTIVE,
                     onClick = { viewModel.updateCardFilter(CardFilter.ACTIVE) },
-                    label = { Text("مستخدمة (${allCards.count { it.isActive && !it.isExpired }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    label = { Text("مستخدمة / نشطة (${allCards.count { (activeUsernames.contains(it.name) || it.isActive) && !it.isExpired }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.height(36.dp)
                 )

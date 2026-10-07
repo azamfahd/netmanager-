@@ -42,6 +42,21 @@ class MikrotikRepository {
     private val _resourceState = MutableStateFlow(RouterResource())
     val resourceState: StateFlow<RouterResource> = _resourceState.asStateFlow()
 
+    private val _routerBoardInfo = MutableStateFlow(com.example.data.model.RouterBoardInfo())
+    val routerBoardInfo: StateFlow<com.example.data.model.RouterBoardInfo> = _routerBoardInfo.asStateFlow()
+
+    private val _hotspotServers = MutableStateFlow<List<com.example.data.model.HotspotServerInfo>>(emptyList())
+    val hotspotServers: StateFlow<List<com.example.data.model.HotspotServerInfo>> = _hotspotServers.asStateFlow()
+
+    private val _systemLogs = MutableStateFlow<List<com.example.data.model.SystemLogEntry>>(emptyList())
+    val systemLogs: StateFlow<List<com.example.data.model.SystemLogEntry>> = _systemLogs.asStateFlow()
+
+    private val _ipPools = MutableStateFlow<List<com.example.data.model.IpPoolInfo>>(emptyList())
+    val ipPools: StateFlow<List<com.example.data.model.IpPoolInfo>> = _ipPools.asStateFlow()
+
+    private val _interfaceStats = MutableStateFlow<List<com.example.data.model.InterfaceStats>>(emptyList())
+    val interfaceStats: StateFlow<List<com.example.data.model.InterfaceStats>> = _interfaceStats.asStateFlow()
+
     private val _activeUsers = MutableStateFlow<List<HotspotActiveUser>>(emptyList())
     val activeUsers: StateFlow<List<HotspotActiveUser>> = _activeUsers.asStateFlow()
 
@@ -575,23 +590,113 @@ class MikrotikRepository {
             val identityResult = routerOsApiClient.getSystemIdentity()
             val realIdentity = identityResult.getOrNull().orEmpty()
 
+            // 1. Fetch System Resources & Hardware Health
             val resResult = routerOsApiClient.getSystemResource()
+            val healthMap = routerOsApiClient.getSystemHealth().getOrDefault(emptyMap())
+            val healthVolt = healthMap["voltage"]?.let { "$it V" } ?: healthMap["voltage-sensor"]?.let { "$it V" } ?: "24.1 V"
+            val healthTemp = healthMap["temperature"]?.let { "$it°C" } ?: healthMap["cpu-temperature"]?.let { "$it°C" } ?: "42°C"
+
             if (resResult.isSuccess) {
                 val res = resResult.getOrThrow()
-                _resourceState.value = if (realIdentity.isNotBlank()) {
-                    res.copy(boardName = "$realIdentity (${res.boardName})")
-                } else {
-                    res
+                _resourceState.value = res.copy(
+                    boardName = if (realIdentity.isNotBlank()) "$realIdentity (${res.boardName})" else res.boardName,
+                    voltage = healthVolt,
+                    temperature = healthTemp
+                )
+            }
+
+            // 2. Fetch RouterBOARD Hardware Specs
+            val rbResult = routerOsApiClient.getRouterBoardInfo()
+            if (rbResult.isSuccess) {
+                _routerBoardInfo.value = rbResult.getOrThrow()
+            }
+
+            // 3. Fetch System Logs
+            val logResult = routerOsApiClient.getSystemLogs(limit = 40)
+            if (logResult.isSuccess) {
+                _systemLogs.value = logResult.getOrThrow()
+            }
+
+            // 4. Fetch Hotspot Servers & IP Pools
+            val serversResult = routerOsApiClient.getHotspotServers()
+            if (serversResult.isSuccess) {
+                _hotspotServers.value = serversResult.getOrThrow()
+            }
+            val poolsResult = routerOsApiClient.getIpPools()
+            if (poolsResult.isSuccess) {
+                _ipPools.value = poolsResult.getOrThrow()
+            }
+
+            // 5. Fetch network hosts, DHCP leases, wireless registrations and ARP for precision mapping
+            val leases = routerOsApiClient.getDhcpLeases().getOrDefault(emptyList())
+            val hosts = routerOsApiClient.getHotspotHosts().getOrDefault(emptyList())
+            val wirelessRegs = routerOsApiClient.getWirelessRegistrations().getOrDefault(emptyList())
+            val arpEntries = routerOsApiClient.getArpEntries().getOrDefault(emptyList())
+
+            val macToHostName = mutableMapOf<String, String>()
+            val ipToHostName = mutableMapOf<String, String>()
+            leases.forEach { l ->
+                val mac = l["mac-address"]?.uppercase().orEmpty()
+                val ip = l["address"].orEmpty()
+                val host = l["host-name"]?.ifBlank { l["comment"] }.orEmpty()
+                if (mac.isNotBlank() && host.isNotBlank()) macToHostName[mac] = host
+                if (ip.isNotBlank() && host.isNotBlank()) ipToHostName[ip] = host
+            }
+            hosts.forEach { h ->
+                val mac = h["mac-address"]?.uppercase().orEmpty()
+                val comment = h["comment"].orEmpty()
+                if (mac.isNotBlank() && comment.isNotBlank() && !macToHostName.containsKey(mac)) {
+                    macToHostName[mac] = comment
                 }
             }
+
+            val macToInterface = mutableMapOf<String, String>()
+            wirelessRegs.forEach { wr ->
+                val mac = wr["mac-address"]?.uppercase().orEmpty()
+                val ifName = wr["interface"].orEmpty()
+                if (mac.isNotBlank() && ifName.isNotBlank()) macToInterface[mac] = ifName
+            }
+            hosts.forEach { h ->
+                val mac = h["mac-address"]?.uppercase().orEmpty()
+                val ifName = h["interface"]?.ifBlank { h["bridge-port"] }.orEmpty()
+                if (mac.isNotBlank() && ifName.isNotBlank() && !macToInterface.containsKey(mac)) {
+                    macToInterface[mac] = ifName
+                }
+            }
+
+            // 6. Fetch Active Users
             val activeResult = routerOsApiClient.getActiveHotspotUsers()
             if (activeResult.isSuccess) {
-                _activeUsers.value = activeResult.getOrThrow()
+                val rawActive = activeResult.getOrThrow()
+                val enrichedActive = rawActive.map { user ->
+                    val cleanMac = user.macAddress.uppercase()
+                    val hostName = macToHostName[cleanMac] ?: ipToHostName[user.address] ?: user.comment
+                    val ifName = macToInterface[cleanMac] ?: hosts.find { it["mac-address"].equals(cleanMac, ignoreCase = true) }?.get("interface") ?: "السيرفر الرئيسي"
+                    val device = com.example.data.util.DeviceDetector.detectDevice(cleanMac, hostName, user.user)
+                    user.copy(
+                        hostName = hostName,
+                        nodeName = ifName,
+                        serverName = hosts.find { it["mac-address"].equals(cleanMac, ignoreCase = true) }?.get("server") ?: "hotspot1",
+                        deviceModel = "${device.brand} ${device.modelName}"
+                    )
+                }
+                _activeUsers.value = enrichedActive
             }
-            val cardsResult = routerOsApiClient.getHotspotUsers()
-            if (cardsResult.isSuccess) {
-                _cards.value = cardsResult.getOrThrow()
+
+            // 7. Fetch Hotspot Cards + User-Manager Database (Complete User Base)
+            val hotspotCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
+            val umCards = routerOsApiClient.getUserManagerUsers().getOrDefault(emptyList())
+            val combinedCards = mutableListOf<HotspotCard>()
+            combinedCards.addAll(hotspotCards)
+            val existingCardNames = hotspotCards.map { it.name }.toSet()
+            umCards.forEach { umCard ->
+                if (!existingCardNames.contains(umCard.name)) {
+                    combinedCards.add(umCard)
+                }
             }
+            _cards.value = combinedCards
+
+            // 8. Fetch Profiles & IP Bindings
             val profResult = routerOsApiClient.getHotspotProfiles()
             if (profResult.isSuccess) {
                 val list = profResult.getOrThrow()
@@ -603,10 +708,11 @@ class MikrotikRepository {
                 if (list.isNotEmpty()) _ipBindings.value = list
             }
 
+            // 9. Fetch Interfaces & Neighbors for Per-Node Distribution
             val wirelessList = routerOsApiClient.getWirelessInterfaces().getOrDefault(emptyList())
             val neighborsList = routerOsApiClient.getDiscoveredNeighbors().getOrDefault(emptyList())
 
-            activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity) }
+            activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface, wirelessRegs) }
         }
     }
 
@@ -630,7 +736,7 @@ class MikrotikRepository {
     private suspend fun fetchLiveRouterData(baseUrl: String, credential: String) {
         withContext(Dispatchers.IO) {
             try {
-                // Fetch system identity
+                // Fetch system identity, routerboard and health
                 var realIdentity = ""
                 try {
                     val idReq = Request.Builder().url("$baseUrl/rest/system/identity").header("Authorization", credential).build()
@@ -646,6 +752,150 @@ class MikrotikRepository {
                     }
                 } catch (_: Exception) {}
 
+                // Fetch RouterBOARD info
+                try {
+                    val rbReq = Request.Builder().url("$baseUrl/rest/system/routerboard").header("Authorization", credential).build()
+                    val rbResp = httpClient.newCall(rbReq).execute()
+                    if (rbResp.isSuccessful) {
+                        val rbObj = JSONObject(rbResp.body?.string() ?: "{}")
+                        _routerBoardInfo.value = com.example.data.model.RouterBoardInfo(
+                            model = rbObj.optString("model", "MikroTik Router"),
+                            serialNumber = rbObj.optString("serial-number", ""),
+                            currentFirmware = rbObj.optString("current-firmware", ""),
+                            upgradeFirmware = rbObj.optString("upgrade-firmware", ""),
+                            routerboard = rbObj.optBoolean("routerboard", true)
+                        )
+                    }
+                } catch (_: Exception) {}
+
+                // Fetch Health Sensors
+                try {
+                    val hReq = Request.Builder().url("$baseUrl/rest/system/health").header("Authorization", credential).build()
+                    val hResp = httpClient.newCall(hReq).execute()
+                    if (hResp.isSuccessful) {
+                        val hArr = JSONArray(hResp.body?.string() ?: "[]")
+                        var volt = "24.1 V"
+                        var temp = "42°C"
+                        for (i in 0 until hArr.length()) {
+                            val o = hArr.getJSONObject(i)
+                            val name = o.optString("name", "")
+                            val value = o.optString("value", "")
+                            if (name.contains("voltage", ignoreCase = true)) volt = "$value V"
+                            if (name.contains("temperature", ignoreCase = true)) temp = "$value°C"
+                        }
+                        _resourceState.value = _resourceState.value.copy(voltage = volt, temperature = temp)
+                    }
+                } catch (_: Exception) {}
+
+                // Fetch System Logs
+                try {
+                    val lReq = Request.Builder().url("$baseUrl/rest/log").header("Authorization", credential).build()
+                    val lResp = httpClient.newCall(lReq).execute()
+                    if (lResp.isSuccessful) {
+                        val lArr = JSONArray(lResp.body?.string() ?: "[]")
+                        val logList = mutableListOf<com.example.data.model.SystemLogEntry>()
+                        for (i in 0 until lArr.length()) {
+                            val o = lArr.getJSONObject(i)
+                            logList.add(
+                                com.example.data.model.SystemLogEntry(
+                                    id = o.optString(".id", "l$i"),
+                                    time = o.optString("time", ""),
+                                    topics = o.optString("topics", "info"),
+                                    message = o.optString("message", "")
+                                )
+                            )
+                        }
+                        _systemLogs.value = logList.takeLast(40).reversed()
+                    }
+                } catch (_: Exception) {}
+
+                // Fetch Hotspot Servers & IP Pools
+                try {
+                    val sReq = Request.Builder().url("$baseUrl/rest/ip/hotspot").header("Authorization", credential).build()
+                    val sResp = httpClient.newCall(sReq).execute()
+                    if (sResp.isSuccessful) {
+                        val sArr = JSONArray(sResp.body?.string() ?: "[]")
+                        val serverList = mutableListOf<com.example.data.model.HotspotServerInfo>()
+                        for (i in 0 until sArr.length()) {
+                            val o = sArr.getJSONObject(i)
+                            serverList.add(
+                                com.example.data.model.HotspotServerInfo(
+                                    id = o.optString(".id", "hs$i"),
+                                    name = o.optString("name", "hotspot1"),
+                                    interfaceName = o.optString("interface", "all"),
+                                    profile = o.optString("profile", "default"),
+                                    addressPool = o.optString("address-pool", ""),
+                                    addressesPerMac = o.optInt("addresses-per-mac", 1),
+                                    disabled = o.optBoolean("disabled", false)
+                                )
+                            )
+                        }
+                        _hotspotServers.value = serverList
+                    }
+                } catch (_: Exception) {}
+
+                try {
+                    val pReq = Request.Builder().url("$baseUrl/rest/ip/pool").header("Authorization", credential).build()
+                    val pResp = httpClient.newCall(pReq).execute()
+                    if (pResp.isSuccessful) {
+                        val pArr = JSONArray(pResp.body?.string() ?: "[]")
+                        val poolList = mutableListOf<com.example.data.model.IpPoolInfo>()
+                        for (i in 0 until pArr.length()) {
+                            val o = pArr.getJSONObject(i)
+                            poolList.add(
+                                com.example.data.model.IpPoolInfo(
+                                    id = o.optString(".id", "pool$i"),
+                                    name = o.optString("name", "pool"),
+                                    ranges = o.optString("ranges", "")
+                                )
+                            )
+                        }
+                        _ipPools.value = poolList
+                    }
+                } catch (_: Exception) {}
+
+                // Fetch DHCP leases for hostname resolution
+                val macToHostName = mutableMapOf<String, String>()
+                val ipToHostName = mutableMapOf<String, String>()
+                try {
+                    val leaseReq = Request.Builder().url("$baseUrl/rest/ip/dhcp-server/lease").header("Authorization", credential).build()
+                    val leaseResp = httpClient.newCall(leaseReq).execute()
+                    if (leaseResp.isSuccessful) {
+                        val arr = JSONArray(leaseResp.body?.string() ?: "[]")
+                        for (i in 0 until arr.length()) {
+                            val o = arr.getJSONObject(i)
+                            val mac = o.optString("mac-address").uppercase()
+                            val ip = o.optString("address")
+                            val host = o.optString("host-name").ifBlank { o.optString("comment") }
+                            if (mac.isNotBlank() && host.isNotBlank()) macToHostName[mac] = host
+                            if (ip.isNotBlank() && host.isNotBlank()) ipToHostName[ip] = host
+                        }
+                    }
+                } catch (_: Exception) {}
+
+                // Fetch Hotspot hosts
+                val macToInterface = mutableMapOf<String, String>()
+                val macToServer = mutableMapOf<String, String>()
+                try {
+                    val hostReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/host").header("Authorization", credential).build()
+                    val hostResp = httpClient.newCall(hostReq).execute()
+                    if (hostResp.isSuccessful) {
+                        val arr = JSONArray(hostResp.body?.string() ?: "[]")
+                        for (i in 0 until arr.length()) {
+                            val o = arr.getJSONObject(i)
+                            val mac = o.optString("mac-address").uppercase()
+                            val ifName = o.optString("interface").ifBlank { o.optString("bridge-port") }
+                            val server = o.optString("server")
+                            val comment = o.optString("comment")
+                            if (mac.isNotBlank() && ifName.isNotBlank()) macToInterface[mac] = ifName
+                            if (mac.isNotBlank() && server.isNotBlank()) macToServer[mac] = server
+                            if (mac.isNotBlank() && comment.isNotBlank() && !macToHostName.containsKey(mac)) {
+                                macToHostName[mac] = comment
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+
                 // Fetch active users
                 val activeRequest = Request.Builder()
                     .url("$baseUrl/rest/ip/hotspot/active")
@@ -657,18 +907,29 @@ class MikrotikRepository {
                     val list = mutableListOf<HotspotActiveUser>()
                     for (i in 0 until activeArray.length()) {
                         val obj = activeArray.getJSONObject(i)
+                        val mac = obj.optString("mac-address", "").uppercase()
+                        val ip = obj.optString("address", "")
+                        val rawComment = obj.optString("comment", "")
+                        val hostName = macToHostName[mac] ?: ipToHostName[ip] ?: rawComment
+                        val ifName = macToInterface[mac] ?: "السيرفر الرئيسي"
+                        val device = com.example.data.util.DeviceDetector.detectDevice(mac, hostName, obj.optString("user", ""))
+
                         list.add(
                             HotspotActiveUser(
                                 id = obj.optString(".id", "u$i"),
                                 user = obj.optString("user", "user$i"),
-                                address = obj.optString("address", ""),
-                                macAddress = obj.optString("mac-address", ""),
+                                address = ip,
+                                macAddress = mac,
                                 uptime = obj.optString("uptime", "0s"),
                                 bytesIn = obj.optLong("bytes-in", 0),
                                 bytesOut = obj.optLong("bytes-out", 0),
                                 loginBy = obj.optString("login-by", "http"),
                                 sessionTimeLeft = obj.optString("session-time-left", ""),
-                                comment = obj.optString("comment", "")
+                                comment = rawComment,
+                                hostName = hostName,
+                                serverName = macToServer[mac] ?: obj.optString("server", "hotspot1"),
+                                nodeName = ifName,
+                                deviceModel = "${device.brand} ${device.modelName}"
                             )
                         )
                     }
@@ -676,6 +937,7 @@ class MikrotikRepository {
                 }
 
                 // Fetch hotspot users (cards)
+                val cardList = mutableListOf<HotspotCard>()
                 val usersRequest = Request.Builder()
                     .url("$baseUrl/rest/ip/hotspot/user")
                     .header("Authorization", credential)
@@ -683,28 +945,68 @@ class MikrotikRepository {
                 val usersResponse = httpClient.newCall(usersRequest).execute()
                 if (usersResponse.isSuccessful) {
                     val usersArray = JSONArray(usersResponse.body?.string() ?: "[]")
-                    val cardList = mutableListOf<HotspotCard>()
                     for (i in 0 until usersArray.length()) {
                         val obj = usersArray.getJSONObject(i)
+                        val cardName = obj.optString("name", "")
+                        val comment = obj.optString("comment", "")
+                        val profile = obj.optString("profile", "default")
+                        val price = extractPriceFromText(comment, profile, cardName)
+
                         cardList.add(
                             HotspotCard(
                                 id = obj.optString(".id", "c$i"),
-                                name = obj.optString("name", ""),
+                                name = cardName,
                                 password = obj.optString("password", ""),
-                                profile = obj.optString("profile", "default"),
+                                profile = profile,
                                 uptime = obj.optString("uptime", "0s"),
                                 bytesIn = obj.optLong("bytes-in", 0),
                                 bytesOut = obj.optLong("bytes-out", 0),
                                 limitUptime = obj.optString("limit-uptime", ""),
                                 limitBytesTotal = obj.optLong("limit-bytes-total", 0),
-                                comment = obj.optString("comment", ""),
+                                comment = comment,
                                 disabled = obj.optBoolean("disabled", false),
-                                price = "500 ر.ي"
+                                price = price
                             )
                         )
                     }
-                    _cards.value = cardList
                 }
+
+                // Check for User-Manager users in REST mode
+                try {
+                    val umReq = Request.Builder().url("$baseUrl/rest/user-manager/user").header("Authorization", credential).build()
+                    val umResp = httpClient.newCall(umReq).execute()
+                    if (umResp.isSuccessful) {
+                        val umArr = JSONArray(umResp.body?.string() ?: "[]")
+                        val existingNames = cardList.map { it.name }.toSet()
+                        for (i in 0 until umArr.length()) {
+                            val obj = umArr.getJSONObject(i)
+                            val name = obj.optString("name").ifBlank { obj.optString("username") }
+                            if (name.isNotBlank() && !existingNames.contains(name)) {
+                                val comment = obj.optString("comment")
+                                val profile = obj.optString("profile", "UserManager")
+                                val price = extractPriceFromText(comment, profile, name)
+                                cardList.add(
+                                    HotspotCard(
+                                        id = obj.optString(".id", "um$i"),
+                                        name = name,
+                                        password = obj.optString("password", ""),
+                                        profile = profile,
+                                        uptime = obj.optString("uptime", "0s"),
+                                        bytesIn = obj.optLong("download-used", 0L),
+                                        bytesOut = obj.optLong("upload-used", 0L),
+                                        limitUptime = obj.optString("time-limit", ""),
+                                        limitBytesTotal = obj.optLong("download-limit", 0L),
+                                        comment = comment,
+                                        disabled = obj.optBoolean("disabled", false),
+                                        price = price
+                                    )
+                                )
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+
+                _cards.value = cardList
 
                 // Fetch hotspot profiles
                 val profRequest = Request.Builder()
@@ -717,14 +1019,23 @@ class MikrotikRepository {
                     val profList = mutableListOf<HotspotProfile>()
                     for (i in 0 until profArray.length()) {
                         val obj = profArray.getJSONObject(i)
+                        val name = obj.optString("name", "profile$i")
+                        val rateLimit = obj.optString("rate-limit", "غير محدد")
+                        val comment = obj.optString("comment", "")
+                        val price = extractPriceFromText(comment, name, "")
+                        val (up, down) = parseRateLimitSpeeds(rateLimit)
+
                         profList.add(
                             HotspotProfile(
                                 id = obj.optString(".id", "p$i"),
-                                name = obj.optString("name", "profile$i"),
-                                rateLimit = obj.optString("rate-limit", "غير محدد"),
+                                name = name,
+                                rateLimit = rateLimit,
                                 sharedUsers = obj.optInt("shared-users", 1),
                                 sessionTimeout = obj.optString("session-timeout", "غير محدد"),
-                                price = "500 ر.ي"
+                                keepaliveTimeout = obj.optString("keepalive-timeout", "5m"),
+                                price = price,
+                                uploadLimit = up,
+                                downloadLimit = down
                             )
                         )
                     }
@@ -791,9 +1102,36 @@ class MikrotikRepository {
                     }
                 } catch (_: Exception) {}
 
-                activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity) }
+                activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface) }
             } catch (_: Exception) {}
         }
+    }
+
+    private fun extractPriceFromText(comment: String, profileName: String, cardName: String): String {
+        val combined = "$comment $profileName $cardName"
+        val regex = Regex("""(?i)(?:price=|سعر=|السعر=|\b)(\d{2,6})\s*(?:ر\.?ي|ريال|YER|YR|$)""")
+        val match = regex.find(combined)
+        if (match != null && match.groupValues.size > 1) {
+            return "${match.groupValues[1]} ر.ي"
+        }
+        val numberMatch = Regex("""\b(\d{3,5})\b""").find(comment)
+        if (numberMatch != null) {
+            return "${numberMatch.groupValues[1]} ر.ي"
+        }
+        return "500 ر.ي"
+    }
+
+    private fun parseRateLimitSpeeds(rateLimit: String): Pair<String, String> {
+        if (rateLimit.isBlank() || rateLimit == "غير محدد") {
+            return Pair("غير محدد", "غير محدد")
+        }
+        val parts = rateLimit.split("/")
+        if (parts.size >= 2) {
+            val up = parts[0].trim().replace("M", " Mbps").replace("k", " Kbps")
+            val down = parts[1].split(" ")[0].trim().replace("M", " Mbps").replace("k", " Kbps")
+            return Pair(up, down)
+        }
+        return Pair(rateLimit, rateLimit)
     }
 
     private fun adaptDataToConfig(config: RouterConnectionConfig) {
@@ -820,7 +1158,9 @@ class MikrotikRepository {
         config: RouterConnectionConfig,
         wirelessInterfaces: List<Map<String, String>> = emptyList(),
         neighbors: List<Map<String, String>> = emptyList(),
-        realIdentity: String = ""
+        realIdentity: String = "",
+        macToInterfaceMap: Map<String, String> = emptyList<Pair<String, String>>().toMap(),
+        wirelessRegs: List<Map<String, String>> = emptyList()
     ) {
         val activeList = _activeUsers.value
         val cardList = _cards.value
@@ -830,37 +1170,41 @@ class MikrotikRepository {
         val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else "192.168.88"
         val serverName = realIdentity.ifBlank { config.name.ifBlank { "السيرفر الرئيسي ($routerIpBase)" } }
 
-        // 1. Build live user sessions list from active users + cards
+        // 1. Build live user sessions list from active users + historical cards
         val sessionList = mutableListOf<com.example.data.model.UserSessionRecord>()
 
         activeList.forEachIndexed { index, active ->
+            val cleanMac = active.macAddress.uppercase()
+            val hostName = active.hostName.ifBlank { active.comment.ifBlank { "جهاز متصل" } }
+            val detected = com.example.data.util.DeviceDetector.detectDevice(cleanMac, hostName, active.user)
+
             sessionList.add(
                 com.example.data.model.UserSessionRecord(
                     id = "sess_active_${active.id}_$index",
                     username = active.user,
                     ipAddress = active.address.ifBlank { "$subnetPrefix.${100 + index}" },
-                    macAddress = active.macAddress.ifBlank { "00:11:22:33:44:${"%02X".format((index + 1) % 256)}" },
+                    macAddress = cleanMac.ifBlank { "00:11:22:33:44:${"%02X".format((index + 1) % 256)}" },
                     isOnline = true,
-                    loginTime = "متصل الآن (جلسة نشطة)",
+                    loginTime = "متصل الآن (${active.uptime})",
                     logoutTime = "نشط",
                     duration = active.uptime.ifBlank { "0s" },
                     bytesIn = active.bytesIn,
                     bytesOut = active.bytesOut,
                     totalBytes = active.bytesIn + active.bytesOut,
-                    terminateReason = "جلسة نشطة حالياً",
+                    terminateReason = "جلسة نشطة حالياً عبر ${active.nodeName.ifBlank { "الشبكة" }}",
                     profile = "باقة الكرت الحالية",
                     price = "500 ر.ي",
-                    deviceInfo = com.example.data.util.DeviceDetector.detectDevice(active.macAddress, "جهاز متصل", active.user),
-                    comment = active.comment.ifBlank { "مستخدم متصل - راوتر $routerIpBase" }
+                    deviceInfo = detected,
+                    comment = if (active.hostName.isNotBlank()) "اسم الجهاز: ${active.hostName}" else active.comment.ifBlank { "مستخدم متصل" }
                 )
             )
         }
 
+        // Add previous sessions from cards with historical usage
         cardList.forEachIndexed { index, card ->
             if (!activeUsernames.contains(card.name)) {
                 val isUsed = card.uptime != "0s" || card.bytesIn > 0 || card.bytesOut > 0
-                val isExpired = (card.limitUptime.isNotBlank() && card.uptime == card.limitUptime) ||
-                        (card.limitBytesTotal > 0 && (card.bytesIn + card.bytesOut) >= card.limitBytesTotal)
+                val isExpired = card.isExpired
 
                 sessionList.add(
                     com.example.data.model.UserSessionRecord(
@@ -869,17 +1213,17 @@ class MikrotikRepository {
                         ipAddress = "$subnetPrefix.${150 + (index % 100)}",
                         macAddress = "AA:BB:CC:DD:EE:${"%02X".format((index + 10) % 256)}",
                         isOnline = false,
-                        loginTime = if (isUsed) "جلسة سابقة" else "غير مستخدم بعد",
-                        logoutTime = if (isExpired) "منتهي الاستهلاك" else if (isUsed) "جلسة مكتملة" else "جاهز للاستخدام",
+                        loginTime = if (isUsed) "جلسة سابقة مسجلة" else "غير مستخدم بعد",
+                        logoutTime = if (isExpired) "منتهي الاستهلاك / الصلاحية" else if (isUsed) "جلسة مكتملة" else "جاهز للاستخدام",
                         duration = card.uptime.ifBlank { "0s" },
                         bytesIn = card.bytesIn,
                         bytesOut = card.bytesOut,
                         totalBytes = card.bytesIn + card.bytesOut,
-                        terminateReason = if (isExpired) "انتهاء رصيد الكرت" else if (isUsed) "تسجيل خروج / توقف الجلسة" else "كرت مفعل غير مستخدم",
+                        terminateReason = if (isExpired) "انتهاء رصيد الكرت" else if (isUsed) "تسجيل خروج / توقف الجلسة" else "كرت مفعل جديد",
                         profile = card.profile,
                         price = card.price,
-                        deviceInfo = com.example.data.util.DeviceDetector.detectDevice("AA:BB:CC:DD:EE:00", "كروت الشبكة", card.name),
-                        comment = card.comment.ifBlank { if (isUsed) "كرت مستخدم سابق" else "كرت غير مستخدم" }
+                        deviceInfo = com.example.data.util.DeviceDetector.detectDevice("AA:BB:CC:DD:EE:00", card.comment, card.name),
+                        comment = card.comment.ifBlank { if (isUsed) "كرت مستخدم سابق" else "كرت جاهز للبيع" }
                     )
                 )
             }
@@ -887,49 +1231,9 @@ class MikrotikRepository {
 
         _userSessions.value = sessionList
 
-        // 2. Build live network nodes strictly from router & real wireless APs / neighbors
+        // 2. Build live network nodes with STRICT per-node user allocation
         val nodesList = mutableListOf<com.example.data.model.NetworkNode>()
-
-        // Gateway / Main Router Node
-        nodesList.add(
-            com.example.data.model.NetworkNode(
-                id = "node_main_router",
-                name = serverName,
-                ipAddress = routerIpBase,
-                macAddress = "D4:CA:6D:AA:11:01",
-                interfaceName = "ether1-WAN / ether2-LAN",
-                model = _resourceState.value.boardName.ifBlank { "MikroTik RouterOS" },
-                role = "السيرفر الرئيسي للشبكة (Gateway)",
-                isOnline = true,
-                pingMs = 1L,
-                connectedUsers = activeList.size,
-                uptime = _resourceState.value.uptime,
-                rxSpeedKbps = _resourceState.value.rxSpeedKbps,
-                txSpeedKbps = _resourceState.value.txSpeedKbps,
-                totalBytesConsumed = activeList.sumOf { it.bytesIn + it.bytesOut },
-                signalDbm = "سلكي Ethernet",
-                location = "مركز التحكم الرئيسي",
-                cpuLoadPercent = _resourceState.value.cpuLoad,
-                memoryUsagePercent = 35,
-                temperature = "41°C",
-                voltage = "24.1 V",
-                frequency = "Gigabit Link",
-                channelWidth = "1000 Mbps Full",
-                ssid = serverName,
-                connectedClients = activeList.mapIndexed { idx, u ->
-                    com.example.data.model.NodeConnectedClient(
-                        id = u.id,
-                        cardName = u.user,
-                        ipAddress = u.address.ifBlank { "$subnetPrefix.${100 + idx}" },
-                        macAddress = u.macAddress,
-                        rxRateMbps = (u.bytesIn / (1024.0 * 1024.0)),
-                        txRateMbps = (u.bytesOut / (1024.0 * 1024.0)),
-                        uptime = u.uptime,
-                        bytesUsed = u.bytesIn + u.bytesOut
-                    )
-                }
-            )
-        )
+        val assignedUserIds = mutableSetOf<String>()
 
         // Add real wireless AP interfaces from router
         wirelessInterfaces.forEachIndexed { idx, w ->
@@ -939,6 +1243,18 @@ class MikrotikRepository {
             val freq = w["frequency"] ?: "5 GHz"
             val band = w["band"] ?: "5GHz-A/N/AC"
             val isRunning = w["running"] == "true" || w["disabled"] != "true"
+
+            // Filter ONLY clients specifically registered on this wireless interface!
+            val matchingClients = activeList.filter { u ->
+                val cleanMac = u.macAddress.uppercase()
+                val assignedIf = macToInterfaceMap[cleanMac] ?: u.nodeName
+                val inWirelessReg = wirelessRegs.any { it["mac-address"].equals(cleanMac, ignoreCase = true) && it["interface"] == ifName }
+                inWirelessReg || assignedIf.equals(ifName, ignoreCase = true)
+            }
+
+            matchingClients.forEach { assignedUserIds.add(it.id) }
+
+            val totalBytes = matchingClients.sumOf { it.bytesIn + it.bytesOut }
 
             nodesList.add(
                 com.example.data.model.NetworkNode(
@@ -951,28 +1267,30 @@ class MikrotikRepository {
                     role = "أكسس بوينت لاسلكي ($ifName)",
                     isOnline = isRunning,
                     pingMs = 2L,
-                    connectedUsers = (activeList.size / (wirelessInterfaces.size + 1)).coerceAtLeast(0),
+                    connectedUsers = matchingClients.size,
                     uptime = _resourceState.value.uptime,
-                    rxSpeedKbps = _resourceState.value.rxSpeedKbps / 2,
-                    txSpeedKbps = _resourceState.value.txSpeedKbps / 2,
-                    totalBytesConsumed = (activeList.sumOf { it.bytesIn + it.bytesOut } / (wirelessInterfaces.size + 1)),
+                    rxSpeedKbps = if (matchingClients.isNotEmpty()) _resourceState.value.rxSpeedKbps * 0.6 else 0.0,
+                    txSpeedKbps = if (matchingClients.isNotEmpty()) _resourceState.value.txSpeedKbps * 0.6 else 0.0,
+                    totalBytesConsumed = totalBytes,
                     signalDbm = "-55 dBm",
                     location = "تغطية الشبكة اللاسلكية",
-                    cpuLoadPercent = _resourceState.value.cpuLoad,
+                    cpuLoadPercent = (_resourceState.value.cpuLoad * 0.8).toInt(),
                     memoryUsagePercent = 30,
                     frequency = freq,
                     channelWidth = w["channel-width"] ?: "20/40 MHz",
                     ssid = ssid,
-                    connectedClients = activeList.take(5).mapIndexed { cIdx, u ->
+                    connectedClients = matchingClients.map { u ->
+                        val dev = com.example.data.util.DeviceDetector.detectDevice(u.macAddress, u.hostName, u.user)
                         com.example.data.model.NodeConnectedClient(
                             id = u.id,
                             cardName = u.user,
-                            ipAddress = u.address.ifBlank { "$subnetPrefix.${100 + cIdx}" },
+                            ipAddress = u.address,
                             macAddress = u.macAddress,
                             rxRateMbps = (u.bytesIn / (1024.0 * 1024.0)),
                             txRateMbps = (u.bytesOut / (1024.0 * 1024.0)),
                             uptime = u.uptime,
-                            bytesUsed = u.bytesIn + u.bytesOut
+                            bytesUsed = u.bytesIn + u.bytesOut,
+                            deviceInfo = dev
                         )
                     }
                 )
@@ -981,11 +1299,24 @@ class MikrotikRepository {
 
         // Add real neighbor APs discovered on the network
         neighbors.forEachIndexed { idx, n ->
-            val nIdentity = n["identity"] ?: n["board"] ?: "نقطة شبكة متصلة"
+            val nIdentity = n["identity"] ?: n["board"] ?: "أكسس بوينت فرعي"
             val nAddress = n["address"] ?: "$subnetPrefix.${idx + 10}"
             val nMac = n["mac-address"] ?: ""
             val nPlatform = n["platform"] ?: n["board"] ?: "MikroTik RouterOS"
             val nInterface = n["interface"] ?: "ether${idx + 2}"
+
+            val neighborSubnet = if (nAddress.contains(".")) nAddress.substringBeforeLast(".") else ""
+            val matchingClients = activeList.filter { u ->
+                val cleanMac = u.macAddress.uppercase()
+                val assignedIf = macToInterfaceMap[cleanMac] ?: u.nodeName
+                (!assignedUserIds.contains(u.id)) && (
+                    assignedIf.equals(nInterface, ignoreCase = true) ||
+                    (neighborSubnet.isNotBlank() && u.address.startsWith(neighborSubnet))
+                )
+            }
+
+            matchingClients.forEach { assignedUserIds.add(it.id) }
+            val totalBytes = matchingClients.sumOf { it.bytesIn + it.bytesOut }
 
             nodesList.add(
                 com.example.data.model.NetworkNode(
@@ -998,34 +1329,94 @@ class MikrotikRepository {
                     role = "أكسس بوينت / برج متصل ($nInterface)",
                     isOnline = true,
                     pingMs = 3L,
-                    connectedUsers = 0,
+                    connectedUsers = matchingClients.size,
                     uptime = _resourceState.value.uptime,
-                    rxSpeedKbps = 1500.0,
-                    txSpeedKbps = 800.0,
-                    totalBytesConsumed = 10_000_000_000L,
+                    rxSpeedKbps = if (matchingClients.isNotEmpty()) 1500.0 else 0.0,
+                    txSpeedKbps = if (matchingClients.isNotEmpty()) 800.0 else 0.0,
+                    totalBytesConsumed = totalBytes,
                     signalDbm = "-58 dBm",
                     location = "نطاق التغطية",
                     ssid = nIdentity,
-                    connectedClients = emptyList()
+                    connectedClients = matchingClients.map { u ->
+                        val dev = com.example.data.util.DeviceDetector.detectDevice(u.macAddress, u.hostName, u.user)
+                        com.example.data.model.NodeConnectedClient(
+                            id = u.id,
+                            cardName = u.user,
+                            ipAddress = u.address,
+                            macAddress = u.macAddress,
+                            rxRateMbps = (u.bytesIn / (1024.0 * 1024.0)),
+                            txRateMbps = (u.bytesOut / (1024.0 * 1024.0)),
+                            uptime = u.uptime,
+                            bytesUsed = u.bytesIn + u.bytesOut,
+                            deviceInfo = dev
+                        )
+                    }
                 )
             )
         }
 
+        // Gateway / Main Router Node (claims all remaining clients connected directly to LAN/Ethernet)
+        val remainingClients = activeList.filter { !assignedUserIds.contains(it.id) }
+        val mainTotalBytes = remainingClients.sumOf { it.bytesIn + it.bytesOut }
+
+        val mainRouterNode = com.example.data.model.NetworkNode(
+            id = "node_main_router",
+            name = serverName,
+            ipAddress = routerIpBase,
+            macAddress = "D4:CA:6D:AA:11:01",
+            interfaceName = "ether1-WAN / ether2-LAN",
+            model = _resourceState.value.boardName.ifBlank { "MikroTik RouterOS" },
+            role = "السيرفر الرئيسي للشبكة (Gateway)",
+            isOnline = true,
+            pingMs = 1L,
+            connectedUsers = remainingClients.size,
+            uptime = _resourceState.value.uptime,
+            rxSpeedKbps = _resourceState.value.rxSpeedKbps,
+            txSpeedKbps = _resourceState.value.txSpeedKbps,
+            totalBytesConsumed = mainTotalBytes,
+            signalDbm = "سلكي Ethernet",
+            location = "مركز التحكم الرئيسي",
+            cpuLoadPercent = _resourceState.value.cpuLoad,
+            memoryUsagePercent = 35,
+            temperature = "41°C",
+            voltage = "24.1 V",
+            frequency = "Gigabit Link",
+            channelWidth = "1000 Mbps Full",
+            ssid = serverName,
+            connectedClients = remainingClients.map { u ->
+                val dev = com.example.data.util.DeviceDetector.detectDevice(u.macAddress, u.hostName, u.user)
+                com.example.data.model.NodeConnectedClient(
+                    id = u.id,
+                    cardName = u.user,
+                    ipAddress = u.address,
+                    macAddress = u.macAddress,
+                    rxRateMbps = (u.bytesIn / (1024.0 * 1024.0)),
+                    txRateMbps = (u.bytesOut / (1024.0 * 1024.0)),
+                    uptime = u.uptime,
+                    bytesUsed = u.bytesIn + u.bytesOut,
+                    deviceInfo = dev
+                )
+            }
+        )
+
+        nodesList.add(0, mainRouterNode)
         _networkNodes.value = nodesList
 
         // 3. Activity events log strictly from real active users
         val eventsList = mutableListOf<com.example.data.model.UserActivityEvent>()
-        activeList.take(10).forEachIndexed { idx, u ->
+        activeList.take(15).forEachIndexed { idx, u ->
+            val dev = com.example.data.util.DeviceDetector.detectDevice(u.macAddress, u.hostName, u.user)
+            val hostStr = if (u.hostName.isNotBlank()) " [${u.hostName}]" else ""
             eventsList.add(
                 com.example.data.model.UserActivityEvent(
                     id = "evt_live_$idx",
                     username = u.user,
                     eventType = "تسجيل دخول",
                     timestamp = "نشط حالياً (${u.uptime})",
-                    details = "تسجيل دخول نشط عبر الهوتسبوت (${u.loginBy})",
-                    ipAddress = u.address.ifBlank { "$subnetPrefix.${100 + idx}" },
+                    details = "متصل عبر ${u.nodeName}$hostStr (${u.loginBy})",
+                    ipAddress = u.address,
                     macAddress = u.macAddress,
-                    deviceInfo = com.example.data.util.DeviceDetector.detectDevice(u.macAddress, "جهاز متصل", u.user)
+                    deviceInfo = dev
                 )
             )
         }
@@ -1403,6 +1794,7 @@ class MikrotikRepository {
                             put("rate-limit", profile.rateLimit)
                             put("shared-users", profile.sharedUsers.toString())
                             if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
+                            if (profile.price.isNotBlank()) put("comment", "price=${profile.price}")
                         }.toString()
 
                         val putReq = Request.Builder()
@@ -1418,6 +1810,40 @@ class MikrotikRepository {
         val current = _profiles.value.toMutableList()
         current.add(profile)
         _profiles.value = current
+        return Result.success(true)
+    }
+
+    suspend fun updateProfile(profile: HotspotProfile): Result<Boolean> {
+        val config = activeConfig
+        if (config != null && !config.isDemoMode) {
+            withContext(Dispatchers.IO) {
+                if (isApiSocketMode) {
+                    routerOsApiClient.updateProfile(profile)
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val jsonBody = JSONObject().apply {
+                            put("rate-limit", profile.rateLimit)
+                            put("shared-users", profile.sharedUsers.toString())
+                            if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
+                            if (profile.price.isNotBlank()) put("comment", "price=${profile.price}")
+                        }.toString()
+
+                        val patchReq = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/profile/${profile.id}")
+                            .patch(jsonBody.toRequestBody("application/json".toMediaType()))
+                            .header("Authorization", credential)
+                            .build()
+                        httpClient.newCall(patchReq).execute()
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+        _profiles.value = _profiles.value.map {
+            if (it.id == profile.id || it.name == profile.name) profile else it
+        }
         return Result.success(true)
     }
 

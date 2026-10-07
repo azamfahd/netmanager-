@@ -3,8 +3,13 @@ package com.example.data.network
 import com.example.data.model.HotspotActiveUser
 import com.example.data.model.HotspotCard
 import com.example.data.model.HotspotProfile
+import com.example.data.model.HotspotServerInfo
+import com.example.data.model.InterfaceStats
 import com.example.data.model.IpBinding
+import com.example.data.model.IpPoolInfo
+import com.example.data.model.RouterBoardInfo
 import com.example.data.model.RouterResource
+import com.example.data.model.SystemLogEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
@@ -170,20 +175,24 @@ class RouterOsApiClient {
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
                         val map = parseSentenceToMap(s)
+                        val name = map["name"] ?: ""
+                        val comment = map["comment"] ?: ""
+                        val profile = map["profile"] ?: "default"
+                        val parsedPrice = extractPriceFromText(comment, profile, name)
                         list.add(
                             HotspotCard(
                                 id = map[".id"] ?: "c_${list.size}",
-                                name = map["name"] ?: "",
+                                name = name,
                                 password = map["password"] ?: "",
-                                profile = map["profile"] ?: "default",
+                                profile = profile,
                                 uptime = map["uptime"] ?: "0s",
                                 bytesIn = map["bytes-in"]?.toLongOrNull() ?: 0L,
                                 bytesOut = map["bytes-out"]?.toLongOrNull() ?: 0L,
                                 limitUptime = map["limit-uptime"] ?: "",
                                 limitBytesTotal = map["limit-bytes-total"]?.toLongOrNull() ?: 0L,
-                                comment = map["comment"] ?: "",
+                                comment = comment,
                                 disabled = map["disabled"] == "true" || map["disabled"] == "yes",
-                                price = "500 ر.ي"
+                                price = parsedPrice
                             )
                         )
                     }
@@ -204,14 +213,22 @@ class RouterOsApiClient {
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
                         val map = parseSentenceToMap(s)
+                        val name = map["name"] ?: "default"
+                        val rateLimit = map["rate-limit"] ?: "غير محدد"
+                        val comment = map["comment"] ?: ""
+                        val parsedPrice = extractPriceFromText(comment, name, "")
+                        val (up, down) = parseRateLimitSpeeds(rateLimit)
                         list.add(
                             HotspotProfile(
                                 id = map[".id"] ?: "p_${list.size}",
-                                name = map["name"] ?: "default",
-                                rateLimit = map["rate-limit"] ?: "غير محدد",
+                                name = name,
+                                rateLimit = rateLimit,
                                 sharedUsers = map["shared-users"]?.toIntOrNull() ?: 1,
                                 sessionTimeout = map["session-timeout"] ?: "غير محدد",
-                                price = "500 ر.ي"
+                                keepaliveTimeout = map["keepalive-timeout"] ?: "5m",
+                                price = parsedPrice,
+                                uploadLimit = up,
+                                downloadLimit = down
                             )
                         )
                     }
@@ -221,6 +238,129 @@ class RouterOsApiClient {
                 Result.failure(e)
             }
         }
+    }
+
+    suspend fun updateProfile(profile: HotspotProfile): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val words = mutableListOf("/ip/hotspot/user/profile/set", "=.id=${profile.id}")
+                if (profile.rateLimit.isNotBlank() && profile.rateLimit != "غير محدد") {
+                    words.add("=rate-limit=${profile.rateLimit}")
+                }
+                words.add("=shared-users=${profile.sharedUsers}")
+                if (profile.sessionTimeout.isNotBlank() && profile.sessionTimeout != "غير محدد") {
+                    words.add("=session-timeout=${profile.sessionTimeout}")
+                }
+                if (profile.price.isNotBlank()) {
+                    words.add("=comment=price=${profile.price}")
+                }
+                writeSentence(words)
+                val sentences = readAllSentencesUntilDone()
+                val isDone = sentences.any { it.firstOrNull() == "!done" }
+                Result.success(isDone)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getDhcpLeases(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/ip/dhcp-server/lease/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getHotspotHosts(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/ip/hotspot/host/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getWirelessRegistrations(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/interface/wireless/registration-table/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getArpEntries(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/ip/arp/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    private fun extractPriceFromText(comment: String, profileName: String, cardName: String): String {
+        val combined = "$comment $profileName $cardName"
+        val regex = Regex("""(?i)(?:price=|سعر=|السعر=|\b)(\d{2,6})\s*(?:ر\.?ي|ريال|YER|YR|$)""")
+        val match = regex.find(combined)
+        if (match != null && match.groupValues.size > 1) {
+            return "${match.groupValues[1]} ر.ي"
+        }
+        val numberMatch = Regex("""\b(\d{3,5})\b""").find(comment)
+        if (numberMatch != null) {
+            return "${numberMatch.groupValues[1]} ر.ي"
+        }
+        return "500 ر.ي"
+    }
+
+    private fun parseRateLimitSpeeds(rateLimit: String): Pair<String, String> {
+        if (rateLimit.isBlank() || rateLimit == "غير محدد") {
+            return Pair("غير محدد", "غير محدد")
+        }
+        val parts = rateLimit.split("/")
+        if (parts.size >= 2) {
+            val up = parts[0].trim().replace("M", " Mbps").replace("k", " Kbps")
+            val down = parts[1].split(" ")[0].trim().replace("M", " Mbps").replace("k", " Kbps")
+            return Pair(up, down)
+        }
+        return Pair(rateLimit, rateLimit)
     }
 
     suspend fun getIpBindings(): Result<List<IpBinding>> {
@@ -385,6 +525,175 @@ class RouterOsApiClient {
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
                         list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getRouterBoardInfo(): Result<RouterBoardInfo> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/system/routerboard/print"))
+                val sentences = readAllSentencesUntilDone()
+                val re = sentences.firstOrNull { it.firstOrNull() == "!re" }
+                if (re != null) {
+                    val map = parseSentenceToMap(re)
+                    val info = RouterBoardInfo(
+                        model = map["model"] ?: "MikroTik Router",
+                        serialNumber = map["serial-number"] ?: "",
+                        currentFirmware = map["current-firmware"] ?: "",
+                        upgradeFirmware = map["upgrade-firmware"] ?: "",
+                        routerboard = map["routerboard"] == "true" || map["routerboard"] == "yes"
+                    )
+                    Result.success(info)
+                } else {
+                    Result.success(RouterBoardInfo())
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getSystemHealth(): Result<Map<String, String>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/system/health/print"))
+                val sentences = readAllSentencesUntilDone()
+                val re = sentences.firstOrNull { it.firstOrNull() == "!re" }
+                if (re != null) {
+                    Result.success(parseSentenceToMap(re))
+                } else {
+                    Result.success(emptyMap())
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getSystemLogs(limit: Int = 30): Result<List<SystemLogEntry>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/log/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<SystemLogEntry>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        val map = parseSentenceToMap(s)
+                        list.add(
+                            SystemLogEntry(
+                                id = map[".id"] ?: "l_${list.size}",
+                                time = map["time"] ?: "",
+                                topics = map["topics"] ?: "info",
+                                message = map["message"] ?: ""
+                            )
+                        )
+                    }
+                }
+                Result.success(list.takeLast(limit).reversed())
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getHotspotServers(): Result<List<HotspotServerInfo>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/ip/hotspot/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<HotspotServerInfo>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        val map = parseSentenceToMap(s)
+                        list.add(
+                            HotspotServerInfo(
+                                id = map[".id"] ?: "hs_${list.size}",
+                                name = map["name"] ?: "hotspot1",
+                                interfaceName = map["interface"] ?: "all",
+                                profile = map["profile"] ?: "default",
+                                addressPool = map["address-pool"] ?: "",
+                                addressesPerMac = map["addresses-per-mac"]?.toIntOrNull() ?: 1,
+                                disabled = map["disabled"] == "true" || map["disabled"] == "yes"
+                            )
+                        )
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getIpPools(): Result<List<IpPoolInfo>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/ip/pool/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<IpPoolInfo>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        val map = parseSentenceToMap(s)
+                        list.add(
+                            IpPoolInfo(
+                                id = map[".id"] ?: "pool_${list.size}",
+                                name = map["name"] ?: "pool",
+                                ranges = map["ranges"] ?: ""
+                            )
+                        )
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getUserManagerUsers(): Result<List<HotspotCard>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                // Try v7 user-manager first
+                writeSentence(listOf("/user-manager/user/print"))
+                var sentences = readAllSentencesUntilDone()
+                if (sentences.none { it.firstOrNull() == "!re" }) {
+                    // Try v6 /tool/user-manager/user
+                    writeSentence(listOf("/tool/user-manager/user/print"))
+                    sentences = readAllSentencesUntilDone()
+                }
+
+                val list = mutableListOf<HotspotCard>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        val map = parseSentenceToMap(s)
+                        val name = map["name"] ?: map["username"] ?: ""
+                        if (name.isNotBlank()) {
+                            val comment = map["comment"] ?: ""
+                            val profile = map["profile"] ?: map["actual-profile"] ?: "UserManager"
+                            val price = extractPriceFromText(comment, profile, name)
+                            list.add(
+                                HotspotCard(
+                                    id = map[".id"] ?: "um_${list.size}",
+                                    name = name,
+                                    password = map["password"] ?: "",
+                                    profile = profile,
+                                    uptime = map["uptime"] ?: map["till-time"] ?: "0s",
+                                    bytesIn = map["download-used"]?.toLongOrNull() ?: 0L,
+                                    bytesOut = map["upload-used"]?.toLongOrNull() ?: 0L,
+                                    limitUptime = map["time-limit"] ?: "",
+                                    limitBytesTotal = map["download-limit"]?.toLongOrNull() ?: 0L,
+                                    comment = comment,
+                                    disabled = map["disabled"] == "true" || map["disabled"] == "yes",
+                                    price = price
+                                )
+                            )
+                        }
                     }
                 }
                 Result.success(list)
