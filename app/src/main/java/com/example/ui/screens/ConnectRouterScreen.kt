@@ -228,22 +228,22 @@ fun ConnectRouterScreen(
         ) {
             item { Spacer(modifier = Modifier.height(4.dp)) }
 
-            // 1. Hero Router & Network Detection Card
+            // 1. Hero Router & Network Detection Card (Compact & Elegant)
             item {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("auto_discovered_router_card"),
-                    shape = RoundedCornerShape(18.dp),
+                    shape = RoundedCornerShape(14.dp),
                     colors = CardDefaults.cardColors(
                         containerColor = if (useManualNetworkSettings)
                             MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
                         else
                             MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f)
                     ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
                 ) {
-                    Column(modifier = Modifier.padding(18.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -272,11 +272,13 @@ fun ConnectRouterScreen(
                                         text = if (useManualNetworkSettings) "تخصيص يدوي للشبكة (اختياري)" else "التعرف التلقائي على الراوتر",
                                         fontWeight = FontWeight.Bold,
                                         style = MaterialTheme.typography.titleSmall,
+                                        fontSize = 13.sp,
                                         color = if (useManualNetworkSettings) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimaryContainer
                                     )
                                     Text(
-                                        text = if (useManualNetworkSettings) "محدد يدوياً في الإعدادات المتقدمة" else "الافتراضي: تم الجلب من شبكتك المتصلة",
+                                        text = if (useManualNetworkSettings) "محدد يدوياً في الإعدادات" else "الافتراضي: تم الجلب من شبكتك",
                                         style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.outline
                                     )
                                 }
@@ -290,54 +292,52 @@ fun ConnectRouterScreen(
                                     Text(
                                         text = "جاري الفحص...",
                                         style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 11.sp,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                     CircularProgressIndicator(
-                                        modifier = Modifier.size(18.dp),
+                                        modifier = Modifier.size(16.dp),
                                         strokeWidth = 2.dp,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
                             } else {
                                 StatusPill(
-                                    text = if (discoveredRouter?.isReachable == true) "راوتر متصل ومستجيب" else "تم التعرف على الشبكة",
+                                    text = if (discoveredRouter?.isReachable == true) "راوتر مستجيب" else "تم التعرف",
                                     type = if (discoveredRouter?.isReachable == true) StatusType.SUCCESS else StatusType.INFO
                                 )
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
 
-                        // Large Display of Active Target IP and Port
+                        // Compact Display of Active Target IP and Port
                         Surface(
                             color = MaterialTheme.colorScheme.surface,
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column {
                                     Text(
-                                        text = "عنوان IP الراوتر المستهدف:",
+                                        text = "عنوان IP الراوتر:",
                                         style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                     Text(
                                         text = activeIp,
-                                        style = MaterialTheme.typography.titleLarge,
+                                        style = MaterialTheme.typography.titleMedium,
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp,
                                         color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        text = if (useManualNetworkSettings) "إدخال يدوي" else "جلب تلقائي من البوابة (Gateway)",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                                     )
                                 }
 
@@ -345,24 +345,21 @@ fun ConnectRouterScreen(
                                     Text(
                                         text = "المنفذ (Port):",
                                         style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                     Text(
-                                        text = "$activePort",
-                                        style = MaterialTheme.typography.titleMedium,
+                                        text = "$activePort (${if (activePort == 8728) "API" else "REST"})",
+                                        style = MaterialTheme.typography.labelMedium,
                                         fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        text = if (activePort == 8728) "API ميكروتك" else if (activePort == 80 || activePort == 443) "REST API" else "مخصص",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp
                                     )
                                 }
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
 
                         // Wi-Fi Connection Info & Device IP
                         Row(
@@ -372,17 +369,18 @@ fun ConnectRouterScreen(
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Wifi,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(14.dp)
                                 )
                                 Text(
                                     text = localNetwork.wifiSsid ?: "شبكة Wi-Fi متصلة",
-                                    style = MaterialTheme.typography.bodySmall,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
@@ -390,32 +388,9 @@ fun ConnectRouterScreen(
                             Text(
                                 text = "IP جهازك: ${localNetwork.deviceIp ?: "--"}",
                                 style = MaterialTheme.typography.labelSmall,
+                                fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // Quick In-Card Refresh & Search Button
-                        OutlinedButton(
-                            onClick = { viewModel.refreshDiscovery(context, showToast = true) },
-                            enabled = !isDiscovering,
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            if (isDiscovering) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("جاري فحص وبحث الشبكة والراوتر...")
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("إعادة فحص وبحث الشبكة وجلب الراوتر الآن")
-                            }
                         }
                     }
                 }

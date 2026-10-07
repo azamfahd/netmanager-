@@ -12,38 +12,38 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
-    primary = RouterBlueDark,
-    onPrimary = Color(0xFF002244),
-    primaryContainer = RouterBlueContainerDark,
-    onPrimaryContainer = Color(0xFFD1E4FF),
+    primary = CyberGreenDark,
+    onPrimary = Color(0xFF003820),
+    primaryContainer = CyberGreenContainerDark,
+    onPrimaryContainer = Color(0xFFA6FFD2),
     secondary = NetworkCyanLight,
-    onSecondary = Color(0xFF00363D),
-    secondaryContainer = Color(0xFF004F58),
-    onSecondaryContainer = Color(0xFF8CEEFF),
+    onSecondary = Color(0xFF003730),
+    secondaryContainer = Color(0xFF004D40),
+    onSecondaryContainer = Color(0xFFB2DFDB),
     tertiary = Color(0xFFFFB74D),
-    background = Color(0xFF0F141C),
-    surface = Color(0xFF141A24),
-    surfaceVariant = Color(0xFF202734),
-    onBackground = Color(0xFFE2E2E6),
-    onSurface = Color(0xFFE2E2E6),
-    error = Color(0xFFFFB4AB)
+    background = SurfaceDark,
+    surface = SurfaceDarkCard,
+    surfaceVariant = SurfaceDarkVariant,
+    onBackground = Color(0xFFE8F5EE),
+    onSurface = Color(0xFFE8F5EE),
+    error = Color(0xFFFF8A80)
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = RouterBlue,
+    primary = CyberGreenPrimary,
     onPrimary = Color.White,
-    primaryContainer = RouterBlueContainer,
-    onPrimaryContainer = RouterOnBlueContainer,
+    primaryContainer = CyberGreenContainer,
+    onPrimaryContainer = CyberOnGreenContainer,
     secondary = NetworkCyan,
     onSecondary = Color.White,
     secondaryContainer = NetworkCyanContainer,
-    onSecondaryContainer = Color(0xFF002022),
-    tertiary = Color(0xFFE65100),
+    onSecondaryContainer = Color(0xFF003D33),
+    tertiary = Color(0xFFF57C00),
     background = SurfaceLight,
     surface = SurfaceLightCard,
-    surfaceVariant = Color(0xFFECEFF1),
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
+    surfaceVariant = SurfaceLightVariant,
+    onBackground = Color(0xFF10221A),
+    onSurface = Color(0xFF10221A),
     error = StatusErrorRed
 )
 

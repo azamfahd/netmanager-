@@ -344,6 +344,74 @@ class RouterOsApiClient {
         }
     }
 
+    suspend fun getSystemIdentity(): Result<String> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/system/identity/print"))
+                val sentences = readAllSentencesUntilDone()
+                val re = sentences.firstOrNull { it.firstOrNull() == "!re" }
+                val name = if (re != null) parseSentenceToMap(re)["name"].orEmpty() else ""
+                Result.success(name)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getNetworkInterfaces(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/interface/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getWirelessInterfaces(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/interface/wireless/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getDiscoveredNeighbors(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/ip/neighbor/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
     private fun parseSentenceToMap(sentence: List<String>): Map<String, String> {
         val map = mutableMapOf<String, String>()
         for (word in sentence) {

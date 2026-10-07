@@ -1,5 +1,12 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,27 +19,33 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.AddCard
 import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.ConfirmationNumber
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -45,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -53,16 +67,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.ConnectionState
+import com.example.data.model.HotspotActiveUser
 import com.example.data.network.NetworkUtils
 import com.example.ui.components.ConfirmDialog
-import com.example.ui.components.MetricCard
-import com.example.ui.components.ResourceProgressCard
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StatusType
+import com.example.ui.theme.CyberGreenBright
+import com.example.ui.theme.CyberGreenNeon
+import com.example.ui.theme.CyberGreenPrimary
 import com.example.ui.theme.NetworkCyan
-import com.example.ui.theme.RouterBlue
-import com.example.ui.theme.StatusActiveGreen
-import com.example.ui.theme.StatusWarningAmber
+import com.example.ui.theme.StatusErrorRed
 import com.example.ui.viewmodel.MainViewModel
 
 @Composable
@@ -79,10 +93,13 @@ fun DashboardScreen(
     val resource by viewModel.resourceState.collectAsStateWithLifecycle()
     val activeUsers by viewModel.activeUsers.collectAsStateWithLifecycle()
     val cards by viewModel.cards.collectAsStateWithLifecycle()
+    val networkNodes by viewModel.networkNodes.collectAsStateWithLifecycle()
 
     var showRebootDialog by remember { mutableStateOf(false) }
 
     val isConnectedAsDemo = (connectionState as? ConnectionState.Connected)?.isDemo == true
+    val connectedIp = (connectionState as? ConnectionState.Connected)?.ipAddress ?: "192.168.88.1"
+    val connectedRouterName = (connectionState as? ConnectionState.Connected)?.routerName ?: resource.boardName
 
     LazyColumn(
         modifier = modifier
@@ -94,257 +111,169 @@ fun DashboardScreen(
             Spacer(modifier = Modifier.height(4.dp))
         }
 
-        // Live Router Banner Card
+        // 1. Cyber Router Header Hub (شريط الهوية والراوتر السيبراني)
         item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("router_status_banner"),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                text = resource.boardName,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                            Text(
-                                text = "إصدار RouterOS: ${resource.version}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
-                            )
-                        }
-
-                        StatusPill(
-                            text = if (isConnectedAsDemo) "وضع تجريبي (Demo)" else "متصل بالراوتر مباشر",
-                            type = if (isConnectedAsDemo) StatusType.INFO else StatusType.SUCCESS
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                text = "مدة تشغيل الراوتر (Uptime):",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
-                            )
-                            Text(
-                                text = resource.uptime,
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        }
-
-                        IconButton(
-                            onClick = { viewModel.refreshData() },
-                            modifier = Modifier.testTag("dashboard_refresh_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "تحديث البيانات الآن",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Real-Time Throughput / Speed Card
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Speed,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                text = "حركة مرور الشبكة المباشرة (Traffic)",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        Text(
-                            text = "مباشر الآن",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = StatusActiveGreen,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        SpeedGauge(
-                            title = "سرعة التنزيل (Download / Rx)",
-                            speed = NetworkUtils.formatSpeed(resource.rxSpeedKbps),
-                            icon = Icons.Default.ArrowDownward,
-                            color = StatusActiveGreen
-                        )
-                        SpeedGauge(
-                            title = "سرعة الرفع (Upload / Tx)",
-                            speed = NetworkUtils.formatSpeed(resource.txSpeedKbps),
-                            icon = Icons.Default.ArrowUpward,
-                            color = NetworkCyan
-                        )
-                    }
-                }
-            }
-        }
-
-        // Metrics 2x2 Grid
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    MetricCard(
-                        title = "المستخدمين النشطون",
-                        value = "${activeUsers.size}",
-                        subtitle = "متصلون الآن بالهوتسبوت",
-                        icon = Icons.Default.Group,
-                        iconTint = RouterBlue,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { onNavigateToActiveUsers() },
-                        testTag = "metric_active_users"
-                    )
-
-                    MetricCard(
-                        title = "إجمالي كروت الشبكة",
-                        value = "${cards.size}",
-                        subtitle = "${cards.count { !it.isActive && !it.isExpired }} كرت متاح للبيع",
-                        icon = Icons.Default.ConfirmationNumber,
-                        iconTint = NetworkCyan,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { onNavigateToCards() },
-                        testTag = "metric_total_cards"
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    val memUsedPercent = (100 - (resource.freeMemoryBytes.toFloat() / resource.totalMemoryBytes * 100)).toInt()
-                    ResourceProgressCard(
-                        title = "استهلاك المعالج CPU",
-                        percentage = resource.cpuLoad,
-                        detailText = "حمل المعالج: ${resource.cpuLoad}%",
-                        barColor = if (resource.cpuLoad > 75) MaterialTheme.colorScheme.error else RouterBlue,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    ResourceProgressCard(
-                        title = "استهلاك الذاكرة RAM",
-                        percentage = memUsedPercent.coerceIn(10, 95),
-                        detailText = "${NetworkUtils.formatBytes(resource.freeMemoryBytes)} متاح",
-                        barColor = NetworkCyan,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        }
-
-        // Quick Actions
-        item {
-            Text(
-                text = "الإجراءات والعمليات السريعة",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+            CyberRouterHubCard(
+                routerName = connectedRouterName,
+                boardName = resource.boardName,
+                version = resource.version,
+                ipAddress = connectedIp,
+                uptime = resource.uptime,
+                isDemo = isConnectedAsDemo,
+                onRefresh = { viewModel.refreshData() }
             )
         }
 
+        // 2. Real-Time Cyber Traffic HUD (حركة المرور والسرعة الحية)
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                QuickActionChip(
-                    icon = Icons.Default.AddCard,
-                    label = "توليد كروت",
-                    onClick = onOpenBatchGenerator,
-                    modifier = Modifier.weight(1f)
-                )
-                QuickActionChip(
-                    icon = Icons.Default.Print,
-                    label = "طباعة كروت",
-                    onClick = onOpenPrintScreen,
-                    modifier = Modifier.weight(1f)
-                )
-                QuickActionChip(
-                    icon = Icons.Default.Tune,
-                    label = "باقات السرعة",
-                    onClick = onNavigateToProfiles,
-                    modifier = Modifier.weight(1f)
-                )
-                QuickActionChip(
-                    icon = Icons.Default.RestartAlt,
-                    label = "إعادة تشغيل",
-                    onClick = { showRebootDialog = true },
-                    modifier = Modifier.weight(1f),
-                    color = MaterialTheme.colorScheme.error
-                )
+            CyberTrafficHudCard(
+                rxSpeedKbps = resource.rxSpeedKbps,
+                txSpeedKbps = resource.txSpeedKbps
+            )
+        }
+
+        // 3. Network Health & Nodes Mini Summary (ملخص المنظومة والأبراج)
+        item {
+            CyberSystemSummaryRow(
+                onlineNodesCount = networkNodes.count { it.isOnline },
+                totalNodesCount = networkNodes.size,
+                activeUsersCount = activeUsers.size,
+                availableCardsCount = cards.count { !it.isActive && !it.isExpired }
+            )
+        }
+
+        // 4. Interactive 2x2 Cyber Metrics Matrix (مصفوفة الإحصائيات الذكية)
+        item {
+            CyberMetricsMatrix(
+                activeUsersCount = activeUsers.size,
+                totalCardsCount = cards.size,
+                availableCardsCount = cards.count { !it.isActive && !it.isExpired },
+                cpuLoad = resource.cpuLoad,
+                freeMemoryBytes = resource.freeMemoryBytes,
+                totalMemoryBytes = resource.totalMemoryBytes,
+                onActiveUsersClick = onNavigateToActiveUsers,
+                onCardsClick = onNavigateToCards
+            )
+        }
+
+        // 5. Cyber Quick Actions (العمليات والإجراءات السريعة)
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "العمليات والإجراءات السريعة",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "التحكم المباشر",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CyberGreenPrimary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CyberActionCard(
+                        icon = Icons.Default.AddCard,
+                        title = "توليد كروت",
+                        subtitle = "طباعة دفعة",
+                        accentColor = CyberGreenBright,
+                        onClick = onOpenBatchGenerator,
+                        modifier = Modifier.weight(1f),
+                        testTag = "action_generate_cards"
+                    )
+
+                    CyberActionCard(
+                        icon = Icons.Default.Print,
+                        title = "طباعة كروت",
+                        subtitle = "تصدير فوري",
+                        accentColor = NetworkCyan,
+                        onClick = onOpenPrintScreen,
+                        modifier = Modifier.weight(1f),
+                        testTag = "action_print_cards"
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CyberActionCard(
+                        icon = Icons.Default.Tune,
+                        title = "باقات السرعة",
+                        subtitle = "إدارة الخطط",
+                        accentColor = NetworkCyan,
+                        onClick = onNavigateToProfiles,
+                        modifier = Modifier.weight(1f),
+                        testTag = "action_speed_profiles"
+                    )
+
+                    CyberActionCard(
+                        icon = Icons.Default.RestartAlt,
+                        title = "إعادة تشغيل",
+                        subtitle = "إعادة تشغيل الراوتر",
+                        accentColor = StatusErrorRed,
+                        onClick = { showRebootDialog = true },
+                        modifier = Modifier.weight(1f),
+                        testTag = "action_reboot_router"
+                    )
+                }
             }
         }
 
-        // Active Users Quick Preview
+        // 6. Recent Active Hotspot Users (أحدث المستخدمين المتصلين)
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "المستخدمين المتصلين حالياً (${activeUsers.size})",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(CyberGreenNeon)
+                    )
+                    Text(
+                        text = "المستخدمين المتصلين (${activeUsers.size})",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
                 OutlinedButton(
                     onClick = onNavigateToActiveUsers,
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, CyberGreenPrimary.copy(alpha = 0.5f)),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = CyberGreenPrimary
+                    ),
+                    modifier = Modifier.testTag("dashboard_view_all_users_btn")
                 ) {
-                    Text("عرض الكل")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("عرض الكل", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Icon(
+                            imageVector = Icons.Default.ArrowForward,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
                 }
             }
         }
@@ -353,75 +282,50 @@ fun DashboardScreen(
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                 ) {
-                    Box(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(24.dp),
-                        contentAlignment = Alignment.Center
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
+                        Icon(
+                            imageVector = Icons.Default.Devices,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.size(36.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "لا يوجد مستخدمون نشطون حالياً",
+                            text = "لا يوجد مستخدمون نشطون متصلون حالياً بالهوتسبوت",
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
             }
         } else {
-            items(minOf(activeUsers.size, 3)) { index ->
+            items(minOf(activeUsers.size, 4)) { index ->
                 val user = activeUsers[index]
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                text = user.user,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "IP: ${user.address} • MAC: ${user.macAddress}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Column(horizontalAlignment = Alignment.End) {
-                            StatusPill(text = user.uptime, type = StatusType.SUCCESS)
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "تحميل: ${NetworkUtils.formatBytes(user.bytesOut)}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
+                CyberActiveUserItem(user = user)
             }
         }
 
         item {
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(20.dp))
         }
     }
 
     if (showRebootDialog) {
         ConfirmDialog(
             title = "إعادة تشغيل راوتر ميكروتك",
-            message = "هل أنت متأكد من رغبتك في إرسال أمر إعادة تشغيل الراوتر؟ سيتم قطع الاتصال بالشبكة مؤقتاً لجميع المستخدمين.",
+            message = "هل أنت متأكد من رغبتك في إرسال أمر إعادة تشغيل الراوتر؟ سيتم قطع الاتصال بالشبكة مؤقتاً لجميع المستخدمين حتى يعود الراوتر للعمل.",
             confirmText = "إعادة التشغيل الآن",
             isDestructive = true,
             onConfirm = { viewModel.rebootRouter() },
@@ -430,75 +334,783 @@ fun DashboardScreen(
     }
 }
 
+/**
+ * 1. Cyber Router Header Hub Card
+ */
 @Composable
-fun SpeedGauge(
-    title: String,
-    speed: String,
-    icon: ImageVector,
-    color: Color
+private fun CyberRouterHubCard(
+    routerName: String,
+    boardName: String,
+    version: String,
+    ipAddress: String,
+    uptime: String,
+    isDemo: Boolean,
+    onRefresh: () -> Unit
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("router_status_banner"),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        ),
+        border = BorderStroke(1.dp, CyberGreenNeon.copy(alpha = 0.4f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp)
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = color,
-                modifier = Modifier.size(16.dp)
-            )
-            Text(
-                text = title,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(CyberGreenBright, CyberGreenPrimary)
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Dns,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    Column {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = routerName.ifEmpty { boardName },
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            CyberPulseDot()
+                        }
+
+                        Text(
+                            text = "IP: $ipAddress • RouterOS: $version",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    StatusPill(
+                        text = if (isDemo) "وضع تجريبي" else "متصل حقيقي",
+                        type = if (isDemo) StatusType.INFO else StatusType.SUCCESS
+                    )
+
+                    IconButton(
+                        onClick = onRefresh,
+                        modifier = Modifier
+                            .size(32.dp)
+                            .testTag("dashboard_refresh_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "تحديث البيانات الآن",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Uptime & Status Strip
+            Surface(
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AccessTime,
+                            contentDescription = null,
+                            tint = CyberGreenPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "مدة التشغيل (Uptime):",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    Text(
+                        text = uptime,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        color = CyberGreenPrimary
+                    )
+                }
+            }
         }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = speed,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = color
-        )
     }
 }
 
+/**
+ * Animated Cyber Radar Pulse Dot
+ */
 @Composable
-fun QuickActionChip(
+private fun CyberPulseDot() {
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val alpha by infiniteTransition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_alpha"
+    )
+
+    Box(
+        modifier = Modifier
+            .size(8.dp)
+            .clip(CircleShape)
+            .background(CyberGreenNeon.copy(alpha = alpha))
+    )
+}
+
+/**
+ * 2. Real-Time Cyber Traffic HUD (شاشات حركة المرور والسرعة الحية)
+ */
+@Composable
+private fun CyberTrafficHudCard(
+    rxSpeedKbps: Double,
+    txSpeedKbps: Double
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("cyber_traffic_hud"),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        border = BorderStroke(1.dp, CyberGreenPrimary.copy(alpha = 0.2f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(CyberGreenBright.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Speed,
+                            contentDescription = null,
+                            tint = CyberGreenBright,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    Text(
+                        text = "مراقبة سرعة وتدفق البيانات (Traffic)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Surface(
+                    color = CyberGreenBright.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(CyberGreenNeon)
+                        )
+                        Text(
+                            text = "بث فوري",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CyberGreenBright,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Download Gauge
+                CyberSpeedMeter(
+                    title = "التنزيل (Download / Rx)",
+                    speed = NetworkUtils.formatSpeed(rxSpeedKbps),
+                    icon = Icons.Default.ArrowDownward,
+                    color = CyberGreenBright,
+                    trafficFraction = (rxSpeedKbps.toFloat() / 10240f).coerceIn(0.08f, 1f),
+                    modifier = Modifier.weight(1f)
+                )
+
+                // Upload Gauge
+                CyberSpeedMeter(
+                    title = "الرفع (Upload / Tx)",
+                    speed = NetworkUtils.formatSpeed(txSpeedKbps),
+                    icon = Icons.Default.ArrowUpward,
+                    color = NetworkCyan,
+                    trafficFraction = (txSpeedKbps.toFloat() / 5120f).coerceIn(0.08f, 1f),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Individual Cyber Speed Meter
+ */
+@Composable
+private fun CyberSpeedMeter(
+    title: String,
+    speed: String,
     icon: ImageVector,
-    label: String,
+    color: Color,
+    trafficFraction: Float,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        color = color.copy(alpha = 0.06f),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.25f))
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(color.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = color,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = speed,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.ExtraBold,
+                color = color
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            LinearProgressIndicator(
+                progress = { trafficFraction },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp)),
+                color = color,
+                trackColor = color.copy(alpha = 0.15f)
+            )
+        }
+    }
+}
+
+/**
+ * 3. Cyber System Summary Strip
+ */
+@Composable
+private fun CyberSystemSummaryRow(
+    onlineNodesCount: Int,
+    totalNodesCount: Int,
+    activeUsersCount: Int,
+    availableCardsCount: Int
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Nodes Status
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CellTower,
+                    contentDescription = null,
+                    tint = CyberGreenPrimary,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "الأبراج: $onlineNodesCount/$totalNodesCount نشط",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            // Cards Status
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ConfirmationNumber,
+                    contentDescription = null,
+                    tint = NetworkCyan,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "الكروت: $availableCardsCount جاهز للبيع",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 4. Interactive 2x2 Cyber Metrics Matrix
+ */
+@Composable
+private fun CyberMetricsMatrix(
+    activeUsersCount: Int,
+    totalCardsCount: Int,
+    availableCardsCount: Int,
+    cpuLoad: Int,
+    freeMemoryBytes: Long,
+    totalMemoryBytes: Long,
+    onActiveUsersClick: () -> Unit,
+    onCardsClick: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Active Users Card
+            CyberStatCard(
+                title = "المستخدمين النشطين",
+                value = "$activeUsersCount",
+                subtitle = "متصلون الآن بالهوتسبوت",
+                icon = Icons.Default.Group,
+                accentColor = CyberGreenBright,
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable { onActiveUsersClick() },
+                testTag = "metric_active_users"
+            )
+
+            // Total Cards Card
+            CyberStatCard(
+                title = "إجمالي الكروت",
+                value = "$totalCardsCount",
+                subtitle = "$availableCardsCount كرت متاح للبيع",
+                icon = Icons.Default.ConfirmationNumber,
+                accentColor = NetworkCyan,
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable { onCardsClick() },
+                testTag = "metric_total_cards"
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // CPU Load Card
+            val cpuColor = if (cpuLoad > 75) StatusErrorRed else CyberGreenBright
+            CyberProgressCard(
+                title = "استهلاك المعالج CPU",
+                percentage = cpuLoad,
+                detailText = "حمل المعالج: $cpuLoad%",
+                accentColor = cpuColor,
+                icon = Icons.Default.Memory,
+                modifier = Modifier.weight(1f)
+            )
+
+            // RAM Memory Card
+            val memUsedPercent = (100 - (freeMemoryBytes.toFloat() / totalMemoryBytes * 100)).toInt().coerceIn(10, 95)
+            CyberProgressCard(
+                title = "استهلاك الذاكرة RAM",
+                percentage = memUsedPercent,
+                detailText = "${NetworkUtils.formatBytes(freeMemoryBytes)} متاح",
+                accentColor = NetworkCyan,
+                icon = Icons.Default.Storage,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+/**
+ * Individual Cyber Metric Stat Card
+ */
+@Composable
+private fun CyberStatCard(
+    title: String,
+    value: String,
+    subtitle: String,
+    icon: ImageVector,
+    accentColor: Color,
+    modifier: Modifier = Modifier,
+    testTag: String = "cyber_stat_card"
+) {
+    Card(
+        modifier = modifier.testTag(testTag),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.25f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium
+                )
+
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(accentColor.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = value,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.ExtraBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Spacer(modifier = Modifier.height(2.dp))
+
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp
+            )
+        }
+    }
+}
+
+/**
+ * Individual Cyber Progress Card (CPU / RAM)
+ */
+@Composable
+private fun CyberProgressCard(
+    title: String,
+    percentage: Int,
+    detailText: String,
+    accentColor: Color,
+    icon: ImageVector,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.25f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                Text(
+                    text = "$percentage%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = accentColor
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            LinearProgressIndicator(
+                progress = { (percentage / 100f).coerceIn(0f, 1f) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(4.dp)),
+                color = accentColor,
+                trackColor = accentColor.copy(alpha = 0.15f)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = detailText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp
+            )
+        }
+    }
+}
+
+/**
+ * 5. Cyber Quick Action Button
+ */
+@Composable
+private fun CyberActionCard(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    accentColor: Color,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    color: Color = MaterialTheme.colorScheme.primary
+    testTag: String = "cyber_action_card"
 ) {
     Card(
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
+            .testTag(testTag)
+            .clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick),
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
-            containerColor = color.copy(alpha = 0.08f)
-        )
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.25f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(vertical = 12.dp, horizontal = 6.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = color,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = color
-            )
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(accentColor.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = title,
+                    tint = accentColor,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Column {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 6. Cyber Active User Item
+ */
+@Composable
+private fun CyberActiveUserItem(user: HotspotActiveUser) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(CyberGreenBright.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Devices,
+                        contentDescription = null,
+                        tint = CyberGreenBright,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Column {
+                    Text(
+                        text = user.user,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "IP: ${user.address} • MAC: ${user.macAddress}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            Column(horizontalAlignment = Alignment.End) {
+                StatusPill(text = user.uptime, type = StatusType.SUCCESS)
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "تحميل: ${NetworkUtils.formatBytes(user.bytesOut)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp
+                )
+            }
         }
     }
 }
