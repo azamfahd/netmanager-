@@ -80,6 +80,7 @@ import com.example.data.model.NodeSortOption
 import com.example.data.network.NetworkUtils
 import com.example.ui.components.ConfirmDialog
 import com.example.ui.components.NodeDetailDialog
+import com.example.ui.components.SpiderwebTopologyGraph
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StatusType
 import com.example.ui.theme.NetworkCyan
@@ -104,6 +105,7 @@ fun NetworkNodesScreen(
     var selectedNodeForDetail by remember { mutableStateOf<NetworkNode?>(null) }
     var nodeToDelete by remember { mutableStateOf<NetworkNode?>(null) }
     var filterRole by remember { mutableStateOf("الكل") }
+    var selectedDisplayTab by remember { mutableStateOf(0) }
 
     val totalOnline = allNodes.count { it.isOnline }
     val totalUsersOnNodes = allNodes.sumOf { it.connectedUsers }
@@ -177,18 +179,50 @@ fun NetworkNodesScreen(
                                 )
                             }
 
-                            Surface(
-                                color = Color.White.copy(alpha = 0.2f),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text(
-                                    text = "$totalOnline / ${allNodes.size} متصل",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                )
-                            }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Surface(
+                                        color = Color.White.copy(alpha = 0.2f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "$totalOnline / ${allNodes.size} متصل",
+                                            color = Color.White,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                        )
+                                    }
+
+                                    Button(
+                                        onClick = { showAddNodeDialog = true },
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color.White,
+                                            contentColor = MaterialTheme.colorScheme.primary
+                                        ),
+                                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(30.dp)
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Add,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                            Text(
+                                                text = "إضافة نقطة",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
                         }
 
                         // Stats 3 items in Row
@@ -298,7 +332,60 @@ fun NetworkNodesScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 2. Search & Controls
+            // 2. View Mode Tabs (Spiderweb Graph / List View / Load Analytics)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    val tabs = listOf(
+                        Triple(0, "🕸️ رسم شبكي عنكبوتي", Icons.Default.Dns),
+                        Triple(1, "📋 قائمة النقاط", Icons.Default.CellTower),
+                        Triple(2, "⚡ إحصائيات الضغط", Icons.Default.Speed)
+                    )
+
+                    tabs.forEach { (index, title, icon) ->
+                        val isSelected = selectedDisplayTab == index
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { selectedDisplayTab = index },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            contentColor = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = icon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = title,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 3. Search & Add Node Controls Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -320,11 +407,39 @@ fun NetworkNodesScreen(
                     shape = RoundedCornerShape(12.dp),
                     singleLine = true
                 )
+
+                Button(
+                    onClick = { showAddNodeDialog = true },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    ),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                    modifier = Modifier
+                        .height(56.dp)
+                        .testTag("btn_add_network_node_top")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "إضافة نقطة",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 3. Sorting & Filter Chips
+            // 4. Sorting & Filter Chips
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 // Sorting Options Row
                 Row(
@@ -369,80 +484,213 @@ fun NetworkNodesScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 4. Nodes List
-            if (displayedNodes.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(bottom = 80.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.CellTower,
-                            contentDescription = null,
-                            modifier = Modifier.size(56.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = if (searchQuery.isNotBlank()) "لا توجد نقاط تطابق البحث" else "لا توجد نقاط مضافة حالياً",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Button(
-                            onClick = { showAddNodeDialog = true },
-                            shape = RoundedCornerShape(12.dp)
+            // 5. Dynamic Content View depending on selectedDisplayTab
+            when (selectedDisplayTab) {
+                0 -> { // 🕸️ Spiderweb Topology Canvas
+                    if (displayedNodes.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(bottom = 80.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Default.Add, contentDescription = null)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("إضافة نقطة / أكسس بوينت جديد")
+                            Text("لا توجد نقاط مطابقة لعرض الشبكة العنكبوتية", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            item {
+                                val currentConfigState = viewModel.currentConfig.collectAsStateWithLifecycle()
+                                SpiderwebTopologyGraph(
+                                    centralRouterName = "الراوتر الرئيسي (سيرفر الشبكة)",
+                                    centralRouterIp = currentConfigState.value.ipAddress,
+                                    nodes = displayedNodes,
+                                    onNodeClick = { selectedNodeForDetail = it }
+                                )
+                            }
+                            item {
+                                Spacer(modifier = Modifier.height(80.dp))
+                            }
                         }
                     }
                 }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(displayedNodes, key = { it.id }) { node ->
-                        NetworkNodeItem(
-                            node = node,
-                            onDetailClick = { selectedNodeForDetail = node },
-                            onPing = { viewModel.pingNetworkNode(node.id) },
-                            onDelete = { nodeToDelete = node }
-                        )
-                    }
-                    item {
-                        Spacer(modifier = Modifier.height(80.dp)) // padding for FAB
+                1 -> { // 📋 Detailed List Cards
+                    if (displayedNodes.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(bottom = 80.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    imageVector = Icons.Default.CellTower,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(56.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = if (searchQuery.isNotBlank()) "لا توجد نقاط تطابق البحث" else "لا توجد نقاط مضافة حالياً",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Button(
+                                    onClick = { showAddNodeDialog = true },
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("إضافة نقطة / أكسس بوينت جديد")
+                                }
+                            }
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            items(displayedNodes, key = { it.id }) { node ->
+                                NetworkNodeItem(
+                                    node = node,
+                                    onDetailClick = { selectedNodeForDetail = node },
+                                    onPing = { viewModel.pingNetworkNode(node.id) },
+                                    onDelete = { nodeToDelete = node }
+                                )
+                            }
+                            item {
+                                Spacer(modifier = Modifier.height(80.dp))
+                            }
+                        }
                     }
                 }
-            }
-        }
+                2 -> { // ⚡ Top Load & Heavy Traffic Analytics View
+                    val highestLoadNode = displayedNodes.maxByOrNull { it.cpuLoadPercent }
+                    val highestUsersNode = displayedNodes.maxByOrNull { it.connectedUsers }
+                    val highestBandwidthNode = displayedNodes.maxByOrNull { it.rxSpeedKbps + it.txSpeedKbps }
 
-        // Floating Action Button: Add New Network Node / AP
-        FloatingActionButton(
-            onClick = { showAddNodeDialog = true },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(24.dp)
-                .testTag("fab_add_network_node"),
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = Color.White,
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Text(
-                    text = "إضافة نقطة شبكة",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp
-                )
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        item {
+                            Text(
+                                text = "🔥 تحليلات الضغط والاستهلاك الأعلى في الشبكة",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+
+                        // Top Load Card
+                        highestLoadNode?.let { node ->
+                            item {
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { selectedNodeForDetail = node },
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f))
+                                ) {
+                                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                Icon(Icons.Default.Speed, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                                                Text("النقطة الأكثر ضغطاً (الأعلى حملاً)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                            }
+                                            Surface(color = MaterialTheme.colorScheme.error, shape = RoundedCornerShape(8.dp)) {
+                                                Text("${node.cpuLoadPercent}% ضغط", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+                                            }
+                                        }
+                                        Text("${node.name} (${node.ipAddress})", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                        Text("الموقع: ${node.location} • عدد المستخدمين: ${node.connectedUsers} • وقت التشغيل: ${node.uptime}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        LinearProgressIndicator(
+                                            progress = { (node.cpuLoadPercent / 100f).coerceIn(0f, 1f) },
+                                            modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Top Users Card
+                        highestUsersNode?.let { node ->
+                            item {
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { selectedNodeForDetail = node },
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f))
+                                ) {
+                                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                Icon(Icons.Default.Group, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                                Text("النقطة الأعلى كثافة مستخدمين", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                            }
+                                            Surface(color = MaterialTheme.colorScheme.primary, shape = RoundedCornerShape(8.dp)) {
+                                                Text("${node.connectedUsers} مستخدم", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+                                            }
+                                        }
+                                        Text("${node.name} (${node.ipAddress})", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                        Text("نوع التغطية: ${node.role} • التردد: ${node.frequency}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Top Speed & Bandwidth Card
+                        highestBandwidthNode?.let { node ->
+                            item {
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { selectedNodeForDetail = node },
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.4f))
+                                ) {
+                                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                Icon(Icons.Default.SignalCellularAlt, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                                                Text("النقطة الأعلى سعة ونقل بيانات", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                            }
+                                            Surface(color = MaterialTheme.colorScheme.tertiary, shape = RoundedCornerShape(8.dp)) {
+                                                Text("${node.rxSpeedKbps.toInt()} Kbps / ${node.txSpeedKbps.toInt()} Kbps", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+                                            }
+                                        }
+                                        Text("${node.name} (${node.ipAddress})", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                        Text("قوة الإشارة: ${node.signalDbm} • وقت التشغيل: ${node.uptime}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+
+                        item {
+                            Spacer(modifier = Modifier.height(80.dp))
+                        }
+                    }
+                }
             }
         }
     }

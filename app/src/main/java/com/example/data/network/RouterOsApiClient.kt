@@ -25,25 +25,47 @@ class RouterOsApiClient {
     private var inStream: InputStream? = null
     private var outStream: OutputStream? = null
 
+    private var lastHost: String = ""
+    private var lastPort: Int = 8728
+    private var lastUsername: String = ""
+    private var lastPassword: String = ""
+
+    suspend fun ensureConnected(): Boolean {
+        if (socket != null && socket?.isClosed == false && socket?.isConnected == true) {
+            return true
+        }
+        if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
+            return connectAndLogin(lastHost, lastPort, lastUsername, lastPassword).isSuccess
+        }
+        return false
+    }
+
     suspend fun connectAndLogin(
         host: String,
         port: Int = 8728,
         username: String,
         password: String,
-        timeoutMs: Int = 3500
+        timeoutMs: Int = 6000
     ): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
                 close()
+                val cleanHost = host.trim()
+                val cleanUser = username.trim()
+                lastHost = cleanHost
+                lastPort = port
+                lastUsername = cleanUser
+                lastPassword = password
+
                 val sock = Socket()
-                sock.connect(InetSocketAddress(host, port), timeoutMs)
-                sock.soTimeout = 5000
+                sock.connect(InetSocketAddress(cleanHost, port), timeoutMs)
+                sock.soTimeout = 8000
                 socket = sock
                 inStream = sock.getInputStream()
                 outStream = sock.getOutputStream()
 
                 // Attempt RouterOS v6.43+ and v7 login
-                writeSentence(listOf("/login", "=name=$username", "=password=$password"))
+                writeSentence(listOf("/login", "=name=$cleanUser", "=password=$password"))
                 var response = readSentence()
 
                 if (response.isEmpty()) {
@@ -69,7 +91,7 @@ class RouterOsApiClient {
                     val digestHex = byteArrayToHexString(md5.digest())
                     val responseHash = "00$digestHex"
 
-                    writeSentence(listOf("/login", "=name=$username", "=response=$responseHash"))
+                    writeSentence(listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
                     response = readSentence()
                     if (response.firstOrNull() == "!done") {
                         return@withContext Result.success(true)
@@ -100,6 +122,7 @@ class RouterOsApiClient {
     suspend fun getSystemResource(): Result<RouterResource> {
         return withContext(Dispatchers.IO) {
             try {
+                ensureConnected()
                 writeSentence(listOf("/system/resource/print"))
                 val sentences = readAllSentencesUntilDone()
                 val re = sentences.firstOrNull { it.firstOrNull() == "!re" }
@@ -121,8 +144,8 @@ class RouterOsApiClient {
                         freeMemoryBytes = freeMem,
                         totalMemoryBytes = totalMem,
                         architecture = arch,
-                        rxSpeedKbps = Random.nextDouble(1500.0, 5200.0),
-                        txSpeedKbps = Random.nextDouble(800.0, 2400.0)
+                        rxSpeedKbps = 0.0,
+                        txSpeedKbps = 0.0
                     )
                     Result.success(res)
                 } else {
@@ -562,14 +585,24 @@ class RouterOsApiClient {
     suspend fun getSystemHealth(): Result<Map<String, String>> {
         return withContext(Dispatchers.IO) {
             try {
+                ensureConnected()
                 writeSentence(listOf("/system/health/print"))
                 val sentences = readAllSentencesUntilDone()
-                val re = sentences.firstOrNull { it.firstOrNull() == "!re" }
-                if (re != null) {
-                    Result.success(parseSentenceToMap(re))
-                } else {
-                    Result.success(emptyMap())
+                val map = mutableMapOf<String, String>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        val itemMap = parseSentenceToMap(s)
+                        val name = itemMap["name"]?.lowercase()
+                        val value = itemMap["value"]
+                        if (name != null && value != null) {
+                            map[name] = value
+                        }
+                        itemMap.forEach { (k, v) ->
+                            map[k.lowercase()] = v
+                        }
+                    }
                 }
+                Result.success(map)
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -767,7 +800,7 @@ class RouterOsApiClient {
             if (sentence.isEmpty()) break
             sentences.add(sentence)
             val first = sentence.firstOrNull() ?: ""
-            if (first == "!done" || first == "!trap") {
+            if (first == "!done" || first == "!fatal") {
                 break
             }
         }

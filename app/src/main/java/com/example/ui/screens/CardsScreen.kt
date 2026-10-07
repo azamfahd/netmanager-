@@ -102,6 +102,7 @@ fun CardsScreen(
     val filteredCards by viewModel.filteredCards.collectAsStateWithLifecycle()
     val allCards by viewModel.cards.collectAsStateWithLifecycle()
     val activeUsers by viewModel.activeUsers.collectAsStateWithLifecycle()
+    val userSessions by viewModel.userSessions.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val searchQuery by viewModel.cardSearchQuery.collectAsStateWithLifecycle()
     val currentFilter by viewModel.cardFilter.collectAsStateWithLifecycle()
@@ -113,6 +114,17 @@ fun CardsScreen(
     var selectedSessionForDetail by remember { mutableStateOf<UserSessionRecord?>(null) }
 
     val activeUsernames = remember(activeUsers) { activeUsers.map { it.user }.toSet() }
+    val distinctCards = remember(allCards) { allCards.distinctBy { it.name } }
+
+    val countActive = remember(distinctCards, activeUsernames) {
+        distinctCards.count { activeUsernames.contains(it.name) && !it.isExpired }
+    }
+    val countUnused = remember(distinctCards, activeUsernames) {
+        distinctCards.count { !activeUsernames.contains(it.name) && (it.uptime.isBlank() || it.uptime == "0s") && it.bytesIn == 0L && it.bytesOut == 0L && !it.isExpired }
+    }
+    val countExpired = remember(distinctCards) {
+        distinctCards.count { it.isExpired }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -185,28 +197,28 @@ fun CardsScreen(
                 FilterChip(
                     selected = currentFilter == CardFilter.ALL,
                     onClick = { viewModel.updateCardFilter(CardFilter.ALL) },
-                    label = { Text("الكل (${allCards.size})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    label = { Text("الكل (${distinctCards.size})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.height(36.dp)
                 )
                 FilterChip(
                     selected = currentFilter == CardFilter.UNUSED,
                     onClick = { viewModel.updateCardFilter(CardFilter.UNUSED) },
-                    label = { Text("جاهزة للبيع (${allCards.count { !activeUsernames.contains(it.name) && !it.isExpired && it.isUnused }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    label = { Text("جاهزة للبيع ($countUnused)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.height(36.dp)
                 )
                 FilterChip(
                     selected = currentFilter == CardFilter.ACTIVE,
                     onClick = { viewModel.updateCardFilter(CardFilter.ACTIVE) },
-                    label = { Text("مستخدمة / نشطة (${allCards.count { (activeUsernames.contains(it.name) || it.isActive) && !it.isExpired }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    label = { Text("نشطة حالياً ($countActive)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.height(36.dp)
                 )
                 FilterChip(
                     selected = currentFilter == CardFilter.EXPIRED,
                     onClick = { viewModel.updateCardFilter(CardFilter.EXPIRED) },
-                    label = { Text("منتهية (${allCards.count { it.isExpired }})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    label = { Text("منتهية ($countExpired)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.height(36.dp)
                 )
@@ -255,23 +267,25 @@ fun CardsScreen(
                         HotspotCardItem(
                             card = card,
                             onClick = {
-                                val session = UserSessionRecord(
+                                val realSession = userSessions.find { s -> s.username.equals(card.name, ignoreCase = true) }
+                                val activeUser = activeUsers.find { u -> u.user.equals(card.name, ignoreCase = true) }
+                                val session = realSession ?: UserSessionRecord(
                                     id = card.id,
                                     username = card.name,
-                                    ipAddress = "192.168.88.${(100..240).random()}",
-                                    macAddress = "D4:6A:A8:12:${card.name.takeLast(4).chunked(2).joinToString(":")}",
-                                    isOnline = card.isActive && !card.isExpired,
-                                    loginTime = if (card.isActive) "اليوم 10:15 ص" else "غير متصل",
-                                    logoutTime = if (card.isActive) "متصل الآن (جلسة نشطة)" else "كرت جاهز / غير متصل",
-                                    duration = if (card.uptime != "0s") card.uptime else "لم يتم الاستخدام",
-                                    bytesIn = card.bytesIn,
-                                    bytesOut = card.bytesOut,
-                                    totalBytes = card.bytesIn + card.bytesOut,
-                                    terminateReason = if (card.isExpired) "انتهاء الرصيد / الباقة" else if (card.isActive) "جلسة نشطة حالياً" else "كرت جاهز للبيع",
+                                    ipAddress = activeUser?.address?.ifBlank { "غير متصل" } ?: "192.168.88.x",
+                                    macAddress = activeUser?.macAddress?.ifBlank { "00:00:00:00:00:00" } ?: "غير مسجل",
+                                    isOnline = activeUser != null || (card.isActive && !card.isExpired),
+                                    loginTime = if (activeUser != null) "متصل الآن (${activeUser.uptime})" else if (card.uptime != "0s") "جلسة سابقة (${card.uptime})" else "غير متصل",
+                                    logoutTime = if (activeUser != null) "نشط الآن" else if (card.isExpired) "منتهي الاستهلاك" else "كرت جاهز / توقف",
+                                    duration = if (activeUser != null) activeUser.uptime else if (card.uptime != "0s") card.uptime else "لم يبدأ",
+                                    bytesIn = activeUser?.bytesIn ?: card.bytesIn,
+                                    bytesOut = activeUser?.bytesOut ?: card.bytesOut,
+                                    totalBytes = (activeUser?.bytesIn ?: card.bytesIn) + (activeUser?.bytesOut ?: card.bytesOut),
+                                    terminateReason = if (card.isExpired) "انتهاء رصيد الكرت" else if (activeUser != null) "جلسة نشطة حالياً عبر ${activeUser.nodeName}" else if (card.uptime != "0s") "توقف / خروج الجلسة" else "كرت جاهز للبيع",
                                     profile = card.profile,
                                     price = card.price,
-                                    deviceInfo = DeviceDetector.detectDevice("D4:6A:A8:12:34:56", card.comment, card.name),
-                                    comment = card.comment
+                                    deviceInfo = DeviceDetector.detectDevice(activeUser?.macAddress ?: "", card.comment, card.name),
+                                    comment = card.comment.ifBlank { "كرت شبكة ميكروتك" }
                                 )
                                 selectedSessionForDetail = session
                             },

@@ -323,17 +323,20 @@ class MainViewModel(
         cards, activeUsers, _cardSearchQuery, _cardFilter
     ) { allCards, liveActiveUsers, query, filter ->
         val activeNames = liveActiveUsers.map { it.user }.toSet()
-        allCards.filter { card ->
+        allCards.distinctBy { it.name }.filter { card ->
             val matchesQuery = query.isBlank() ||
                     card.name.contains(query, ignoreCase = true) ||
                     card.comment.contains(query, ignoreCase = true) ||
                     card.profile.contains(query, ignoreCase = true)
 
-            val isCurrentlyOnline = activeNames.contains(card.name) || card.isActive
+            val isCurrentlyOnline = activeNames.contains(card.name)
+            val isUsedOffline = !isCurrentlyOnline && (card.bytesIn > 0 || card.bytesOut > 0 || (card.uptime.isNotBlank() && card.uptime != "0s"))
+            val isUnused = !isCurrentlyOnline && !isUsedOffline && !card.isExpired
+
             val matchesFilter = when (filter) {
                 CardFilter.ALL -> true
                 CardFilter.ACTIVE -> isCurrentlyOnline && !card.isExpired
-                CardFilter.UNUSED -> !isCurrentlyOnline && !card.isExpired && card.isUnused
+                CardFilter.UNUSED -> isUnused
                 CardFilter.EXPIRED -> card.isExpired
             }
 

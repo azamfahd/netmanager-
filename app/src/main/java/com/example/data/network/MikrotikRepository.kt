@@ -28,15 +28,16 @@ import kotlin.random.Random
 class MikrotikRepository {
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
-        .writeTimeout(5, TimeUnit.SECONDS)
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
         .build()
 
     private val routerOsApiClient = RouterOsApiClient()
     private var isApiSocketMode = false
 
     private var activeConfig: RouterConnectionConfig? = null
+    private val customAddedNodes = mutableListOf<com.example.data.model.NetworkNode>()
 
     // State Holders
     private val _resourceState = MutableStateFlow(RouterResource())
@@ -486,10 +487,15 @@ class MikrotikRepository {
     suspend fun verifyAndConnect(config: RouterConnectionConfig): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                activeConfig = config
-                if (config.isDemoMode) {
+                val cleanConfig = config.copy(
+                    ipAddress = config.ipAddress.trim(),
+                    username = config.username.trim(),
+                    password = config.password.trim()
+                )
+                activeConfig = cleanConfig
+                if (cleanConfig.isDemoMode) {
                     delay(300)
-                    adaptDataToConfig(config)
+                    adaptDataToConfig(cleanConfig)
                     return@withContext Result.success(true)
                 }
 
@@ -503,12 +509,12 @@ class MikrotikRepository {
                 _activityEvents.value = emptyList()
 
                 // 1. If user explicitly specified port 8728, connect directly via native RouterOS API socket
-                if (config.port == 8728) {
+                if (cleanConfig.port == 8728) {
                     val socketResult = routerOsApiClient.connectAndLogin(
-                        host = config.ipAddress,
+                        host = cleanConfig.ipAddress,
                         port = 8728,
-                        username = config.username,
-                        password = config.password
+                        username = cleanConfig.username,
+                        password = cleanConfig.password
                     )
                     if (socketResult.isSuccess) {
                         isApiSocketMode = true
@@ -522,9 +528,9 @@ class MikrotikRepository {
                 // 2. If port 80 / 443: Attempt RouterOS v7 REST API first
                 var restConnected = false
                 var is404Response = false
-                val protocol = if (config.useHttps) "https" else "http"
-                val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-                val credential = Credentials.basic(config.username, config.password)
+                val protocol = if (cleanConfig.useHttps) "https" else "http"
+                val baseUrl = "$protocol://${cleanConfig.ipAddress}:${cleanConfig.port}"
+                val credential = Credentials.basic(cleanConfig.username, cleanConfig.password)
 
                 try {
                     val request = Request.Builder()
@@ -694,7 +700,7 @@ class MikrotikRepository {
                     combinedCards.add(umCard)
                 }
             }
-            _cards.value = combinedCards
+            _cards.value = combinedCards.distinctBy { it.name }
 
             // 8. Fetch Profiles & IP Bindings
             val profResult = routerOsApiClient.getHotspotProfiles()
@@ -709,6 +715,33 @@ class MikrotikRepository {
             }
 
             // 9. Fetch Interfaces & Neighbors for Per-Node Distribution
+            val ifaces = routerOsApiClient.getNetworkInterfaces().getOrDefault(emptyList())
+            val ifaceStats = ifaces.mapIndexed { idx, it ->
+                val name = it["name"] ?: "ether${idx + 1}"
+                val rxB = it["rx-byte"]?.toLongOrNull() ?: 0L
+                val txB = it["tx-byte"]?.toLongOrNull() ?: 0L
+                val rxP = it["rx-packet"]?.toLongOrNull() ?: 0L
+                val txP = it["tx-packet"]?.toLongOrNull() ?: 0L
+                val isRunning = it["running"] == "true"
+                val disabled = it["disabled"] == "true"
+                com.example.data.model.InterfaceStats(
+                    id = it[".id"] ?: "if_$idx",
+                    name = name,
+                    type = it["type"] ?: "ether",
+                    macAddress = it["mac-address"] ?: "",
+                    rxBytes = rxB,
+                    txBytes = txB,
+                    rxPackets = rxP,
+                    txPackets = txP,
+                    isRunning = isRunning,
+                    disabled = disabled,
+                    comment = it["comment"] ?: ""
+                )
+            }
+            if (ifaceStats.isNotEmpty()) {
+                _interfaceStats.value = ifaceStats
+            }
+
             val wirelessList = routerOsApiClient.getWirelessInterfaces().getOrDefault(emptyList())
             val neighborsList = routerOsApiClient.getDiscoveredNeighbors().getOrDefault(emptyList())
 
@@ -727,8 +760,8 @@ class MikrotikRepository {
                 freeMemoryBytes = json.optLong("free-memory", 500 * 1024 * 1024L),
                 totalMemoryBytes = json.optLong("total-memory", 1024 * 1024 * 1024L),
                 architecture = json.optString("architecture-name", "arm64"),
-                rxSpeedKbps = Random.nextDouble(1200.0, 5400.0),
-                txSpeedKbps = Random.nextDouble(800.0, 2900.0)
+                rxSpeedKbps = _resourceState.value.rxSpeedKbps,
+                txSpeedKbps = _resourceState.value.txSpeedKbps
             )
         } catch (_: Exception) {}
     }
@@ -1006,7 +1039,7 @@ class MikrotikRepository {
                     }
                 } catch (_: Exception) {}
 
-                _cards.value = cardList
+                _cards.value = cardList.distinctBy { it.name }
 
                 // Fetch hotspot profiles
                 val profRequest = Request.Builder()
@@ -1297,8 +1330,22 @@ class MikrotikRepository {
             )
         }
 
-        // Add real neighbor APs discovered on the network
-        neighbors.forEachIndexed { idx, n ->
+        // Add real neighbor APs discovered on the network (deduplicated by MAC / IP / identity)
+        val uniqueNeighbors = neighbors
+            .filter {
+                val addr = it["address"].orEmpty().trim()
+                val mac = it["mac-address"].orEmpty().trim()
+                val id = it["identity"] ?: it["board"] ?: ""
+                addr.isNotBlank() || mac.isNotBlank() || id.isNotBlank()
+            }
+            .distinctBy {
+                val mac = it["mac-address"].orEmpty().uppercase().trim()
+                val ip = it["address"].orEmpty().trim()
+                val id = it["identity"] ?: it["board"] ?: ""
+                if (mac.isNotBlank()) mac else if (ip.isNotBlank()) ip else id
+            }
+
+        uniqueNeighbors.forEachIndexed { idx, n ->
             val nIdentity = n["identity"] ?: n["board"] ?: "أكسس بوينت فرعي"
             val nAddress = n["address"] ?: "$subnetPrefix.${idx + 10}"
             val nMac = n["mac-address"] ?: ""
@@ -1355,6 +1402,13 @@ class MikrotikRepository {
             )
         }
 
+        // Add custom user-added nodes that aren't already in list
+        customAddedNodes.forEach { customNode ->
+            if (nodesList.none { it.id == customNode.id || it.ipAddress == customNode.ipAddress }) {
+                nodesList.add(customNode)
+            }
+        }
+
         // Gateway / Main Router Node (claims all remaining clients connected directly to LAN/Ethernet)
         val remainingClients = activeList.filter { !assignedUserIds.contains(it.id) }
         val mainTotalBytes = remainingClients.sumOf { it.bytesIn + it.bytesOut }
@@ -1400,7 +1454,7 @@ class MikrotikRepository {
         )
 
         nodesList.add(0, mainRouterNode)
-        _networkNodes.value = nodesList
+        _networkNodes.value = nodesList.distinctBy { it.id.ifBlank { it.ipAddress } }
 
         // 3. Activity events log strictly from real active users
         val eventsList = mutableListOf<com.example.data.model.UserActivityEvent>()
@@ -1849,15 +1903,21 @@ class MikrotikRepository {
 
     suspend fun addNetworkNode(node: com.example.data.model.NetworkNode): Result<Boolean> {
         return withContext(Dispatchers.IO) {
+            if (customAddedNodes.none { it.id == node.id || it.ipAddress == node.ipAddress }) {
+                customAddedNodes.add(0, node)
+            }
             val list = _networkNodes.value.toMutableList()
-            list.add(0, node)
-            _networkNodes.value = list
+            if (list.none { it.id == node.id || it.ipAddress == node.ipAddress }) {
+                list.add(0, node)
+            }
+            _networkNodes.value = list.distinctBy { it.id.ifBlank { it.ipAddress } }
             Result.success(true)
         }
     }
 
     suspend fun deleteNetworkNode(nodeId: String): Result<Boolean> {
         return withContext(Dispatchers.IO) {
+            customAddedNodes.removeAll { it.id == nodeId }
             _networkNodes.value = _networkNodes.value.filter { it.id != nodeId }
             Result.success(true)
         }
