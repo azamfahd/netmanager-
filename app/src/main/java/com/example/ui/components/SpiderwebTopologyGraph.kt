@@ -37,13 +37,16 @@ import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
+import androidx.compose.material.icons.filled.ViewModule
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material3.Card
@@ -103,12 +106,14 @@ fun SpiderwebTopologyGraph(
     centralRouterIp: String,
     nodes: List<NetworkNode>,
     onNodeClick: (NetworkNode) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onToggleFullScreen: (() -> Unit)? = null
 ) {
     var zoomScale by remember { mutableFloatStateOf(1.0f) }
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
     var spacingScale by remember { mutableFloatStateOf(1.0f) }
+    var cardScale by remember { mutableFloatStateOf(1.0f) }
     var isCompactMode by remember { mutableStateOf(nodes.size > 12) }
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse_energy")
@@ -171,11 +176,11 @@ fun SpiderwebTopologyGraph(
     }
 
     // Mathematically calculated collision-free ring radii
-    val ringRadiiPx = remember(ringNodes, spacingScale, isCompactMode, localDensity) {
+    val ringRadiiPx = remember(ringNodes, spacingScale, cardScale, isCompactMode, localDensity) {
         val cardWidthDp = if (isCompactMode) 76.dp else 104.dp
         val cardHeightDp = if (isCompactMode) 36.dp else 68.dp
-        val cardWidthPx = with(localDensity) { cardWidthDp.toPx() }
-        val cardHeightPx = with(localDensity) { cardHeightDp.toPx() }
+        val cardWidthPx = with(localDensity) { (cardWidthDp * cardScale).toPx() }
+        val cardHeightPx = with(localDensity) { (cardHeightDp * cardScale).toPx() }
         val cardDiagPx = kotlin.math.sqrt(cardWidthPx * cardWidthPx + cardHeightPx * cardHeightPx)
         val centerNodeRadiusPx = with(localDensity) { 52.dp.toPx() }
         val minGapPx = with(localDensity) { 28.dp.toPx() }
@@ -435,6 +440,10 @@ fun SpiderwebTopologyGraph(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .offset(x = nodeDpX, y = nodeDpY)
+                    .graphicsLayer {
+                        scaleX = cardScale
+                        scaleY = cardScale
+                    }
             ) {
                 if (isCompactMode) {
                     CompactTopologyNodeBadge(
@@ -504,6 +513,28 @@ fun SpiderwebTopologyGraph(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
+                // Full Screen Maximize Button
+                if (onToggleFullScreen != null) {
+                    IconButton(
+                        onClick = onToggleFullScreen,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.OpenInFull,
+                            contentDescription = "عرض كامل ملء الشاشة",
+                            tint = CyberGreenNeon,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .width(20.dp)
+                            .height(1.dp)
+                            .background(Color.White.copy(alpha = 0.2f))
+                    )
+                }
+
                 // Zoom In
                 IconButton(
                     onClick = { zoomScale = (zoomScale + 0.15f).coerceAtMost(2.5f) },
@@ -566,13 +597,14 @@ fun SpiderwebTopologyGraph(
                     )
                 }
 
-                // Reset Camera Position & Zoom
+                // Reset Camera Position & Zoom & Sizes
                 IconButton(
                     onClick = {
                         zoomScale = 1.0f
                         panOffsetX = 0f
                         panOffsetY = 0f
                         spacingScale = 1.0f
+                        cardScale = 1.0f
                     },
                     modifier = Modifier.size(28.dp)
                 ) {
@@ -580,6 +612,39 @@ fun SpiderwebTopologyGraph(
                         imageVector = Icons.Default.Refresh,
                         contentDescription = "إعادة الضبط",
                         tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .width(20.dp)
+                        .height(1.dp)
+                        .background(Color.White.copy(alpha = 0.2f))
+                )
+
+                // Increase Card Size (تكبير حجم البطاقات)
+                IconButton(
+                    onClick = { cardScale = (cardScale + 0.15f).coerceAtMost(2.0f) },
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ViewModule,
+                        contentDescription = "تكبير حجم البطاقات",
+                        tint = NetworkCyanLight,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
+                // Decrease Card Size (تصغير حجم البطاقات)
+                IconButton(
+                    onClick = { cardScale = (cardScale - 0.15f).coerceAtLeast(0.6f) },
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FormatSize,
+                        contentDescription = "تصغير حجم البطاقات",
+                        tint = NetworkCyanLight,
                         modifier = Modifier.size(16.dp)
                     )
                 }

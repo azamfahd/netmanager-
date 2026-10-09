@@ -297,7 +297,8 @@ data class UserSessionRecord(
     val profile: String = "500 ر.ي (24 ساعة)",
     val price: String = "500 ر.ي",
     val deviceInfo: DeviceIdentification = DeviceIdentification(),
-    val comment: String = ""
+    val comment: String = "",
+    val nodeName: String = ""
 )
 
 data class UserActivityEvent(

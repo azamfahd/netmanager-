@@ -359,6 +359,24 @@ class RouterOsApiClient {
         }
     }
 
+    suspend fun getBridgeHosts(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/interface/bridge/host/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
     private fun extractPriceFromText(comment: String, profileName: String, cardName: String): String {
         val combined = "$comment $profileName $cardName"
         val regex = Regex("""(?i)(?:price=|سعر=|السعر=|\b)(\d{2,6})\s*(?:ر\.?ي|ريال|YER|YR|$)""")

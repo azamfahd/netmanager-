@@ -114,6 +114,8 @@ fun CardsScreen(
     var selectedSessionForDetail by remember { mutableStateOf<UserSessionRecord?>(null) }
 
     val activeUsernames = remember(activeUsers) { activeUsers.map { it.user }.toSet() }
+    val activeUsersMap = remember(activeUsers) { activeUsers.associateBy { it.user.lowercase() } }
+    val userSessionsMap = remember(userSessions) { userSessions.associateBy { it.username.lowercase() } }
     val distinctCards = remember(allCards) { allCards.distinctBy { it.name } }
 
     val countActive = remember(distinctCards, activeUsernames) {
@@ -267,8 +269,9 @@ fun CardsScreen(
                         HotspotCardItem(
                             card = card,
                             onClick = {
-                                val realSession = userSessions.find { s -> s.username.equals(card.name, ignoreCase = true) }
-                                val activeUser = activeUsers.find { u -> u.user.equals(card.name, ignoreCase = true) }
+                                val cardKey = card.name.lowercase()
+                                val realSession = userSessionsMap[cardKey]
+                                val activeUser = activeUsersMap[cardKey]
                                 val session = realSession ?: UserSessionRecord(
                                     id = card.id,
                                     username = card.name,

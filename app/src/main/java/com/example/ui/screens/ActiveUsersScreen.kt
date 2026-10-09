@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.EventNote
 import androidx.compose.material.icons.filled.Group
@@ -433,6 +434,26 @@ fun UserSessionCardItem(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontWeight = FontWeight.Medium
                         )
+
+                        // Connected Node / AP name
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CellTower,
+                                contentDescription = null,
+                                modifier = Modifier.size(12.dp),
+                                tint = RouterBlue
+                            )
+                            Text(
+                                text = "متصل عبر: ${session.nodeName.ifBlank { "الراوتر الرئيسي" }}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = RouterBlue,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 11.sp
+                            )
+                        }
                     }
                 }
 

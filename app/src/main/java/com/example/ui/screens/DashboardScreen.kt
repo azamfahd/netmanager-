@@ -101,6 +101,9 @@ fun DashboardScreen(
     val connectedIp = (connectionState as? ConnectionState.Connected)?.ipAddress ?: "192.168.88.1"
     val connectedRouterName = (connectionState as? ConnectionState.Connected)?.routerName ?: resource.boardName
 
+    val onlineNodesCount = remember(networkNodes) { networkNodes.count { it.isOnline } }
+    val availableCardsCount = remember(cards) { cards.count { !it.isActive && !it.isExpired } }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -807,18 +810,23 @@ private fun CyberMetricsMatrix(
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // CPU Load Card
-            val cpuColor = if (cpuLoad > 75) StatusErrorRed else CyberGreenBright
+            val validCpu = cpuLoad.coerceIn(0, 100)
+            val cpuColor = if (validCpu > 75) StatusErrorRed else CyberGreenBright
             CyberProgressCard(
                 title = "استهلاك المعالج CPU",
-                percentage = cpuLoad,
-                detailText = "حمل المعالج: $cpuLoad%",
+                percentage = validCpu,
+                detailText = "حمل المعالج: $validCpu%",
                 accentColor = cpuColor,
                 icon = Icons.Default.Memory,
                 modifier = Modifier.weight(1f)
             )
 
             // RAM Memory Card
-            val memUsedPercent = (100 - (freeMemoryBytes.toFloat() / totalMemoryBytes * 100)).toInt().coerceIn(10, 95)
+            val memUsedPercent = if (totalMemoryBytes > 0L) {
+                ((totalMemoryBytes - freeMemoryBytes).toFloat() / totalMemoryBytes * 100f).toInt().coerceIn(1, 99)
+            } else {
+                35
+            }
             CyberProgressCard(
                 title = "استهلاك الذاكرة RAM",
                 percentage = memUsedPercent,
