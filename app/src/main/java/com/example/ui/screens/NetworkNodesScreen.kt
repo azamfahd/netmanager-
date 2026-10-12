@@ -122,20 +122,20 @@ fun NetworkNodesScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 1. Top Network Health Summary Card (Compact & Professional)
+            // 1. Ultra-Compact Sleek Network Health Status Bar
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
+                shape = RoundedCornerShape(10.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = RouterBlue
                 ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(
-                            Brush.linearGradient(
+                            Brush.horizontalGradient(
                                 listOf(
                                     Color(0xFF0D47A1),
                                     Color(0xFF1565C0),
@@ -145,106 +145,61 @@ fun NetworkNodesScreen(
                         )
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CellTower,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "حالة الأبراج: $totalOnline / ${allNodes.size} متصل",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(26.dp)
-                                        .clip(CircleShape)
-                                        .background(Color.White.copy(alpha = 0.2f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.CellTower,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                }
+                                Icon(
+                                    imageVector = Icons.Default.Group,
+                                    contentDescription = null,
+                                    tint = Color(0xFFB9F6CA),
+                                    modifier = Modifier.size(14.dp)
+                                )
                                 Text(
-                                    text = "حالة نقاط وأبراج الشبكة",
+                                    text = "$totalUsersOnNodes مشترك",
                                     color = Color.White,
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
 
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            Surface(
+                                color = if (allNodes.any { it.hasIssue }) Color(0xFFFFD54F).copy(alpha = 0.25f) else Color(0xFFB9F6CA).copy(alpha = 0.25f),
+                                shape = RoundedCornerShape(6.dp)
                             ) {
-                                Surface(
-                                    color = Color.White.copy(alpha = 0.2f),
-                                    shape = RoundedCornerShape(6.dp)
-                                ) {
-                                    Text(
-                                        text = "$totalOnline / ${allNodes.size} متصل",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-
-                                Button(
-                                    onClick = { showAddNodeDialog = true },
-                                    shape = RoundedCornerShape(6.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color.White,
-                                        contentColor = MaterialTheme.colorScheme.primary
-                                    ),
-                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier.height(26.dp)
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(2.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Add,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(12.dp)
-                                        )
-                                        Text(
-                                            text = "إضافة",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 10.sp
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Stats 3 items in Row (Compact)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(text = "الإجمالي:", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
-                                Text(text = "${allNodes.size} نقطة", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(text = "المستخدمون:", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
-                                Text(text = "$totalUsersOnNodes", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(text = "الاستقرار:", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
                                 Text(
-                                    text = if (allNodes.any { it.hasIssue }) "تحت المتابعة" else "ممتازة (99%)",
+                                    text = if (allNodes.any { it.hasIssue }) "تحت المتابعة" else "مستقرة 100%",
                                     color = if (allNodes.any { it.hasIssue }) Color(0xFFFFD54F) else Color(0xFFB9F6CA),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                 )
                             }
                         }
@@ -361,7 +316,7 @@ fun NetworkNodesScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 3. Search & Add Node Controls Row (Compact)
+            // 3. Compact Search & Add Node Controls Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -374,14 +329,14 @@ fun NetworkNodesScreen(
                     leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(14.dp)) },
                     trailingIcon = {
                         if (searchQuery.isNotBlank()) {
-                            IconButton(onClick = { viewModel.updateNodeSearch("") }, modifier = Modifier.size(20.dp)) {
+                            IconButton(onClick = { viewModel.updateNodeSearch("") }, modifier = Modifier.size(18.dp)) {
                                 Icon(Icons.Default.Clear, contentDescription = "مسح", modifier = Modifier.size(12.dp))
                             }
                         }
                     },
                     modifier = Modifier
                         .weight(1f)
-                        .height(38.dp),
+                        .height(34.dp),
                     shape = RoundedCornerShape(8.dp),
                     singleLine = true,
                     textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp)
@@ -393,19 +348,19 @@ fun NetworkNodesScreen(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary
                     ),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     modifier = Modifier
-                        .height(38.dp)
+                        .height(34.dp)
                         .testTag("btn_add_network_node_top")
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Add,
                             contentDescription = null,
-                            modifier = Modifier.size(14.dp)
+                            modifier = Modifier.size(13.dp)
                         )
                         Text(
                             text = "إضافة",
@@ -798,7 +753,7 @@ fun NetworkNodeItem(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "${node.role} • ${node.model}",
+                            text = "${node.ipAddress} • ${node.interfaceName}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -815,18 +770,6 @@ fun NetworkNodeItem(
                     )
 
                     IconButton(
-                        onClick = onPing,
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.NetworkPing,
-                            contentDescription = "فحص Ping",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    IconButton(
                         onClick = onDelete,
                         modifier = Modifier.size(32.dp)
                     ) {
@@ -836,6 +779,82 @@ fun NetworkNodeItem(
                             tint = MaterialTheme.colorScheme.error,
                             modifier = Modifier.size(18.dp)
                         )
+                    }
+                }
+            }
+
+            // شريط التحكم في الشبكة (Network Quick Control Bar)
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Group,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(12.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "${node.connectedUsers} مشترك",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        Text(
+                            text = if (node.isOnline) "⚡ استجابة ${node.pingMs}ms" else "⚠️ غير مستجيب",
+                            fontSize = 10.sp,
+                            color = if (node.isOnline) StatusActiveGreen else StatusErrorRed
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        TextButton(
+                            onClick = onPing,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 1.dp),
+                            modifier = Modifier.height(26.dp)
+                        ) {
+                            Icon(Icons.Default.NetworkPing, contentDescription = null, modifier = Modifier.size(12.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("فحص Ping", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        TextButton(
+                            onClick = onDetailClick,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 1.dp),
+                            modifier = Modifier.height(26.dp)
+                        ) {
+                            Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(12.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("المشتركين", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }

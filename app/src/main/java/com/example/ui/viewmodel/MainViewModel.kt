@@ -84,6 +84,17 @@ class MainViewModel(
     val networkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = repository.networkNodes
     val userSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = repository.userSessions
     val activityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = repository.activityEvents
+    val adminUsers: StateFlow<List<com.example.data.model.AdminUser>> = repository.adminUsers
+    val auditLogs: StateFlow<List<com.example.data.model.AuditLogEntry>> = repository.auditLogs
+
+    fun logAdminAction(adminUsername: String, actionType: String, description: String, severity: String = "INFO") {
+        repository.logAdminAction(adminUsername, actionType, description, severity)
+    }
+
+    fun addAdminUser(admin: com.example.data.model.AdminUser) {
+        repository.addAdminUser(admin)
+    }
+
 
     // POS Database StateFlows & Calculations
     val posAgents: StateFlow<List<PosAgentEntity>> = database.appDao().getAllPosAgents()
@@ -151,59 +162,25 @@ class MainViewModel(
 
     private suspend fun seedInitialPosDataIfEmpty() {
         try {
-            val existingAgents = database.appDao().getPosAgentById(1L)
-            if (existingAgents == null) {
-                val agent1Id = database.appDao().insertPosAgent(
-                    PosAgentEntity(
-                        name = "بقالة ياسين",
-                        phone = "771234567",
-                        location = "شارع جمال - بجانب المستوصف",
-                        discountPercent = 15.0,
-                        notes = "نقطة بيع رئيسية"
-                    )
-                )
-                val agent2Id = database.appDao().insertPosAgent(
-                    PosAgentEntity(
-                        name = "مكتبة الأمل",
-                        phone = "734567890",
-                        location = "الحارة الشرقية - أمام المدرسة",
-                        discountPercent = 12.0,
-                        notes = "بائع معتمد"
-                    )
-                )
-                val agent3Id = database.appDao().insertPosAgent(
-                    PosAgentEntity(
-                        name = "محمد (موزع الحارة الغربية)",
-                        phone = "778901234",
-                        location = "الحارة الغربية",
-                        discountPercent = 15.0,
-                        notes = "موزع كروت متجول"
-                    )
-                )
+            // Remove any legacy mock agents previously seeded
+            val legacyNames = listOf("بقالة ياسين", "مكتبة الأمل", "محمد (موزع الحارة الغربية)")
+            val currentAgents = database.appDao().getAllPosAgentsSync()
+            currentAgents.filter { it.name in legacyNames }.forEach { legacy ->
+                database.appDao().deletePosAgent(legacy.id)
+                database.appDao().deleteAssignmentsByAgent(legacy.id)
+            }
 
-                // Assign initial sample cards to agents
-                val sampleAssignments = listOf(
-                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "784912", profileName = "فئة 500", priceAmount = 500.0, discountPercent = 15.0, isSold = true, soldAt = System.currentTimeMillis() - 7200000),
-                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "319405", profileName = "فئة 200", priceAmount = 200.0, discountPercent = 15.0, isSold = true, soldAt = System.currentTimeMillis() - 3600000),
-                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "849201", profileName = "فئة 2000", priceAmount = 2000.0, discountPercent = 15.0, isSold = true, soldAt = System.currentTimeMillis() - 86400000),
-                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "510938", profileName = "فئة 500", priceAmount = 500.0, discountPercent = 15.0, isSold = false),
-                    PosCardAssignmentEntity(agentId = agent1Id, agentName = "بقالة ياسين", cardName = "928341", profileName = "فئة 500", priceAmount = 500.0, discountPercent = 15.0, isSold = false),
-                    PosCardAssignmentEntity(agentId = agent2Id, agentName = "مكتبة الأمل", cardName = "651829", profileName = "فئة 500", priceAmount = 500.0, discountPercent = 12.0, isSold = true, soldAt = System.currentTimeMillis() - 18000000),
-                    PosCardAssignmentEntity(agentId = agent2Id, agentName = "مكتبة الأمل", cardName = "401928", profileName = "فئة 300", priceAmount = 300.0, discountPercent = 12.0, isSold = false),
-                    PosCardAssignmentEntity(agentId = agent2Id, agentName = "مكتبة الأمل", cardName = "719304", profileName = "فئة 300", priceAmount = 300.0, discountPercent = 12.0, isSold = false),
-                    PosCardAssignmentEntity(agentId = agent3Id, agentName = "محمد (موزع الحارة الغربية)", cardName = "390124", profileName = "فئة 200", priceAmount = 200.0, discountPercent = 15.0, isSold = true, soldAt = System.currentTimeMillis() - 3600000),
-                    PosCardAssignmentEntity(agentId = agent3Id, agentName = "محمد (موزع الحارة الغربية)", cardName = "882910", profileName = "فئة 200", priceAmount = 200.0, discountPercent = 15.0, isSold = false)
-                )
-                database.appDao().insertCardAssignments(sampleAssignments)
-
-                // Record initial sample payments received
-                database.appDao().insertPosPayment(
-                    PosPaymentEntity(
-                        agentId = agent1Id,
-                        agentName = "بقالة ياسين",
-                        amount = 1500.0,
-                        paymentDate = System.currentTimeMillis() - 86400000,
-                        paymentNote = "دفعة نقدية سابقة"
+            // Ensure the primary distribution point is the Master Router (Central Distribution Point)
+            val existingMain = database.appDao().getPosAgentById(1L)
+            if (existingMain == null) {
+                database.appDao().insertPosAgent(
+                    PosAgentEntity(
+                        id = 1L,
+                        name = "نقطة الراوتر الرئيسية (المركزية)",
+                        phone = "",
+                        location = "راوتر الشبكة الرئيسي",
+                        discountPercent = 0.0,
+                        notes = "نقطة التوزيع المركزية الافتراضية للشبكة (كروت المالك المباشرة)"
                     )
                 )
             }

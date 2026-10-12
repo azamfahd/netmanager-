@@ -137,52 +137,55 @@ fun CardsScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             // Search Bar & Action Buttons
+            // Search Bar & Action Buttons (Compact & Sleek)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(54.dp),
+                    .height(44.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { viewModel.updateCardSearch(it) },
-                    label = { Text("بحث برقم الكرت أو الباقة") },
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    placeholder = { Text("بحث برقم الكرت أو الباقة...", fontSize = 12.sp) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp)) },
                     trailingIcon = {
                         if (searchQuery.isNotBlank()) {
-                            IconButton(onClick = { viewModel.updateCardSearch("") }) {
-                                Icon(Icons.Default.Clear, contentDescription = "مسح")
+                            IconButton(onClick = { viewModel.updateCardSearch("") }, modifier = Modifier.size(20.dp)) {
+                                Icon(Icons.Default.Clear, contentDescription = "مسح", modifier = Modifier.size(14.dp))
                             }
                         }
                     },
                     modifier = Modifier
                         .weight(1f)
-                        .height(54.dp)
+                        .height(44.dp)
                         .testTag("search_cards_input"),
-                    shape = RoundedCornerShape(12.dp),
-                    singleLine = true
+                    shape = RoundedCornerShape(10.dp),
+                    singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
                 )
 
                 Button(
                     onClick = {
                         showPrintSelectionDialog = true
                     },
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = CyberGreenPrimary
                     ),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                     modifier = Modifier
-                        .height(54.dp)
+                        .height(44.dp)
                         .testTag("print_cards_btn")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Print,
                         contentDescription = "طباعة الكروت",
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("طباعة", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("طباعة", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             }
 
@@ -411,14 +414,14 @@ fun HotspotCardItem(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("hotspot_card_${card.id}"),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (card.disabled) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column(modifier = Modifier.padding(10.dp)) {
             // Header Row: Card code & Status Pill & Actions
             Row(
                 modifier = Modifier.fillMaxWidth(),

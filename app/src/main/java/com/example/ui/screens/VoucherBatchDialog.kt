@@ -190,13 +190,13 @@ fun VoucherBatchDialog(
     }
     var price by remember { mutableStateOf(PRESET_CATEGORIES[2].priceLabel) }
     var timeLimit by remember { mutableStateOf(PRESET_CATEGORIES[2].timeLimit) }
-    var dataLimitMB by remember { mutableLongStateOf(PRESET_CATEGORIES[2].dataLimitMB) }
+    var dataLimitMBInput by remember { mutableStateOf(PRESET_CATEGORIES[2].dataLimitMB.toString()) }
     var isSingleCode by remember { mutableStateOf(true) }
 
     // Batch specific state
-    var batchCount by remember { mutableIntStateOf(20) }
+    var batchCountInput by remember { mutableStateOf("20") }
     var prefix by remember { mutableStateOf("") }
-    var codeLength by remember { mutableIntStateOf(6) }
+    var codeLengthInput by remember { mutableStateOf("6") }
     var charType by remember { mutableStateOf(CodeCharType.NUMBERS_ONLY) }
     var batchComment by remember { mutableStateOf("دفعة فئة 500 ر.ي") }
 
@@ -211,7 +211,7 @@ fun VoucherBatchDialog(
     fun applyPreset(preset: VoucherPreset) {
         price = preset.priceLabel
         timeLimit = preset.timeLimit
-        dataLimitMB = preset.dataLimitMB
+        dataLimitMBInput = preset.dataLimitMB.toString()
         batchComment = "دفعة ${preset.title}"
         singleComment = "كرت ${preset.title}"
         // Find matching profile if available
@@ -228,7 +228,8 @@ fun VoucherBatchDialog(
     // Function to generate random single code
     fun generateRandomSingleCode() {
         val pool = if (charType == CodeCharType.NUMBERS_ONLY) "1234567890" else "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-        val code = (1..codeLength).map { pool.random() }.joinToString("")
+        val length = (codeLengthInput.toIntOrNull() ?: 6).coerceIn(3, 16)
+        val code = (1..length).map { pool.random() }.joinToString("")
         val finalCode = if (prefix.isNotBlank()) "$prefix$code" else code
         singleCode = finalCode
         if (isSingleCode) {
@@ -438,13 +439,14 @@ fun VoucherBatchDialog(
                                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                         )
                                     }
-                                    if (dataLimitMB > 0) {
+                                    val previewDataMB = dataLimitMBInput.toLongOrNull() ?: 0L
+                                    if (previewDataMB > 0) {
                                         Surface(
                                             color = Color.White.copy(alpha = 0.18f),
                                             shape = RoundedCornerShape(6.dp)
                                         ) {
                                             Text(
-                                                text = "📦 ${if (dataLimitMB >= 1024) "${dataLimitMB / 1024} GB" else "$dataLimitMB MB"}",
+                                                text = "📦 ${if (previewDataMB >= 1024) "${previewDataMB / 1024} GB" else "$previewDataMB MB"}",
                                                 color = Color.White,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -660,9 +662,10 @@ fun VoucherBatchDialog(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             listOf(10, 25, 50, 100).forEach { num ->
+                                val isSelected = batchCountInput == num.toString()
                                 FilterChip(
-                                    selected = batchCount == num,
-                                    onClick = { batchCount = num },
+                                    selected = isSelected,
+                                    onClick = { batchCountInput = num.toString() },
                                     label = { Text("$num كرت", fontSize = 12.sp) },
                                     modifier = Modifier.weight(1f)
                                 )
@@ -693,28 +696,40 @@ fun VoucherBatchDialog(
                         }
                     }
 
-                    // Code Length & Prefix
+                    // Count, Code Length & Prefix
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         OutlinedTextField(
-                            value = prefix,
-                            onValueChange = { prefix = it.uppercase() },
-                            label = { Text("بادئة الكود (اختياري)") },
-                            placeholder = { Text("VIP-") },
+                            value = batchCountInput,
+                            onValueChange = { input ->
+                                batchCountInput = input.filter { ch -> ch.isDigit() }.take(5)
+                            },
+                            label = { Text("عدد الكروت") },
+                            placeholder = { Text("20") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             singleLine = true,
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(10.dp)
                         )
                         OutlinedTextField(
-                            value = codeLength.toString(),
-                            onValueChange = { len ->
-                                val l = len.filter { it.isDigit() }.toIntOrNull()
-                                if (l != null && l in 3..12) codeLength = l
+                            value = codeLengthInput,
+                            onValueChange = { input ->
+                                codeLengthInput = input.filter { ch -> ch.isDigit() }.take(2)
                             },
                             label = { Text("طول الكود") },
+                            placeholder = { Text("6") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        OutlinedTextField(
+                            value = prefix,
+                            onValueChange = { prefix = it.uppercase() },
+                            label = { Text("بادئة الكود") },
+                            placeholder = { Text("VIP-") },
                             singleLine = true,
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(10.dp)
@@ -829,12 +844,12 @@ fun VoucherBatchDialog(
                 }
 
                 OutlinedTextField(
-                    value = if (dataLimitMB > 0) dataLimitMB.toString() else "0",
-                    onValueChange = { d ->
-                        val v = d.filter { it.isDigit() }.toLongOrNull() ?: 0L
-                        dataLimitMB = v
+                    value = dataLimitMBInput,
+                    onValueChange = { input ->
+                        dataLimitMBInput = input.filter { ch -> ch.isDigit() }.take(8)
                     },
                     label = { Text("حد البيانات بالميجابايت (0 = غير محدود)") },
+                    placeholder = { Text("2560") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -843,19 +858,23 @@ fun VoucherBatchDialog(
             }
         },
         confirmButton = {
+            val parsedCount = batchCountInput.toIntOrNull()?.coerceIn(1, 5000) ?: 20
+            val parsedCodeLength = codeLengthInput.toIntOrNull()?.coerceIn(3, 16) ?: 6
+            val parsedDataLimitMB = dataLimitMBInput.toLongOrNull() ?: 0L
+
             if (selectedTab == VoucherDialogTab.BATCH_GENERATE) {
                 Button(
                     onClick = {
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
                         val config = BatchGenerationConfig(
-                            count = batchCount,
+                            count = parsedCount,
                             profile = selectedProfile,
                             prefix = prefix,
-                            codeLength = codeLength,
+                            codeLength = parsedCodeLength,
                             characterSet = charType,
                             isSingleCode = isSingleCode,
                             timeLimit = timeLimit,
-                            dataLimitMB = dataLimitMB,
+                            dataLimitMB = parsedDataLimitMB,
                             price = price,
                             batchComment = if (selectedAgent != null) "${batchComment} (نقطة: ${selectedAgent.name})" else batchComment,
                             posAgentId = selectedAgent?.id ?: 0L,
@@ -874,7 +893,7 @@ fun VoucherBatchDialog(
                     Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "توليد وحفظ ($batchCount كرت) في الراوتر فوراً",
+                        text = "توليد وحفظ ($parsedCount كرت) في الراوتر فوراً",
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -891,7 +910,7 @@ fun VoucherBatchDialog(
                                 bytesIn = 0,
                                 bytesOut = 0,
                                 limitUptime = timeLimit,
-                                limitBytesTotal = if (dataLimitMB > 0) dataLimitMB * 1024 * 1024L else 0L,
+                                limitBytesTotal = if (parsedDataLimitMB > 0) parsedDataLimitMB * 1024 * 1024L else 0L,
                                 comment = singleComment.ifBlank { "كرت فردي" },
                                 disabled = false,
                                 price = price

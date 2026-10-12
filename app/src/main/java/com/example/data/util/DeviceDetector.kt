@@ -126,19 +126,31 @@ object DeviceDetector {
             )
         }
 
-        // Generic fallback with hash-consistent device type
-        val hash = cleanMac.hashCode()
-        val brands = listOf("Samsung Galaxy", "Xiaomi Redmi", "Infinix Note", "Apple iPhone", "Huawei Nova", "Tecno Spark")
-        val brandIndex = kotlin.math.abs(hash) % brands.size
-        val selectedBrandFull = brands[brandIndex]
-        val selectedBrand = selectedBrandFull.split(" ")[0]
+        // Handle randomized / private MAC addresses (bit 1 of first byte is set: 2, 6, A, E)
+        val isRandomizedMac = if (cleanMac.length >= 2) {
+            val secondChar = cleanMac[1].uppercaseChar()
+            secondChar == '2' || secondChar == '6' || secondChar == 'A' || secondChar == 'E'
+        } else false
 
+        if (isRandomizedMac) {
+            val model = if (hostname.isNotBlank()) hostname else "جهاز خاص (Private MAC)"
+            return DeviceIdentification(
+                brand = "جهاز ذكي",
+                modelName = model,
+                osName = "هاتف ذكي / جهاز محمول",
+                category = DeviceCategory.ANDROID_PHONE,
+                macVendor = "عنوان MAC عشوائي للحماية"
+            )
+        }
+
+        // Real genuine fallback without inventing fictional device brands
+        val realModelName = if (hostname.isNotBlank()) hostname else "جهاز متصل ($cleanMac)"
         return DeviceIdentification(
-            brand = selectedBrand,
-            modelName = selectedBrandFull,
-            osName = if (selectedBrand == "Apple") "iOS" else "Android",
-            category = if (selectedBrand == "Apple") DeviceCategory.IPHONE_IPAD else DeviceCategory.ANDROID_PHONE,
-            macVendor = "$selectedBrand Mobile"
+            brand = "جهاز شبكة",
+            modelName = realModelName,
+            osName = "نظام تشغيل الجهاز",
+            category = DeviceCategory.SMART_DEVICE,
+            macVendor = if (cleanMac.isNotBlank()) "معرّف MAC: $cleanMac" else "جهاز متصل"
         )
     }
 

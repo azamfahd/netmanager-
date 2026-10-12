@@ -32,6 +32,9 @@ interface AppDao {
     @Query("SELECT * FROM pos_agents ORDER BY name ASC")
     fun getAllPosAgents(): Flow<List<PosAgentEntity>>
 
+    @Query("SELECT * FROM pos_agents ORDER BY name ASC")
+    suspend fun getAllPosAgentsSync(): List<PosAgentEntity>
+
     @Query("SELECT * FROM pos_agents WHERE id = :agentId")
     suspend fun getPosAgentById(agentId: Long): PosAgentEntity?
 

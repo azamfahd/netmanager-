@@ -142,7 +142,12 @@ data class HotspotProfile(
     val keepaliveTimeout: String = "5m",
     val price: String = "500 ر.ي",
     val uploadLimit: String = "",
-    val downloadLimit: String = ""
+    val downloadLimit: String = "",
+    val validity: String = "",
+    val dataLimit: String = "",
+    val source: String = "hotspot", // "hotspot" or "usermanager"
+    val comment: String = "",
+    val priceNumber: Double = 0.0
 )
 
 data class LocalNetworkInfo(
@@ -281,6 +286,14 @@ data class DeviceIdentification(
     val macVendor: String = "Samsung Electronics"
 )
 
+data class HourlyUsageItem(
+    val hourLabel: String,
+    val bytesUsed: Long,
+    val downloadBytes: Long,
+    val uploadBytes: Long,
+    val note: String = ""
+)
+
 data class UserSessionRecord(
     val id: String,
     val username: String,
@@ -298,7 +311,10 @@ data class UserSessionRecord(
     val price: String = "500 ر.ي",
     val deviceInfo: DeviceIdentification = DeviceIdentification(),
     val comment: String = "",
-    val nodeName: String = ""
+    val nodeName: String = "",
+    val packageLimitBytes: Long = 1024L * 1024L * 1024L, // Default 1GB package limit
+    val isQuotaExhausted: Boolean = false,
+    val hourlyUsageList: List<HourlyUsageItem> = emptyList()
 )
 
 data class UserActivityEvent(
@@ -311,5 +327,28 @@ data class UserActivityEvent(
     val macAddress: String,
     val deviceInfo: DeviceIdentification = DeviceIdentification()
 )
+
+data class AdminUser(
+    val id: String,
+    val username: String,
+    val fullName: String,
+    val role: String, // "مدير عام (Full Admin)", "مشرف كروت", "مدير أسعار وإعدادات", "مراقب"
+    val permissions: List<String>,
+    val lastActiveTime: String,
+    val ipAddress: String,
+    val isActive: Boolean = true,
+    val password: String = "1234"
+)
+
+data class AuditLogEntry(
+    val id: String,
+    val adminUsername: String,
+    val actionType: String, // "إضافة كروت", "تعديل أسعار", "تغيير إعدادات", "تسجيل دخول", "طرد مستخدم"
+    val description: String,
+    val timestamp: String,
+    val ipAddress: String,
+    val severity: String = "INFO" // INFO, WARNING, CRITICAL
+)
+
 
 

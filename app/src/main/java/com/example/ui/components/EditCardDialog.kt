@@ -58,7 +58,7 @@ fun EditCardDialog(
 ) {
     var password by remember { mutableStateOf(card.password) }
     var selectedProfile by remember { mutableStateOf(card.profile) }
-    var price by remember { mutableStateOf(card.price.ifBlank { "500 ر.ي" }) }
+    var price by remember { mutableStateOf(card.price.ifBlank { "" }) }
     var timeLimit by remember { mutableStateOf(card.limitUptime) }
     var comment by remember { mutableStateOf(card.comment) }
     var expandedProfileDropdown by remember { mutableStateOf(false) }

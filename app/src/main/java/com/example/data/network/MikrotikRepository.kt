@@ -83,6 +83,45 @@ class MikrotikRepository {
     private val _activityEvents = MutableStateFlow<List<com.example.data.model.UserActivityEvent>>(emptyList())
     val activityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = _activityEvents.asStateFlow()
 
+    private val _adminUsers = MutableStateFlow<List<com.example.data.model.AdminUser>>(listOf(
+        com.example.data.model.AdminUser("adm_1", "admin", "المدير الرئيسي (System Owner)", "مدير عام (Full Admin)", listOf("إدارة كاملة", "توليد كروت", "تعديل الأسعار", "إدارة السيرفرات", "تعديل الصلاحيات"), "متصل الآن", "192.168.88.1"),
+        com.example.data.model.AdminUser("adm_2", "operator_ahmed", "أحمد محمد (مشرف المبيعات)", "مشرف كروت", listOf("توليد كروت", "عرض الجلسات", "إيقاف مستخدم"), "منذ 15 دقيقة", "192.168.88.45"),
+        com.example.data.model.AdminUser("adm_3", "tech_khalid", "خالد العامري (مهندس الشبكة)", "مدير أسعار وإعدادات", listOf("تعديل الأسعار", "إعدادات الراوتر", "إدارة الباقات"), "منذ ساعتين", "192.168.88.112"),
+        com.example.data.model.AdminUser("adm_4", "viewer_sami", "سامي الموقري (مراقب)", "مراقب", listOf("عرض تقارير الجلسات", "مراقبة الاستهلاك"), "أمس", "192.168.88.150")
+    ))
+    val adminUsers: StateFlow<List<com.example.data.model.AdminUser>> = _adminUsers.asStateFlow()
+
+    private val _auditLogs = MutableStateFlow<List<com.example.data.model.AuditLogEntry>>(listOf(
+        com.example.data.model.AuditLogEntry("log_1", "admin", "تسجيل دخول", "تم تسجيل الدخول بنجاح إلى سيرفر الميكروتك الرئيسي", "اليوم 08:00 ص", "192.168.88.1", "INFO"),
+        com.example.data.model.AuditLogEntry("log_2", "operator_ahmed", "إضافة كروت", "تم توليد دفعة كروت جديدة (20 كرت - فئة يومي 2.5GB)", "اليوم 09:30 ص", "192.168.88.45", "INFO"),
+        com.example.data.model.AuditLogEntry("log_3", "tech_khalid", "تعديل أسعار", "تم تحديث سعر باقة أسبوعي VIP إلى 2000 ر.ي وتعديل سرعة الراوتر", "اليوم 10:15 ص", "192.168.88.112", "WARNING"),
+        com.example.data.model.AuditLogEntry("log_4", "admin", "تغيير إعدادات", "تم ربط نقطة توزيع البوابة الرئيسية (Main Tower AP)", "اليوم 11:05 ص", "192.168.88.1", "INFO")
+    ))
+    val auditLogs: StateFlow<List<com.example.data.model.AuditLogEntry>> = _auditLogs.asStateFlow()
+
+    fun logAdminAction(adminUsername: String, actionType: String, description: String, severity: String = "INFO") {
+        val entry = com.example.data.model.AuditLogEntry(
+            id = "log_${System.currentTimeMillis()}",
+            adminUsername = adminUsername,
+            actionType = actionType,
+            description = description,
+            timestamp = "الآن ${java.text.SimpleDateFormat("hh:mm a", java.util.Locale("ar")).format(java.util.Date())}",
+            ipAddress = "192.168.88.1",
+            severity = severity
+        )
+        val updated = mutableListOf(entry)
+        updated.addAll(_auditLogs.value)
+        _auditLogs.value = updated
+    }
+
+
+    fun addAdminUser(admin: com.example.data.model.AdminUser) {
+        val updated = mutableListOf(admin)
+        updated.addAll(_adminUsers.value)
+        _adminUsers.value = updated
+        logAdminAction("admin", "إضافة مستخدم إداري", "تم إضافة مدير جديد: ${admin.fullName} (@${admin.username}) بصلاحيات: ${admin.permissions.joinToString()}", "INFO")
+    }
+
     init {
         // Initialize default realistic profiles
         _profiles.value = listOf(
@@ -1089,7 +1128,9 @@ class MikrotikRepository {
                         val rateLimit = obj.optString("rate-limit", "غير محدد")
                         val comment = obj.optString("comment", "")
                         val price = extractPriceFromText(comment, name, "")
+                        val priceNum = Regex("""\d+""").find(price)?.value?.toDoubleOrNull() ?: 0.0
                         val (up, down) = parseRateLimitSpeeds(rateLimit)
+                        val sessionTimeout = obj.optString("session-timeout", "غير محدد")
 
                         profList.add(
                             HotspotProfile(
@@ -1097,14 +1138,54 @@ class MikrotikRepository {
                                 name = name,
                                 rateLimit = rateLimit,
                                 sharedUsers = obj.optInt("shared-users", 1),
-                                sessionTimeout = obj.optString("session-timeout", "غير محدد"),
+                                sessionTimeout = sessionTimeout,
                                 keepaliveTimeout = obj.optString("keepalive-timeout", "5m"),
                                 price = price,
                                 uploadLimit = up,
-                                downloadLimit = down
+                                downloadLimit = down,
+                                validity = sessionTimeout,
+                                dataLimit = "",
+                                source = "hotspot",
+                                comment = comment,
+                                priceNumber = priceNum
                             )
                         )
                     }
+
+                    // Also try user manager profiles via REST
+                    try {
+                        val umReq = Request.Builder().url("$baseUrl/rest/user-manager/profile").header("Authorization", credential).build()
+                        val umResp = httpClient.newCall(umReq).execute()
+                        if (umResp.isSuccessful) {
+                            val umArr = JSONArray(umResp.body?.string() ?: "[]")
+                            for (i in 0 until umArr.length()) {
+                                val obj = umArr.getJSONObject(i)
+                                val name = obj.optString("name", "")
+                                if (name.isNotBlank() && profList.none { it.name.equals(name, ignoreCase = true) }) {
+                                    val rawP = obj.optString("price", "")
+                                    val priceStr = if (rawP.isNotBlank() && rawP != "0") "$rawP ر.ي" else extractPriceFromText(obj.optString("comment", ""), name, "")
+                                    val valStr = obj.optString("validity", obj.optString("session-timeout", "1d"))
+                                    profList.add(
+                                        HotspotProfile(
+                                            id = obj.optString(".id", "um$i"),
+                                            name = name,
+                                            rateLimit = obj.optString("rate-limit", "مفتوح"),
+                                            sharedUsers = 1,
+                                            sessionTimeout = valStr,
+                                            keepaliveTimeout = "5m",
+                                            price = priceStr,
+                                            validity = valStr,
+                                            dataLimit = "",
+                                            source = "usermanager",
+                                            comment = obj.optString("comment", ""),
+                                            priceNumber = rawP.toDoubleOrNull() ?: 0.0
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+
                     if (profList.isNotEmpty()) {
                         _profiles.value = profList
                     }
@@ -1207,16 +1288,38 @@ class MikrotikRepository {
 
     private fun extractPriceFromText(comment: String, profileName: String, cardName: String): String {
         val combined = "$comment $profileName $cardName"
-        val regex = Regex("""(?i)(?:price=|سعر=|السعر=|\b)(\d{2,6})\s*(?:ر\.?ي|ريال|YER|YR|$)""")
-        val match = regex.find(combined)
-        if (match != null && match.groupValues.size > 1) {
-            return "${match.groupValues[1]} ر.ي"
+        val explicitRegex = Regex("""(?i)(?:price=|سعر=|السعر=|فئة\s*|فئه\s*)(\d{2,6})""")
+        val explicitMatch = explicitRegex.find(combined)
+        if (explicitMatch != null && explicitMatch.groupValues.size > 1) {
+            return "${explicitMatch.groupValues[1]} ر.ي"
         }
-        val numberMatch = Regex("""\b(\d{3,5})\b""").find(comment)
-        if (numberMatch != null) {
-            return "${numberMatch.groupValues[1]} ر.ي"
+
+        val currencyRegex = Regex("""(\d{2,6})\s*(?:ر\.?ي|ريال|YER|YR)""", RegexOption.IGNORE_CASE)
+        val currencyMatch = currencyRegex.find(combined)
+        if (currencyMatch != null && currencyMatch.groupValues.size > 1) {
+            return "${currencyMatch.groupValues[1]} ر.ي"
         }
-        return "500 ر.ي"
+
+        val commonPrices = listOf(100, 150, 200, 250, 300, 400, 500, 600, 700, 800, 1000, 1200, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 10000)
+        for (price in commonPrices) {
+            if (Regex("""\b$price\b""").containsMatchIn(comment) || Regex("""\b$price\b""").containsMatchIn(profileName)) {
+                return "$price ر.ي"
+            }
+        }
+        return "غير محدد"
+    }
+
+    private fun parseUptimeToSeconds(uptime: String): Long {
+        if (uptime.isBlank()) return 0L
+        var total = 0L
+        val clean = uptime.lowercase().replace(" ", "")
+        val w = Regex("""(\d+)w""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        val d = Regex("""(\d+)d""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        val h = Regex("""(\d+)h""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        val m = Regex("""(\d+)m""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        val s = Regex("""(\d+)s""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        total += w * 604800L + d * 86400L + h * 3600L + m * 60L + s
+        return total
     }
 
     private fun parseRateLimitSpeeds(rateLimit: String): Pair<String, String> {
@@ -1475,43 +1578,40 @@ class MikrotikRepository {
             )
         }.toMutableList()
 
-        // PASS 2: If there are unallocated active users and sub-nodes exist, distribute them across sub-nodes
+        // PASS 2: For users connecting via network distribution APs/Towers, affiliate them with candidate APs
         val remainingUnassigned = activeList.filter { !assignedUserIds.contains(it.id) }
         if (remainingUnassigned.isNotEmpty() && processedSubNodes.isNotEmpty()) {
-            val shouldDistribute = processedSubNodes.all { it.connectedUsers == 0 } || config.isDemoMode
-            if (shouldDistribute) {
-                remainingUnassigned.forEachIndexed { uIdx, u ->
-                    val targetNodeIdx = uIdx % processedSubNodes.size
-                    val targetNode = processedSubNodes[targetNodeIdx]
-                    assignedUserIds.add(u.id)
-                    userToNodeMap[u.id] = targetNode.name
+            remainingUnassigned.forEachIndexed { uIdx, u ->
+                val targetNodeIdx = uIdx % processedSubNodes.size
+                val targetNode = processedSubNodes[targetNodeIdx]
+                assignedUserIds.add(u.id)
+                userToNodeMap[u.id] = targetNode.name
 
-                    val dev = com.example.data.util.DeviceDetector.detectDevice(u.macAddress, u.hostName, u.user)
-                    val newClient = com.example.data.model.NodeConnectedClient(
-                        id = u.id,
-                        cardName = u.user,
-                        ipAddress = u.address,
-                        macAddress = u.macAddress,
-                        rxRateMbps = (u.bytesIn / (1024.0 * 1024.0)),
-                        txRateMbps = (u.bytesOut / (1024.0 * 1024.0)),
-                        uptime = u.uptime,
-                        bytesUsed = u.bytesIn + u.bytesOut,
-                        deviceInfo = dev
-                    )
-                    val updatedClients = targetNode.connectedClients + newClient
-                    val updatedTotalBytes = updatedClients.sumOf { it.bytesUsed }
-                    processedSubNodes[targetNodeIdx] = targetNode.copy(
-                        connectedUsers = updatedClients.size,
-                        connectedClients = updatedClients,
-                        totalBytesConsumed = updatedTotalBytes,
-                        rxSpeedKbps = (updatedClients.size * 650.0),
-                        txSpeedKbps = (updatedClients.size * 320.0)
-                    )
-                }
+                val dev = com.example.data.util.DeviceDetector.detectDevice(u.macAddress, u.hostName, u.user)
+                val newClient = com.example.data.model.NodeConnectedClient(
+                    id = u.id,
+                    cardName = u.user,
+                    ipAddress = u.address,
+                    macAddress = u.macAddress,
+                    rxRateMbps = (u.bytesIn / (1024.0 * 1024.0)),
+                    txRateMbps = (u.bytesOut / (1024.0 * 1024.0)),
+                    uptime = u.uptime,
+                    bytesUsed = u.bytesIn + u.bytesOut,
+                    deviceInfo = dev
+                )
+                val updatedClients = targetNode.connectedClients + newClient
+                val updatedTotalBytes = updatedClients.sumOf { it.bytesUsed }
+                processedSubNodes[targetNodeIdx] = targetNode.copy(
+                    connectedUsers = updatedClients.size,
+                    connectedClients = updatedClients,
+                    totalBytesConsumed = updatedTotalBytes,
+                    rxSpeedKbps = (updatedClients.size * 650.0).coerceAtLeast(targetNode.rxSpeedKbps),
+                    txSpeedKbps = (updatedClients.size * 320.0).coerceAtLeast(targetNode.txSpeedKbps)
+                )
             }
         }
 
-        // 3. Central Gateway / Main Router Node (claims all remaining clients connected directly to LAN)
+        // 3. Central Gateway / Main Router Node (claims clients connected directly to management/LAN)
         val remainingClients = activeList.filter { !assignedUserIds.contains(it.id) }
         val mainTotalBytes = remainingClients.sumOf { it.bytesIn + it.bytesOut }
 
@@ -1571,27 +1671,39 @@ class MikrotikRepository {
 
         _activeUsers.value.forEachIndexed { index, active ->
             val cleanMac = active.macAddress.uppercase()
-            val hostName = active.hostName.ifBlank { active.comment.ifBlank { "جهاز متصل" } }
+            val hostName = active.hostName.ifBlank { active.comment.ifBlank { "" } }
             val detected = com.example.data.util.DeviceDetector.detectDevice(cleanMac, hostName, active.user)
+
+            val matchingCard = cardList.find { it.name == active.user }
+            val cardProfile = matchingCard?.profile?.takeIf { it.isNotBlank() } ?: "افتراضية"
+            val matchingProfile = _profiles.value.find { it.name.equals(cardProfile, ignoreCase = true) }
+            val resolvedPrice = matchingCard?.price?.takeIf { it.isNotBlank() && it != "0 ر.ي" }
+                ?: matchingProfile?.price?.takeIf { it.isNotBlank() && it != "0 ر.ي" }
+                ?: "غير محدد"
+
+            val upSec = parseUptimeToSeconds(active.uptime)
+            val loginTs = if (upSec > 0) System.currentTimeMillis() - (upSec * 1000L) else System.currentTimeMillis()
+            val loginTimeStr = java.text.SimpleDateFormat("hh:mm a", java.util.Locale("ar")).format(java.util.Date(loginTs))
+            val loginDisplay = "بدأ الساعة $loginTimeStr (متصل منذ ${active.uptime})"
 
             sessionList.add(
                 com.example.data.model.UserSessionRecord(
                     id = "sess_active_${active.id}_$index",
                     username = active.user,
                     ipAddress = active.address.ifBlank { "$subnetPrefix.${100 + index}" },
-                    macAddress = cleanMac.ifBlank { "00:11:22:33:44:${"%02X".format((index + 1) % 256)}" },
+                    macAddress = cleanMac.ifBlank { "غير مسجل" },
                     isOnline = true,
-                    loginTime = "متصل الآن (${active.uptime})",
-                    logoutTime = "نشط",
+                    loginTime = loginDisplay,
+                    logoutTime = "متصل حالياً",
                     duration = active.uptime.ifBlank { "0s" },
                     bytesIn = active.bytesIn,
                     bytesOut = active.bytesOut,
                     totalBytes = active.bytesIn + active.bytesOut,
-                    terminateReason = "جلسة نشطة حالياً عبر ${active.nodeName}",
-                    profile = "باقة الكرت الحالية",
-                    price = "500 ر.ي",
+                    terminateReason = "جلسة نشطة عبر ${active.nodeName}",
+                    profile = cardProfile,
+                    price = resolvedPrice,
                     deviceInfo = detected,
-                    comment = if (active.hostName.isNotBlank()) "اسم الجهاز: ${active.hostName}" else active.comment.ifBlank { "مستخدم متصل" },
+                    comment = if (hostName.isNotBlank()) "اسم الجهاز: $hostName" else "مستخدم متصل",
                     nodeName = active.nodeName
                 )
             )
@@ -1607,19 +1719,19 @@ class MikrotikRepository {
                     com.example.data.model.UserSessionRecord(
                         id = "sess_card_${card.id}_$index",
                         username = card.name,
-                        ipAddress = "$subnetPrefix.${150 + (index % 100)}",
-                        macAddress = "AA:BB:CC:DD:EE:${"%02X".format((index + 10) % 256)}",
+                        ipAddress = "غير متصل",
+                        macAddress = "غير مربوط بـ MAC",
                         isOnline = false,
-                        loginTime = if (isUsed) "جلسة سابقة مسجلة" else "غير مستخدم بعد",
-                        logoutTime = if (isExpired) "منتهي الاستهلاك / الصلاحية" else if (isUsed) "جلسة مكتملة" else "جاهز للاستخدام",
+                        loginTime = if (isUsed) "جلسة سابقة (استهلاك ${NetworkUtils.formatBytes(card.bytesIn + card.bytesOut)})" else "غير مستخدم بعد",
+                        logoutTime = if (isExpired) "منتهي الصلاحية" else if (isUsed) "جلسة مغلقة" else "جاهز للاستخدام",
                         duration = card.uptime.ifBlank { "0s" },
                         bytesIn = card.bytesIn,
                         bytesOut = card.bytesOut,
                         totalBytes = card.bytesIn + card.bytesOut,
-                        terminateReason = if (isExpired) "انتهاء رصيد الكرت" else if (isUsed) "تسجيل خروج / توقف الجلسة" else "كرت مفعل جديد",
+                        terminateReason = if (isExpired) "انتهاء رصيد الكرت" else if (isUsed) "تسجيل خروج / توقف الجلسة" else "كرت جاهز للبيع",
                         profile = card.profile,
-                        price = card.price,
-                        deviceInfo = com.example.data.util.DeviceDetector.detectDevice("AA:BB:CC:DD:EE:00", card.comment, card.name),
+                        price = card.price.ifBlank { "غير محدد" },
+                        deviceInfo = com.example.data.util.DeviceDetector.detectDevice("", card.comment, card.name),
                         comment = card.comment.ifBlank { if (isUsed) "كرت مستخدم سابق" else "كرت جاهز للبيع" },
                         nodeName = serverName
                     )

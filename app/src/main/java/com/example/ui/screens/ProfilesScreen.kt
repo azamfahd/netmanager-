@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
@@ -51,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.model.HotspotCard
 import com.example.data.model.HotspotProfile
 import com.example.ui.theme.CyberGreenBright
 import com.example.ui.theme.CyberGreenPrimary
@@ -63,8 +65,24 @@ fun ProfilesScreen(
     modifier: Modifier = Modifier
 ) {
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
+    val cards by viewModel.cards.collectAsStateWithLifecycle()
     var showAddDialog by remember { mutableStateOf(false) }
     var profileToEdit by remember { mutableStateOf<HotspotProfile?>(null) }
+
+    // Calculate overall statistics across all profiles
+    val totalProfiles = profiles.size
+    val totalCardsCount = cards.size
+    val activeCardsCount = cards.count { it.isActive }
+    val unusedCardsCount = cards.count { it.isUnused }
+    val expiredCardsCount = cards.count { it.isExpired }
+    
+    // Calculate total revenue
+    val totalRevenue = cards.sumOf { card ->
+        val prof = profiles.find { it.name.equals(card.profile, ignoreCase = true) }
+        val priceStr = prof?.price ?: card.price
+        val digits = priceStr.filter { it.isDigit() }
+        digits.toDoubleOrNull() ?: 500.0
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -74,18 +92,88 @@ fun ProfilesScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "باقات السرعات والأسعار (Hotspot Profiles)",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "جلب وتعديل سرعة الرفع والتحميل، مدة الجلسة، والأسعار المتزامنة مع السيرفر",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "باقات السرعات والأسعار (Hotspot Profiles)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "إدارة الباقات، التسعيرات، وتتبع تفصيلي لأرباح وحالة كل باقة في السيرفر",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
 
-            Spacer(modifier = Modifier.height(14.dp))
+                IconButton(
+                    onClick = { viewModel.refreshData() },
+                    modifier = Modifier.testTag("btn_refresh_profiles")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "تحديث من السيرفر",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Overall Statistics Summary Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "📊 إحصائيات عامة لسيرفر الميكروتك والباقات",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = "إجمالي الأرباح: ${totalRevenue.toLong()} ر.ي",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        StatBadgeItem("الباقات المفعلة", "$totalProfiles باقات", CyberGreenPrimary)
+                        StatBadgeItem("إجمالي الكروت", "$totalCardsCount كرت", NetworkCyan)
+                        StatBadgeItem("مستخدمة/نشطة", "$activeCardsCount", MaterialTheme.colorScheme.tertiary)
+                        StatBadgeItem("غير مستخدمة", "$unusedCardsCount", MaterialTheme.colorScheme.secondary)
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
 
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -94,6 +182,7 @@ fun ProfilesScreen(
                 items(profiles, key = { it.id }) { profile ->
                     ProfileCardItem(
                         profile = profile,
+                        cards = cards,
                         onEditClick = { profileToEdit = profile }
                     )
                 }
@@ -152,8 +241,19 @@ fun ProfilesScreen(
 @Composable
 fun ProfileCardItem(
     profile: HotspotProfile,
+    cards: List<HotspotCard>,
     onEditClick: () -> Unit
 ) {
+    // Filter cards belonging to this profile
+    val profileCards = cards.filter { it.profile.equals(profile.name, ignoreCase = true) }
+    val totalCount = profileCards.size
+    val activeCount = profileCards.count { it.isActive }
+    val unusedCount = profileCards.count { it.isUnused }
+    val expiredCount = profileCards.count { it.isExpired }
+    
+    val profileUnitPrice = profile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
+    val profileRevenue = totalCount * profileUnitPrice
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -197,6 +297,12 @@ fun ProfileCardItem(
                         if (profile.downloadLimit.isNotBlank() && profile.downloadLimit != "غير محدد") {
                             Text(
                                 text = "التحميل: ${profile.downloadLimit} • الرفع: ${profile.uploadLimit}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Text(
+                                text = "مهلة الجلسة: ${profile.sessionTimeout}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -316,7 +422,54 @@ fun ProfileCardItem(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Profile Card Statistics Breakdown & Revenue
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "الكروت: إجمالي ($totalCount) • نشطة ($activeCount) • متاحة ($unusedCount)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "الأرباح: ${profileRevenue.toLong()} ر.ي",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = CyberGreenBright
+                    )
+                }
+            }
         }
+    }
+}
+
+@Composable
+fun StatBadgeItem(label: String, value: String, color: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+            color = color
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 

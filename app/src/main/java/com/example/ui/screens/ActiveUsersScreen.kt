@@ -113,6 +113,7 @@ import com.example.ui.viewmodel.MainViewModel
 @Composable
 fun ActiveUsersScreen(
     viewModel: MainViewModel,
+    onOpenSessionDetail: ((UserSessionRecord) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val activeUsers by viewModel.filteredActiveUsers.collectAsStateWithLifecycle()
@@ -279,7 +280,11 @@ fun ActiveUsersScreen(
                                     terminateReason = event.details,
                                     deviceInfo = event.deviceInfo
                                 )
-                                selectedSessionForDetail = session
+                                if (onOpenSessionDetail != null) {
+                                    onOpenSessionDetail(session)
+                                } else {
+                                    selectedSessionForDetail = session
+                                }
                             }
                         )
                     }
@@ -301,7 +306,13 @@ fun ActiveUsersScreen(
                     items(userSessions, key = { it.id }) { session ->
                         UserSessionCardItem(
                             session = session,
-                            onClick = { selectedSessionForDetail = session },
+                            onClick = {
+                                if (onOpenSessionDetail != null) {
+                                    onOpenSessionDetail(session)
+                                } else {
+                                    selectedSessionForDetail = session
+                                }
+                            },
                             onKickClick = { userToKick = session }
                         )
                     }

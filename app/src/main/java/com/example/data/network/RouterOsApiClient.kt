@@ -230,32 +230,83 @@ class RouterOsApiClient {
     suspend fun getHotspotProfiles(): Result<List<HotspotProfile>> {
         return withContext(Dispatchers.IO) {
             try {
-                writeSentence(listOf("/ip/hotspot/user/profile/print"))
-                val sentences = readAllSentencesUntilDone()
                 val list = mutableListOf<HotspotProfile>()
-                for (s in sentences) {
-                    if (s.firstOrNull() == "!re") {
-                        val map = parseSentenceToMap(s)
-                        val name = map["name"] ?: "default"
-                        val rateLimit = map["rate-limit"] ?: "غير محدد"
-                        val comment = map["comment"] ?: ""
-                        val parsedPrice = extractPriceFromText(comment, name, "")
-                        val (up, down) = parseRateLimitSpeeds(rateLimit)
-                        list.add(
-                            HotspotProfile(
-                                id = map[".id"] ?: "p_${list.size}",
-                                name = name,
-                                rateLimit = rateLimit,
-                                sharedUsers = map["shared-users"]?.toIntOrNull() ?: 1,
-                                sessionTimeout = map["session-timeout"] ?: "غير محدد",
-                                keepaliveTimeout = map["keepalive-timeout"] ?: "5m",
-                                price = parsedPrice,
-                                uploadLimit = up,
-                                downloadLimit = down
+
+                // 1. Fetch Hotspot User Profiles (/ip/hotspot/user/profile)
+                try {
+                    writeSentence(listOf("/ip/hotspot/user/profile/print"))
+                    val sentences = readAllSentencesUntilDone()
+                    for (s in sentences) {
+                        if (s.firstOrNull() == "!re") {
+                            val map = parseSentenceToMap(s)
+                            val name = map["name"] ?: "default"
+                            val rateLimit = map["rate-limit"] ?: "غير محدد"
+                            val comment = map["comment"] ?: ""
+                            val sessionTimeout = map["session-timeout"] ?: "غير محدد"
+                            val keepaliveTimeout = map["keepalive-timeout"] ?: "5m"
+                            val parsedPrice = extractPriceFromText(comment, name, "")
+                            val priceNum = Regex("""\d+""").find(parsedPrice)?.value?.toDoubleOrNull() ?: 0.0
+                            val (up, down) = parseRateLimitSpeeds(rateLimit)
+
+                            list.add(
+                                HotspotProfile(
+                                    id = map[".id"] ?: "p_${list.size}",
+                                    name = name,
+                                    rateLimit = rateLimit,
+                                    sharedUsers = map["shared-users"]?.toIntOrNull() ?: 1,
+                                    sessionTimeout = sessionTimeout,
+                                    keepaliveTimeout = keepaliveTimeout,
+                                    price = parsedPrice,
+                                    uploadLimit = up,
+                                    downloadLimit = down,
+                                    validity = sessionTimeout,
+                                    dataLimit = extractDataLimitFromText(comment),
+                                    source = "hotspot",
+                                    comment = comment,
+                                    priceNumber = priceNum
+                                )
                             )
-                        )
+                        }
                     }
-                }
+                } catch (_: Exception) {}
+
+                // 2. Fetch User-Manager Profiles if available (/user-manager/profile or /tool/user-manager/profile)
+                try {
+                    writeSentence(listOf("/user-manager/profile/print"))
+                    val umSentences = readAllSentencesUntilDone()
+                    for (s in umSentences) {
+                        if (s.firstOrNull() == "!re") {
+                            val map = parseSentenceToMap(s)
+                            val name = map["name"] ?: continue
+                            if (list.any { it.name.equals(name, ignoreCase = true) }) continue
+
+                            val rawPrice = map["price"]?.takeIf { it.isNotBlank() && it != "0" }
+                            val priceStr = if (rawPrice != null) "$rawPrice ر.ي" else extractPriceFromText(map["comment"].orEmpty(), name, "")
+                            val priceNum = rawPrice?.toDoubleOrNull() ?: (Regex("""\d+""").find(priceStr)?.value?.toDoubleOrNull() ?: 0.0)
+                            val validity = map["validity"] ?: map["session-timeout"] ?: "1d"
+
+                            list.add(
+                                HotspotProfile(
+                                    id = map[".id"] ?: "um_${list.size}",
+                                    name = name,
+                                    rateLimit = map["rate-limit"] ?: "مفتوح",
+                                    sharedUsers = 1,
+                                    sessionTimeout = validity,
+                                    keepaliveTimeout = "5m",
+                                    price = priceStr,
+                                    uploadLimit = "",
+                                    downloadLimit = "",
+                                    validity = validity,
+                                    dataLimit = "",
+                                    source = "usermanager",
+                                    comment = map["comment"].orEmpty(),
+                                    priceNumber = priceNum
+                                )
+                            )
+                        }
+                    }
+                } catch (_: Exception) {}
+
                 Result.success(list)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -379,16 +430,35 @@ class RouterOsApiClient {
 
     private fun extractPriceFromText(comment: String, profileName: String, cardName: String): String {
         val combined = "$comment $profileName $cardName"
-        val regex = Regex("""(?i)(?:price=|سعر=|السعر=|\b)(\d{2,6})\s*(?:ر\.?ي|ريال|YER|YR|$)""")
-        val match = regex.find(combined)
-        if (match != null && match.groupValues.size > 1) {
-            return "${match.groupValues[1]} ر.ي"
+        // 1. Check explicit price tags: price=500, سعر: 200, 300ريال, 1000 YER
+        val explicitRegex = Regex("""(?i)(?:price=|سعر=|السعر=|فئة\s*|فئه\s*)(\d{2,6})""")
+        val explicitMatch = explicitRegex.find(combined)
+        if (explicitMatch != null && explicitMatch.groupValues.size > 1) {
+            return "${explicitMatch.groupValues[1]} ر.ي"
         }
-        val numberMatch = Regex("""\b(\d{3,5})\b""").find(comment)
-        if (numberMatch != null) {
-            return "${numberMatch.groupValues[1]} ر.ي"
+
+        // 2. Check currency suffixed numbers: 500 ر.ي, 200ريال, 1000YER
+        val currencyRegex = Regex("""(\d{2,6})\s*(?:ر\.?ي|ريال|YER|YR)""", RegexOption.IGNORE_CASE)
+        val currencyMatch = currencyRegex.find(combined)
+        if (currencyMatch != null && currencyMatch.groupValues.size > 1) {
+            return "${currencyMatch.groupValues[1]} ر.ي"
         }
-        return "500 ر.ي"
+
+        // 3. Check standalone standard voucher prices in comment or profileName
+        val commonPrices = listOf(100, 150, 200, 250, 300, 400, 500, 600, 700, 800, 1000, 1200, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 10000)
+        for (price in commonPrices) {
+            if (Regex("""\b$price\b""").containsMatchIn(comment) || Regex("""\b$price\b""").containsMatchIn(profileName)) {
+                return "$price ر.ي"
+            }
+        }
+
+        return "غير محدد"
+    }
+
+    private fun extractDataLimitFromText(comment: String): String {
+        if (comment.isBlank()) return ""
+        val match = Regex("""(?i)(\d+(?:\.\d+)?)\s*(GB|MB|GI|MI|G|M)""").find(comment)
+        return match?.value?.uppercase() ?: ""
     }
 
     private fun parseRateLimitSpeeds(rateLimit: String): Pair<String, String> {

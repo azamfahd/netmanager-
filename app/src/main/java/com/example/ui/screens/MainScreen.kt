@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CellTower
@@ -35,6 +36,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -98,6 +100,8 @@ fun MainScreen(
     var showBatchGeneratorDialog by remember { mutableStateOf(false) }
     var preselectedAgentIdForBatch by remember { mutableLongStateOf(0L) }
     var isShowingPrintScreen by remember { mutableStateOf(false) }
+    var isShowingAdminAuditScreen by remember { mutableStateOf(false) }
+    var selectedSessionForDetailScreen by remember { mutableStateOf<com.example.data.model.UserSessionRecord?>(null) }
     var showWelcomeDialog by remember { mutableStateOf(true) }
     val allCards by viewModel.cards.collectAsStateWithLifecycle()
 
@@ -109,12 +113,53 @@ fun MainScreen(
         }
     }
 
+    // If showing admin audit and permissions screen
+    if (isShowingAdminAuditScreen) {
+        BackHandler { isShowingAdminAuditScreen = false }
+        val adminUsers by viewModel.adminUsers.collectAsStateWithLifecycle()
+        val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
+        AdminAuditScreen(
+            adminUsers = adminUsers,
+            auditLogs = auditLogs,
+            onBackClick = { isShowingAdminAuditScreen = false },
+            onAddAdmin = { newAdmin -> viewModel.addAdminUser(newAdmin) }
+        )
+        return
+    }
+
     // If showing printable vouchers screen
     if (isShowingPrintScreen) {
         BackHandler { isShowingPrintScreen = false }
         VoucherPrintScreen(
             cards = printableCards,
             onBackClick = { isShowingPrintScreen = false }
+        )
+        return
+    }
+
+    // If showing detailed user session screen
+    selectedSessionForDetailScreen?.let { targetSession ->
+        BackHandler { selectedSessionForDetailScreen = null }
+        UserSessionDetailScreen(
+            session = targetSession,
+            onBackClick = { selectedSessionForDetailScreen = null },
+            onKickUser = if (targetSession.isOnline) {
+                {
+                    viewModel.kickUser(
+                        com.example.data.model.HotspotActiveUser(
+                            id = targetSession.id,
+                            user = targetSession.username,
+                            address = targetSession.ipAddress,
+                            macAddress = targetSession.macAddress,
+                            uptime = targetSession.duration,
+                            bytesIn = targetSession.bytesIn,
+                            bytesOut = targetSession.bytesOut
+                        )
+                    )
+                    selectedSessionForDetailScreen = null
+                }
+            } else null,
+            onRefresh = { viewModel.refreshData() }
         )
         return
     }
@@ -149,6 +194,31 @@ fun MainScreen(
                     )
                 },
                 actions = {
+                    val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
+                    IconButton(
+                        onClick = { isShowingAdminAuditScreen = true },
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .testTag("btn_admin_audit_topbar")
+                    ) {
+                        Box {
+                            Icon(
+                                imageVector = Icons.Default.AdminPanelSettings,
+                                contentDescription = "سجل التدقيق وصلاحيات المديرين",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            if (auditLogs.isNotEmpty()) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.error)
+                                        .align(Alignment.TopEnd)
+                                )
+                            }
+                        }
+                    }
+
                     StatusPill(
                         text = if (connectedState?.isDemo == true) "تجريبي" else "متصل",
                         type = if (connectedState?.isDemo == true) StatusType.INFO else StatusType.SUCCESS,
@@ -222,6 +292,9 @@ fun MainScreen(
             AppTab.ACTIVE_USERS -> {
                 ActiveUsersScreen(
                     viewModel = viewModel,
+                    onOpenSessionDetail = { session ->
+                        selectedSessionForDetailScreen = session
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
