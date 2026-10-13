@@ -82,4 +82,22 @@ interface AppDao {
 
     @Query("DELETE FROM pos_payments WHERE id = :paymentId")
     suspend fun deletePosPayment(paymentId: Long)
+
+    // ==========================================
+    // Package Pricing (Cost & Sale Price per Package)
+    // ==========================================
+    @Query("SELECT * FROM package_pricing")
+    fun getAllPackagePricings(): Flow<List<PackagePricingEntity>>
+
+    @Query("SELECT * FROM package_pricing")
+    suspend fun getAllPackagePricingsSync(): List<PackagePricingEntity>
+
+    @Query("SELECT * FROM package_pricing WHERE profileName = :profileName LIMIT 1")
+    suspend fun getPricingForProfile(profileName: String): PackagePricingEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPackagePricing(pricing: PackagePricingEntity)
+
+    @Query("DELETE FROM package_pricing WHERE profileName = :profileName")
+    suspend fun deletePackagePricing(profileName: String)
 }

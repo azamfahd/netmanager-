@@ -97,6 +97,7 @@ import com.example.ui.theme.StatusWarningAmberBg
 import com.example.data.network.NetworkUtils
 import com.example.data.util.DeviceDetector
 import com.example.ui.components.ConfirmDialog
+import com.example.ui.components.EmptyStateComponent
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StatusType
 import com.example.ui.components.UserDetailDialog
@@ -303,6 +304,16 @@ fun ActiveUsersScreen(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                if (userSessions.isEmpty()) {
+                    item {
+                        EmptyStateComponent(
+                            icon = Icons.Default.Group,
+                            title = "لا يوجد مستخدمون نشطون حالياً",
+                            description = "لا توجد أي جلسات مستخدمين نشطة مسجلة في الراوتر حالياً. سيتم عرض المستخدمين تلقائياً بمجرد اتصالهم بالشبكة.",
+                            modifier = Modifier.padding(vertical = 32.dp)
+                        )
+                    }
+                } else {
                     items(userSessions, key = { it.id }) { session ->
                         UserSessionCardItem(
                             session = session,
@@ -316,7 +327,8 @@ fun ActiveUsersScreen(
                             onKickClick = { userToKick = session }
                         )
                     }
-                    item { Spacer(modifier = Modifier.height(24.dp)) }
+                }
+                item { Spacer(modifier = Modifier.height(24.dp)) }
                 }
             }
         }

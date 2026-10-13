@@ -11,9 +11,10 @@ import androidx.room.RoomDatabase
         BatchHistoryEntity::class,
         PosAgentEntity::class,
         PosCardAssignmentEntity::class,
-        PosPaymentEntity::class
+        PosPaymentEntity::class,
+        PackagePricingEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

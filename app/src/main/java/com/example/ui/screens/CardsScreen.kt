@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ConfirmationNumber
+import androidx.compose.material.icons.filled.AddCard
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Timer
+import com.example.ui.components.EmptyStateComponent
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -268,6 +270,16 @@ fun CardsScreen(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                if (filteredCards.isEmpty()) {
+                    item {
+                        EmptyStateComponent(
+                            icon = Icons.Default.AddCard,
+                            title = if (searchQuery.isNotEmpty()) "لا توجد نتائج بحث مطابقة" else "لا توجد كروت متاحة",
+                            description = if (searchQuery.isNotEmpty()) "يرجى تجربة كلمات بحث أخرى." else "لا توجد كروت هوتسبوت مسجلة في الراوتر حالياً. يمكنك البدء بتوليد كروت جديدة.",
+                            modifier = Modifier.padding(vertical = 32.dp)
+                        )
+                    }
+                } else {
                     items(filteredCards, key = { it.id }) { card ->
                         HotspotCardItem(
                             card = card,
@@ -303,6 +315,7 @@ fun CardsScreen(
                             onDelete = { cardToDelete = card }
                         )
                     }
+                }
                     item {
                         Spacer(modifier = Modifier.height(80.dp)) // padding for FAB
                     }

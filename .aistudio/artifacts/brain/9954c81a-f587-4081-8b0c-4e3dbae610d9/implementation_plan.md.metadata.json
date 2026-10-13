@@ -1,6 +1,6 @@
 {
-  "summary": "Comprehensive global enterprise roadmap for MikroTik RouterOS management suite covering auto-fallback multi-protocol connectivity, QoS bandwidth management, multi-router cluster coordination, advanced financial POS accounting, and custom captive portal design.",
-  "updatedAt": "2026-10-12T17:36:10.436403893Z",
+  "summary": "Implementation plan to ensure the application connects to real MikroTik routers without leaking demo data, with clear separation between demo and real modes, and implementation of robust empty states.",
+  "updatedAt": "2026-10-13T20:21:27.126438442Z",
   "requestFeedback": true,
   "userFacing": true
 }

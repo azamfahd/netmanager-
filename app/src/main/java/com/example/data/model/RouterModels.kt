@@ -147,7 +147,8 @@ data class HotspotProfile(
     val dataLimit: String = "",
     val source: String = "hotspot", // "hotspot" or "usermanager"
     val comment: String = "",
-    val priceNumber: Double = 0.0
+    val priceNumber: Double = 0.0,
+    val costPrice: Double = 0.0
 )
 
 data class LocalNetworkInfo(
@@ -349,6 +350,186 @@ data class AuditLogEntry(
     val ipAddress: String,
     val severity: String = "INFO" // INFO, WARNING, CRITICAL
 )
+
+data class PackageTemplate(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val defaultRateLimit: String,
+    val defaultSessionTimeout: String,
+    val defaultPrice: String,
+    val defaultCostPrice: Double = 0.0,
+    val defaultDataQuota: String = "",
+    val sharedUsers: Int = 1,
+    val badge: String = ""
+)
+
+val PREDEFINED_PACKAGE_TEMPLATES = listOf(
+    PackageTemplate(
+        id = "tpl_1h_express",
+        title = "ساعة تيربو (1 Hour Express)",
+        subtitle = "سرعة فائقة لتصفح سريع",
+        defaultRateLimit = "2M/4M",
+        defaultSessionTimeout = "1h",
+        defaultPrice = "100 ر.ي",
+        defaultCostPrice = 40.0,
+        defaultDataQuota = "500MB",
+        sharedUsers = 1,
+        badge = "سريعة"
+    ),
+    PackageTemplate(
+        id = "tpl_3h_standard",
+        title = "3 ساعات قياسية (3 Hours Standard)",
+        subtitle = "مناسبة للدراسة وتصفح الوسائط",
+        defaultRateLimit = "2M/3M",
+        defaultSessionTimeout = "3h",
+        defaultPrice = "200 ر.ي",
+        defaultCostPrice = 80.0,
+        defaultDataQuota = "1024MB",
+        sharedUsers = 1,
+        badge = "اقتصادية"
+    ),
+    PackageTemplate(
+        id = "tpl_1d_unlimited",
+        title = "باقة يومية غير محدودة (1 Day Unlimited)",
+        subtitle = "يوم كامل 24 ساعة بدون انقطاع",
+        defaultRateLimit = "3M/6M",
+        defaultSessionTimeout = "1d",
+        defaultPrice = "500 ر.ي",
+        defaultCostPrice = 200.0,
+        defaultDataQuota = "3072MB",
+        sharedUsers = 1,
+        badge = "الأكثر طلباً"
+    ),
+    PackageTemplate(
+        id = "tpl_3d_family",
+        title = "3 أيام عائلية (3 Days Family)",
+        subtitle = "مشاركة لجهازين مع سرعة مستقرة",
+        defaultRateLimit = "4M/8M",
+        defaultSessionTimeout = "3d",
+        defaultPrice = "1200 ر.ي",
+        defaultCostPrice = 500.0,
+        defaultDataQuota = "8192MB",
+        sharedUsers = 2,
+        badge = "عائلية"
+    ),
+    PackageTemplate(
+        id = "tpl_7d_gold",
+        title = "باقة أسبوعية ذهبية (1 Week Gold)",
+        subtitle = "صلاحية 7 أيام كاملة بسرعة مضاعفة",
+        defaultRateLimit = "5M/10M",
+        defaultSessionTimeout = "7d",
+        defaultPrice = "2500 ر.ي",
+        defaultCostPrice = 1000.0,
+        defaultDataQuota = "16384MB",
+        sharedUsers = 2,
+        badge = "توفير"
+    ),
+    PackageTemplate(
+        id = "tpl_30d_monthly",
+        title = "باقة شهرية فائقة (1 Month Super)",
+        subtitle = "اشتراك شهري 30 يوماً للمكاتب والمنازل",
+        defaultRateLimit = "8M/16M",
+        defaultSessionTimeout = "30d",
+        defaultPrice = "6000 ر.ي",
+        defaultCostPrice = 2500.0,
+        defaultDataQuota = "65536MB",
+        sharedUsers = 3,
+        badge = "VIP"
+    ),
+    PackageTemplate(
+        id = "tpl_gaming",
+        title = "باقة ألعاب بينج منخفض (Gaming Pro)",
+        subtitle = "أولوية قصوى لحزم الألعاب والأونلاين",
+        defaultRateLimit = "10M/20M",
+        defaultSessionTimeout = "1d",
+        defaultPrice = "700 ر.ي",
+        defaultCostPrice = 300.0,
+        defaultDataQuota = "5120MB",
+        sharedUsers = 1,
+        badge = "Gaming"
+    ),
+    PackageTemplate(
+        id = "tpl_night_owl",
+        title = "باقة ليلية مخفضة (Night Owl)",
+        subtitle = "صلاحية 12 ساعة من الليل للصباح",
+        defaultRateLimit = "4M/8M",
+        defaultSessionTimeout = "12h",
+        defaultPrice = "300 ر.ي",
+        defaultCostPrice = 120.0,
+        defaultDataQuota = "4096MB",
+        sharedUsers = 1,
+        badge = "ليلي"
+    )
+)
+
+data class BandwidthPoint(
+    val timestamp: Long,
+    val rxKbps: Double,
+    val txKbps: Double
+)
+
+data class PeakHourStat(
+    val hour: Int,
+    val userCount: Int,
+    val isPeak: Boolean,
+    val percentage: Float
+)
+
+data class PackageConsumptionStat(
+    val profileName: String,
+    val activeUsersCount: Int,
+    val totalCardsCount: Int,
+    val totalBytes: Long,
+    val formattedTraffic: String,
+    val percentage: Float,
+    val revenueAmount: Double
+)
+
+enum class TimeFilterRange(val title: String) {
+    ALL("الكل"),
+    TODAY("اليوم"),
+    WEEK("هذا الأسبوع"),
+    MONTH("هذا الشهر")
+}
+
+data class DetailedPackageProfitStat(
+    val profileName: String,
+    val costPrice: Double = 0.0,
+    val salePrice: Double = 0.0,
+    val profitPerCard: Double = 0.0, // salePrice - costPrice
+    val profitMarginPercent: Double = 0.0, // (profitPerCard / salePrice * 100)
+    val totalCardsGenerated: Int = 0,
+    val soldCardsCount: Int = 0,
+    val activeCardsCount: Int = 0,
+    val unusedCardsCount: Int = 0,
+    val expiredCardsCount: Int = 0,
+    val totalRevenue: Double = 0.0, // soldCardsCount * salePrice
+    val totalCost: Double = 0.0, // soldCardsCount * costPrice
+    val netProfit: Double = 0.0, // totalRevenue - totalCost
+    val profitSharePercent: Float = 0f, // percentage of total network profit
+    val salesSharePercent: Float = 0f // percentage of total cards sold
+)
+
+data class RevenueAnalyticsSummary(
+    val totalEstimatedRevenue: Double = 0.0,
+    val activeRevenue: Double = 0.0,
+    val availableInventoryValue: Double = 0.0,
+    val totalCardsCount: Int = 0,
+    val activeCardsCount: Int = 0,
+    val unusedCardsCount: Int = 0,
+    val expiredCardsCount: Int = 0,
+    val topSellingPackage: String = "غير محدد",
+    val topSellingPackageCount: Int = 0,
+    val averageCardPrice: Double = 0.0,
+    val totalCost: Double = 0.0,
+    val totalNetProfit: Double = 0.0,
+    val averageProfitMarginPercent: Double = 0.0,
+    val topProfitablePackage: String = "غير محدد",
+    val topProfitablePackageProfit: Double = 0.0,
+    val selectedTimeFilter: TimeFilterRange = TimeFilterRange.ALL
+)
+
 
 
 

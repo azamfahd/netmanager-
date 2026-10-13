@@ -55,3 +55,12 @@ data class PosAgentSummary(
     val assignedCards: List<PosCardAssignmentEntity> = emptyList(),
     val payments: List<PosPaymentEntity> = emptyList()
 )
+
+@Entity(tableName = "package_pricing")
+data class PackagePricingEntity(
+    @PrimaryKey
+    val profileName: String,
+    val costPrice: Double,
+    val salePrice: Double,
+    val updatedAt: Long = System.currentTimeMillis()
+)

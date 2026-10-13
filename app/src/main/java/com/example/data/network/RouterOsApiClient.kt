@@ -1,5 +1,6 @@
 package com.example.data.network
 
+import com.example.data.model.AdminUser
 import com.example.data.model.HotspotActiveUser
 import com.example.data.model.HotspotCard
 import com.example.data.model.HotspotProfile
@@ -270,7 +271,7 @@ class RouterOsApiClient {
                     }
                 } catch (_: Exception) {}
 
-                // 2. Fetch User-Manager Profiles if available (/user-manager/profile or /tool/user-manager/profile)
+                // 2. Fetch User-Manager Profiles if available (/user-manager/profile)
                 try {
                     writeSentence(listOf("/user-manager/profile/print"))
                     val umSentences = readAllSentencesUntilDone()
@@ -301,6 +302,33 @@ class RouterOsApiClient {
                                     source = "usermanager",
                                     comment = map["comment"].orEmpty(),
                                     priceNumber = priceNum
+                                )
+                            )
+                        }
+                    }
+                } catch (_: Exception) {}
+
+                // 3. Fetch Tool User-Manager Profiles if available (/tool/user-manager/profile)
+                try {
+                    writeSentence(listOf("/tool/user-manager/profile/print"))
+                    val tumSentences = readAllSentencesUntilDone()
+                    for (s in tumSentences) {
+                        if (s.firstOrNull() == "!re") {
+                            val map = parseSentenceToMap(s)
+                            val name = map["name"] ?: continue
+                            if (list.any { it.name.equals(name, ignoreCase = true) }) continue
+                            val rawPrice = map["price"]?.takeIf { it.isNotBlank() && it != "0" }
+                            val priceStr = if (rawPrice != null) "$rawPrice ر.ي" else extractPriceFromText(map["comment"].orEmpty(), name, "")
+                            list.add(
+                                HotspotProfile(
+                                    id = map[".id"] ?: "tum_${list.size}",
+                                    name = name,
+                                    rateLimit = map["rate-limit"] ?: "مفتوح",
+                                    sharedUsers = 1,
+                                    sessionTimeout = map["validity"] ?: "1d",
+                                    price = priceStr,
+                                    source = "usermanager",
+                                    comment = map["comment"].orEmpty()
                                 )
                             )
                         }
@@ -952,6 +980,77 @@ class RouterOsApiClient {
             read += count
         }
         return String(buf, 0, read, Charsets.UTF_8)
+    }
+
+    suspend fun getRouterUsers(): Result<List<AdminUser>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/user/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<AdminUser>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        val map = parseSentenceToMap(s)
+                        val username = map["name"] ?: "admin"
+                        val group = map["group"] ?: "full"
+                        val roleName = when (group.lowercase()) {
+                            "full" -> "مدير عام (Full Admin)"
+                            "write" -> "مشرف كروت"
+                            "read" -> "مراقب"
+                            else -> group
+                        }
+                        val permissions = if (group.lowercase() == "full") {
+                            listOf("إدارة كاملة", "توليد كروت", "تعديل الأسعار", "إدارة السيرفرات", "تعديل الصلاحيات")
+                        } else {
+                            listOf("عرض الجلسات", "مراقبة الاستهلاك")
+                        }
+                        list.add(
+                            AdminUser(
+                                id = map[".id"] ?: "u_${list.size}",
+                                username = username,
+                                fullName = map["comment"]?.ifBlank { username } ?: username,
+                                role = roleName,
+                                permissions = permissions,
+                                lastActiveTime = map["last-logged-in"] ?: "نشط",
+                                ipAddress = map["address"] ?: "192.168.88.1",
+                                isActive = true,
+                                password = ""
+                            )
+                        )
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun addRouterUser(username: String, password: String, group: String, comment: String): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val rosGroup = when {
+                    group.contains("عام") || group.contains("Full") -> "full"
+                    group.contains("كروت") -> "write"
+                    else -> "read"
+                }
+                val words = mutableListOf("/user/add", "=name=$username", "=password=$password", "=group=$rosGroup")
+                if (comment.isNotBlank()) {
+                    words.add("=comment=$comment")
+                }
+                writeSentence(words)
+                val sentences = readAllSentencesUntilDone()
+                val hasTrap = sentences.any { it.firstOrNull() == "!trap" }
+                if (hasTrap) {
+                    val trapMap = parseSentenceToMap(sentences.first { it.firstOrNull() == "!trap" })
+                    Result.failure(Exception(trapMap["message"] ?: "فشل إضافة المستخدم في الراوتر"))
+                } else {
+                    Result.success(true)
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
     }
 
     fun close() {

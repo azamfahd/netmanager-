@@ -94,6 +94,12 @@ fun DashboardScreen(
     val activeUsers by viewModel.activeUsers.collectAsStateWithLifecycle()
     val cards by viewModel.cards.collectAsStateWithLifecycle()
     val networkNodes by viewModel.networkNodes.collectAsStateWithLifecycle()
+    val bandwidthHistory by viewModel.bandwidthHistory.collectAsStateWithLifecycle()
+    val revenueSummary by viewModel.revenueAnalytics.collectAsStateWithLifecycle()
+    val peakHourStats by viewModel.peakHourStats.collectAsStateWithLifecycle()
+    val packageStats by viewModel.packageConsumptionStats.collectAsStateWithLifecycle()
+    val detailedPackageStats by viewModel.detailedPackageProfitStats.collectAsStateWithLifecycle()
+    val selectedTimeFilter by viewModel.selectedTimeFilter.collectAsStateWithLifecycle()
 
     var showRebootDialog by remember { mutableStateOf(false) }
 
@@ -159,7 +165,21 @@ fun DashboardScreen(
             )
         }
 
-        // 5. Cyber Quick Actions (العمليات والإجراءات السريعة)
+        // 5. Advanced Analytics & Statistics Hub (التحليلات والإحصائيات المتقدمة)
+        item {
+            com.example.ui.components.AdvancedAnalyticsHub(
+                bandwidthHistory = bandwidthHistory,
+                revenueSummary = revenueSummary,
+                peakHourStats = peakHourStats,
+                packageStats = packageStats,
+                detailedPackageStats = detailedPackageStats,
+                selectedTimeFilter = selectedTimeFilter,
+                onTimeFilterSelected = { viewModel.setTimeFilter(it) },
+                onEditPackagePricing = { prof, cost, sale -> viewModel.updatePackageCostAndPrice(prof, cost, sale) }
+            )
+        }
+
+        // 6. Cyber Quick Actions (العمليات والإجراءات السريعة)
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(

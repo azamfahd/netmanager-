@@ -1,5 +1,7 @@
 package com.example.data.network
 
+import com.example.data.model.AdminUser
+import com.example.data.model.AuditLogEntry
 import com.example.data.model.BatchGenerationConfig
 import com.example.data.model.CodeCharType
 import com.example.data.model.HotspotActiveUser
@@ -8,11 +10,13 @@ import com.example.data.model.HotspotProfile
 import com.example.data.model.IpBinding
 import com.example.data.model.RouterConnectionConfig
 import com.example.data.model.RouterResource
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
@@ -99,6 +103,29 @@ class MikrotikRepository {
     ))
     val auditLogs: StateFlow<List<com.example.data.model.AuditLogEntry>> = _auditLogs.asStateFlow()
 
+    private val _bandwidthHistory = MutableStateFlow<List<com.example.data.model.BandwidthPoint>>(
+        listOf(
+            com.example.data.model.BandwidthPoint(System.currentTimeMillis() - 25000, 2100.0, 950.0),
+            com.example.data.model.BandwidthPoint(System.currentTimeMillis() - 20000, 3200.0, 1400.0),
+            com.example.data.model.BandwidthPoint(System.currentTimeMillis() - 15000, 2800.0, 1100.0),
+            com.example.data.model.BandwidthPoint(System.currentTimeMillis() - 10000, 4100.0, 1850.0),
+            com.example.data.model.BandwidthPoint(System.currentTimeMillis() - 5000, 3450.0, 1600.0),
+            com.example.data.model.BandwidthPoint(System.currentTimeMillis(), 3800.0, 1750.0)
+        )
+    )
+    val bandwidthHistory: StateFlow<List<com.example.data.model.BandwidthPoint>> = _bandwidthHistory.asStateFlow()
+
+    fun recordBandwidthPoint(rxKbps: Double, txKbps: Double) {
+        val now = System.currentTimeMillis()
+        val current = _bandwidthHistory.value.toMutableList()
+        current.add(com.example.data.model.BandwidthPoint(now, rxKbps, txKbps))
+        if (current.size > 30) {
+            _bandwidthHistory.value = current.takeLast(30)
+        } else {
+            _bandwidthHistory.value = current
+        }
+    }
+
     fun logAdminAction(adminUsername: String, actionType: String, description: String, severity: String = "INFO") {
         val entry = com.example.data.model.AuditLogEntry(
             id = "log_${System.currentTimeMillis()}",
@@ -120,9 +147,28 @@ class MikrotikRepository {
         updated.addAll(_adminUsers.value)
         _adminUsers.value = updated
         logAdminAction("admin", "إضافة مستخدم إداري", "تم إضافة مدير جديد: ${admin.fullName} (@${admin.username}) بصلاحيات: ${admin.permissions.joinToString()}", "INFO")
+
+        if (activeConfig?.isDemoMode != true) {
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    routerOsApiClient.addRouterUser(
+                        username = admin.username,
+                        password = admin.password.ifBlank { "1234" },
+                        group = admin.role,
+                        comment = admin.fullName
+                    )
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     init {
+        _profiles.value = emptyList()
+        _cards.value = emptyList()
+        _activeUsers.value = emptyList()
+    }
+
+    fun populateDemoData() {
         // Initialize default realistic profiles
         _profiles.value = listOf(
             HotspotProfile("1", "1 Hour - 500MB", rateLimit = "2M/2M", sharedUsers = 1, sessionTimeout = "1h", price = "200 ر.ي"),
@@ -538,6 +584,7 @@ class MikrotikRepository {
                 activeConfig = cleanConfig
                 if (cleanConfig.isDemoMode) {
                     delay(300)
+                    populateDemoData()
                     adaptDataToConfig(cleanConfig)
                     return@withContext Result.success(true)
                 }
@@ -550,6 +597,10 @@ class MikrotikRepository {
                 _networkNodes.value = emptyList()
                 _userSessions.value = emptyList()
                 _activityEvents.value = emptyList()
+                _adminUsers.value = emptyList()
+                _auditLogs.value = emptyList()
+                _systemLogs.value = emptyList()
+                _bandwidthHistory.value = emptyList()
 
                 // 1. If user explicitly specified port 8728, connect directly via native RouterOS API socket
                 if (cleanConfig.port == 8728) {
@@ -664,10 +715,33 @@ class MikrotikRepository {
                 _routerBoardInfo.value = rbResult.getOrThrow()
             }
 
-            // 3. Fetch System Logs
+            // 3. Fetch System Logs & Router Users
+            val usersResult = routerOsApiClient.getRouterUsers()
+            if (usersResult.isSuccess) {
+                val realUsers = usersResult.getOrThrow()
+                if (realUsers.isNotEmpty()) {
+                    _adminUsers.value = realUsers
+                }
+            }
+
             val logResult = routerOsApiClient.getSystemLogs(limit = 40)
             if (logResult.isSuccess) {
-                _systemLogs.value = logResult.getOrThrow()
+                val sysLogs = logResult.getOrThrow()
+                _systemLogs.value = sysLogs
+                val auditEntries = sysLogs.mapIndexed { index, entry ->
+                    com.example.data.model.AuditLogEntry(
+                        id = entry.id.ifBlank { "log_$index" },
+                        adminUsername = "admin",
+                        actionType = entry.topics,
+                        description = entry.message,
+                        timestamp = entry.time,
+                        ipAddress = activeConfig?.ipAddress ?: "192.168.88.1",
+                        severity = if (entry.topics.contains("error", ignoreCase = true) || entry.topics.contains("warning", ignoreCase = true)) "WARNING" else "INFO"
+                    )
+                }
+                if (auditEntries.isNotEmpty()) {
+                    _auditLogs.value = auditEntries
+                }
             }
 
             // 4. Fetch Hotspot Servers & IP Pools
@@ -758,16 +832,14 @@ class MikrotikRepository {
             }
             _cards.value = combinedCards.distinctBy { it.name }
 
-            // 8. Fetch Profiles & IP Bindings
+            // 8. Fetch Profiles & IP Bindings from Router
             val profResult = routerOsApiClient.getHotspotProfiles()
             if (profResult.isSuccess) {
-                val list = profResult.getOrThrow()
-                if (list.isNotEmpty()) _profiles.value = list
+                _profiles.value = profResult.getOrThrow()
             }
             val bindResult = routerOsApiClient.getIpBindings()
             if (bindResult.isSuccess) {
-                val list = bindResult.getOrThrow()
-                if (list.isNotEmpty()) _ipBindings.value = list
+                _ipBindings.value = bindResult.getOrThrow()
             }
 
             // 9. Fetch Interfaces & Neighbors for Per-Node Distribution
@@ -896,6 +968,48 @@ class MikrotikRepository {
                             )
                         }
                         _systemLogs.value = logList.takeLast(40).reversed()
+                    }
+                } catch (_: Exception) {}
+
+                // Fetch Router Users (/rest/user)
+                try {
+                    val uReq = Request.Builder().url("$baseUrl/rest/user").header("Authorization", credential).build()
+                    val uResp = httpClient.newCall(uReq).execute()
+                    if (uResp.isSuccessful) {
+                        val uArr = JSONArray(uResp.body?.string() ?: "[]")
+                        val userList = mutableListOf<com.example.data.model.AdminUser>()
+                        for (i in 0 until uArr.length()) {
+                            val o = uArr.getJSONObject(i)
+                            val username = o.optString("name", "admin")
+                            val group = o.optString("group", "full")
+                            val roleName = when (group.lowercase()) {
+                                "full" -> "مدير عام (Full Admin)"
+                                "write" -> "مشرف كروت"
+                                "read" -> "مراقب"
+                                else -> group
+                            }
+                            val permissions = if (group.lowercase() == "full") {
+                                listOf("إدارة كاملة", "توليد كروت", "تعديل الأسعار", "إدارة السيرفرات", "تعديل الصلاحيات")
+                            } else {
+                                listOf("عرض الجلسات", "مراقبة الاستهلاك")
+                            }
+                            userList.add(
+                                com.example.data.model.AdminUser(
+                                    id = o.optString(".id", "u_$i"),
+                                    username = username,
+                                    fullName = o.optString("comment", "").ifBlank { username },
+                                    role = roleName,
+                                    permissions = permissions,
+                                    lastActiveTime = o.optString("last-logged-in", "نشط"),
+                                    ipAddress = o.optString("address", "192.168.88.1"),
+                                    isActive = !o.optBoolean("disabled", false),
+                                    password = ""
+                                )
+                            )
+                        }
+                        if (userList.isNotEmpty()) {
+                            _adminUsers.value = userList
+                        }
                     }
                 } catch (_: Exception) {}
 
@@ -1152,37 +1266,45 @@ class MikrotikRepository {
                         )
                     }
 
-                    // Also try user manager profiles via REST
+                    // Also try user manager profiles (v7 and v6) via REST
                     try {
-                        val umReq = Request.Builder().url("$baseUrl/rest/user-manager/profile").header("Authorization", credential).build()
-                        val umResp = httpClient.newCall(umReq).execute()
-                        if (umResp.isSuccessful) {
-                            val umArr = JSONArray(umResp.body?.string() ?: "[]")
-                            for (i in 0 until umArr.length()) {
-                                val obj = umArr.getJSONObject(i)
-                                val name = obj.optString("name", "")
-                                if (name.isNotBlank() && profList.none { it.name.equals(name, ignoreCase = true) }) {
-                                    val rawP = obj.optString("price", "")
-                                    val priceStr = if (rawP.isNotBlank() && rawP != "0") "$rawP ر.ي" else extractPriceFromText(obj.optString("comment", ""), name, "")
-                                    val valStr = obj.optString("validity", obj.optString("session-timeout", "1d"))
-                                    profList.add(
-                                        HotspotProfile(
-                                            id = obj.optString(".id", "um$i"),
-                                            name = name,
-                                            rateLimit = obj.optString("rate-limit", "مفتوح"),
-                                            sharedUsers = 1,
-                                            sessionTimeout = valStr,
-                                            keepaliveTimeout = "5m",
-                                            price = priceStr,
-                                            validity = valStr,
-                                            dataLimit = "",
-                                            source = "usermanager",
-                                            comment = obj.optString("comment", ""),
-                                            priceNumber = rawP.toDoubleOrNull() ?: 0.0
-                                        )
-                                    )
+                        val endpoints = listOf(
+                            "$baseUrl/rest/user-manager/profile" to "usermanager",
+                            "$baseUrl/rest/tool/user-manager/profile" to "usermanager"
+                        )
+                        for ((url, src) in endpoints) {
+                            try {
+                                val req = Request.Builder().url(url).header("Authorization", credential).build()
+                                val resp = httpClient.newCall(req).execute()
+                                if (resp.isSuccessful) {
+                                    val arr = JSONArray(resp.body?.string() ?: "[]")
+                                    for (i in 0 until arr.length()) {
+                                        val obj = arr.getJSONObject(i)
+                                        val name = obj.optString("name", "")
+                                        if (name.isNotBlank() && profList.none { it.name.equals(name, ignoreCase = true) }) {
+                                            val rateLimit = obj.optString("rate-limit", "غير محدد")
+                                            val comment = obj.optString("comment", "")
+                                            val priceStr = extractPriceFromText(comment, name, "")
+                                            val (up, down) = parseRateLimitSpeeds(rateLimit)
+                                            profList.add(
+                                                HotspotProfile(
+                                                    id = obj.optString(".id", "${src}_$i"),
+                                                    name = name,
+                                                    rateLimit = rateLimit,
+                                                    sharedUsers = obj.optInt("shared-users", 1),
+                                                    sessionTimeout = "1d",
+                                                    price = priceStr,
+                                                    uploadLimit = up,
+                                                    downloadLimit = down,
+                                                    validity = "1d",
+                                                    source = src,
+                                                    comment = comment
+                                                )
+                                            )
+                                        }
+                                    }
                                 }
-                            }
+                            } catch (_: Exception) {}
                         }
                     } catch (_: Exception) {}
 
@@ -1801,6 +1923,7 @@ class MikrotikRepository {
                 rxSpeedKbps = rxKbps,
                 txSpeedKbps = txKbps
             )
+            recordBandwidthPoint(rxKbps, txKbps)
         }
     }
 
@@ -1808,11 +1931,14 @@ class MikrotikRepository {
         val config = activeConfig ?: return
         if (config.isDemoMode) {
             val current = _resourceState.value
+            val newRx = (current.rxSpeedKbps + Random.nextDouble(-400.0, 500.0)).coerceAtLeast(400.0)
+            val newTx = (current.txSpeedKbps + Random.nextDouble(-200.0, 300.0)).coerceAtLeast(200.0)
             _resourceState.value = current.copy(
                 cpuLoad = (current.cpuLoad + Random.nextInt(-3, 4)).coerceIn(5, 75),
-                rxSpeedKbps = (current.rxSpeedKbps + Random.nextDouble(-400.0, 500.0)).coerceAtLeast(400.0),
-                txSpeedKbps = (current.txSpeedKbps + Random.nextDouble(-200.0, 300.0)).coerceAtLeast(200.0)
+                rxSpeedKbps = newRx,
+                txSpeedKbps = newTx
             )
+            recordBandwidthPoint(newRx, newTx)
             return
         }
 

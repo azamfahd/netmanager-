@@ -14,13 +14,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.LocalOffer
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
@@ -28,10 +32,13 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import com.example.data.model.PREDEFINED_PACKAGE_TEMPLATES
+import com.example.data.model.PackageTemplate
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import com.example.ui.components.EmptyStateComponent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -66,18 +73,29 @@ fun ProfilesScreen(
 ) {
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val cards by viewModel.cards.collectAsStateWithLifecycle()
+    val packagePricings by viewModel.packagePricings.collectAsStateWithLifecycle()
     var showAddDialog by remember { mutableStateOf(false) }
+    var initialTemplateForAdd by remember { mutableStateOf<PackageTemplate?>(null) }
     var profileToEdit by remember { mutableStateOf<HotspotProfile?>(null) }
 
-    // Calculate overall statistics across all profiles
+    // Calculate overall statistics across all profiles from real cards
     val totalProfiles = profiles.size
     val totalCardsCount = cards.size
     val activeCardsCount = cards.count { it.isActive }
     val unusedCardsCount = cards.count { it.isUnused }
     val expiredCardsCount = cards.count { it.isExpired }
-    
-    // Calculate total revenue
-    val totalRevenue = cards.sumOf { card ->
+    val soldCards = cards.filter { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L || it.bytesOut > 0L }
+    val soldCardsCount = soldCards.size
+
+    // Calculate real sold revenue and total inventory valuation
+    val soldRevenue = soldCards.sumOf { card ->
+        val prof = profiles.find { it.name.equals(card.profile, ignoreCase = true) }
+        val priceStr = prof?.price ?: card.price
+        val digits = priceStr.filter { it.isDigit() }
+        digits.toDoubleOrNull() ?: 500.0
+    }
+
+    val totalInventoryValue = cards.sumOf { card ->
         val prof = profiles.find { it.name.equals(card.profile, ignoreCase = true) }
         val priceStr = prof?.price ?: card.price
         val digits = priceStr.filter { it.isDigit() }
@@ -140,7 +158,7 @@ fun ProfilesScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "📊 إحصائيات عامة لسيرفر الميكروتك والباقات",
+                            text = "📊 إحصائيات باقات سيرفر الميكروتك",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
@@ -150,7 +168,7 @@ fun ProfilesScreen(
                             shape = RoundedCornerShape(8.dp)
                         ) {
                             Text(
-                                text = "إجمالي الأرباح: ${totalRevenue.toLong()} ر.ي",
+                                text = "مبيعات الكروت: ${soldRevenue.toLong()} ر.ي",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onPrimary,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -165,10 +183,10 @@ fun ProfilesScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        StatBadgeItem("الباقات المفعلة", "$totalProfiles باقات", CyberGreenPrimary)
-                        StatBadgeItem("إجمالي الكروت", "$totalCardsCount كرت", NetworkCyan)
-                        StatBadgeItem("مستخدمة/نشطة", "$activeCardsCount", MaterialTheme.colorScheme.tertiary)
-                        StatBadgeItem("غير مستخدمة", "$unusedCardsCount", MaterialTheme.colorScheme.secondary)
+                        StatBadgeItem("الباقات بالسيرفر", "$totalProfiles باقة", CyberGreenPrimary)
+                        StatBadgeItem("كروت مباعة", "$soldCardsCount كرت", NetworkCyan)
+                        StatBadgeItem("نشطة الآن", "$activeCardsCount", MaterialTheme.colorScheme.tertiary)
+                        StatBadgeItem("مخزون متبقي", "$unusedCardsCount", MaterialTheme.colorScheme.secondary)
                     }
                 }
             }
@@ -179,12 +197,53 @@ fun ProfilesScreen(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(profiles, key = { it.id }) { profile ->
-                    ProfileCardItem(
-                        profile = profile,
-                        cards = cards,
-                        onEditClick = { profileToEdit = profile }
+                item {
+                    PackageTemplatesBanner(
+                        templates = PREDEFINED_PACKAGE_TEMPLATES,
+                        onSelectTemplate = { tpl ->
+                            initialTemplateForAdd = tpl
+                            showAddDialog = true
+                        }
                     )
+                }
+
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "الباقات الحالية في السيرفر (${profiles.size})",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+
+                if (profiles.isEmpty()) {
+                    item {
+                        EmptyStateComponent(
+                            icon = Icons.Default.Tune,
+                            title = "لا توجد باقات في سيرفر الميكروتك حالياً",
+                            description = "يتم قراءة الباقات مباشرة وحصرياً من راوتر الميكروتك المتصل (/ip/hotspot/user/profile). يمكنك إضافة باقة جديدة الآن أو استخدام أحد القوالب الجاهزة بالأعلى.",
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    }
+                } else {
+                    items(profiles, key = { it.id }) { profile ->
+                        val pricing = packagePricings.find { it.profileName.equals(profile.name, ignoreCase = true) }
+                        ProfileCardItem(
+                            profile = profile,
+                            cards = cards,
+                            pricing = pricing,
+                            onEditClick = { profileToEdit = profile },
+                            onEditPricing = { cost, sale ->
+                                viewModel.updatePackageCostAndPrice(profile.name, cost, sale)
+                            }
+                        )
+                    }
                 }
                 item {
                     Spacer(modifier = Modifier.height(80.dp))
@@ -193,7 +252,10 @@ fun ProfilesScreen(
         }
 
         FloatingActionButton(
-            onClick = { showAddDialog = true },
+            onClick = {
+                initialTemplateForAdd = null
+                showAddDialog = true
+            },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(24.dp)
@@ -218,10 +280,17 @@ fun ProfilesScreen(
 
     if (showAddDialog) {
         AddProfileDialog(
-            onDismiss = { showAddDialog = false },
+            initialTemplate = initialTemplateForAdd,
+            onDismiss = {
+                showAddDialog = false
+                initialTemplateForAdd = null
+            },
             onConfirm = { newProfile ->
                 viewModel.createProfile(newProfile)
+                val saleNum = newProfile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
+                viewModel.updatePackageCostAndPrice(newProfile.name, newProfile.costPrice, saleNum)
                 showAddDialog = false
+                initialTemplateForAdd = null
             }
         )
     }
@@ -232,6 +301,8 @@ fun ProfilesScreen(
             onDismiss = { profileToEdit = null },
             onConfirm = { updated ->
                 viewModel.updateProfile(updated)
+                val saleNum = updated.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
+                viewModel.updatePackageCostAndPrice(updated.name, updated.costPrice, saleNum)
                 profileToEdit = null
             }
         )
@@ -242,7 +313,9 @@ fun ProfilesScreen(
 fun ProfileCardItem(
     profile: HotspotProfile,
     cards: List<HotspotCard>,
-    onEditClick: () -> Unit
+    pricing: com.example.data.local.PackagePricingEntity? = null,
+    onEditClick: () -> Unit,
+    onEditPricing: ((cost: Double, sale: Double) -> Unit)? = null
 ) {
     // Filter cards belonging to this profile
     val profileCards = cards.filter { it.profile.equals(profile.name, ignoreCase = true) }
@@ -250,9 +323,13 @@ fun ProfileCardItem(
     val activeCount = profileCards.count { it.isActive }
     val unusedCount = profileCards.count { it.isUnused }
     val expiredCount = profileCards.count { it.isExpired }
-    
-    val profileUnitPrice = profile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
-    val profileRevenue = totalCount * profileUnitPrice
+    val soldCount = profileCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L || it.bytesOut > 0L }
+
+    val salePrice = pricing?.salePrice ?: profile.priceNumber.takeIf { it > 0 } ?: profile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
+    val costPrice = pricing?.costPrice ?: profile.costPrice.takeIf { it > 0 } ?: (salePrice * 0.40)
+    val profitPerCard = (salePrice - costPrice).coerceAtLeast(0.0)
+    val profileRevenue = soldCount * salePrice
+    val profileNetProfit = soldCount * profitPerCard
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -431,25 +508,55 @@ fun ProfileCardItem(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
                 shape = RoundedCornerShape(8.dp)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(
-                        text = "الكروت: إجمالي ($totalCount) • نشطة ($activeCount) • متاحة ($unusedCount)",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "الأرباح: ${profileRevenue.toLong()} ر.ي",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = CyberGreenBright
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "الكروت: إجمالي ($totalCount) • مباعة ($soldCount) • نشطة ($activeCount)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Surface(
+                            color = CyberGreenPrimary.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "ربح الكرت: +${profitPerCard.toInt()} ر.ي",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = CyberGreenBright,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "التكلفة: ${costPrice.toInt()} ر.ي • البيع: ${salePrice.toInt()} ر.ي",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 10.sp
+                        )
+                        Text(
+                            text = "صافي الربح: ${profileNetProfit.toLong()} ر.ي",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = CyberGreenBright
+                        )
+                    }
                 }
             }
         }
@@ -474,6 +581,177 @@ fun StatBadgeItem(label: String, value: String, color: Color) {
 }
 
 @Composable
+fun PackageTemplatesBanner(
+    templates: List<PackageTemplate>,
+    onSelectTemplate: (PackageTemplate) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        ),
+        border = BorderStroke(1.dp, CyberGreenPrimary.copy(alpha = 0.35f))
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(CyberGreenPrimary.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = CyberGreenBright,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "⚡ قوالب مقترحة للإضافة السريعة إلى السيرفر",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "انقر على أي قالب لتعبئة بياناته وإنشاء باقة جديدة حقيقية في راوتر الميكروتك مباشرة",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(templates, key = { it.id }) { tpl ->
+                    TemplateItemCard(
+                        template = tpl,
+                        onClick = { onSelectTemplate(tpl) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TemplateItemCard(
+    template: PackageTemplate,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .width(210.dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (template.badge.isNotBlank()) {
+                    Surface(
+                        color = CyberGreenPrimary.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = template.badge,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CyberGreenBright,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            fontSize = 10.sp
+                        )
+                    }
+                }
+                Text(
+                    text = template.defaultPrice,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = CyberGreenBright,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Text(
+                text = template.title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+
+            Text(
+                text = template.subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                fontSize = 10.sp
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "🚀 ${template.defaultRateLimit}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NetworkCyan,
+                    fontSize = 10.sp
+                )
+                Text(
+                    text = "⏳ ${template.defaultSessionTimeout}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    fontSize = 10.sp
+                )
+            }
+
+            if (template.defaultDataQuota.isNotBlank()) {
+                Text(
+                    text = "📦 الحصة: ${template.defaultDataQuota}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 10.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(2.dp))
+
+            Button(
+                onClick = onClick,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp)
+            ) {
+                Text("تطبيق القالب", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
 fun EditProfileDialog(
     profile: HotspotProfile,
     onDismiss: () -> Unit,
@@ -483,19 +761,57 @@ fun EditProfileDialog(
     var sharedUsers by remember { mutableIntStateOf(profile.sharedUsers) }
     var sessionTimeout by remember { mutableStateOf(profile.sessionTimeout) }
     var price by remember { mutableStateOf(profile.price) }
+    var costPriceStr by remember {
+        mutableStateOf(if (profile.costPrice > 0) profile.costPrice.toInt().toString() else "")
+    }
+    var dataLimit by remember { mutableStateOf(profile.dataLimit) }
+
+    val quickPrices = listOf("100 ر.ي", "200 ر.ي", "300 ر.ي", "500 ر.ي", "1000 ر.ي", "2000 ر.ي", "5000 ر.ي")
+    val quickTimes = listOf("30m", "1h", "2h", "3h", "6h", "12h", "1d", "3d", "7d", "30d")
+    val quickSpeeds = listOf("512k/1M", "1M/2M", "2M/3M", "2M/4M", "4M/8M", "5M/10M", "10M/20M")
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("تعديل باقة: ${profile.name}", fontWeight = FontWeight.Bold) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 OutlinedTextField(
                     value = price,
                     onValueChange = { price = it },
-                    label = { Text("سعر الباقة (مثال: 500 ر.ي)") },
+                    label = { Text("سعر البيع للكرت (مثال: 500 ر.ي)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("edit_profile_price_input")
                 )
+
+                OutlinedTextField(
+                    value = costPriceStr,
+                    onValueChange = { costPriceStr = it },
+                    label = { Text("سعر التكلفة للكرت الواحد (مثال: 200 ر.ي)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("edit_profile_cost_input")
+                )
+
+                // Quick Price Chips
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(quickPrices) { qp ->
+                        Surface(
+                            onClick = { price = qp },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (price == qp) CyberGreenPrimary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (price == qp) BorderStroke(1.dp, CyberGreenPrimary) else null
+                        ) {
+                            Text(
+                                text = qp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (price == qp) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
 
                 OutlinedTextField(
                     value = rateLimit,
@@ -504,6 +820,25 @@ fun EditProfileDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                // Quick Speed Chips
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(quickSpeeds) { qs ->
+                        Surface(
+                            onClick = { rateLimit = qs },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (rateLimit == qs) NetworkCyan.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (rateLimit == qs) BorderStroke(1.dp, NetworkCyan) else null
+                        ) {
+                            Text(
+                                text = qs,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (rateLimit == qs) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -533,17 +868,49 @@ fun EditProfileDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                // Quick Timeout Chips
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(quickTimes) { qt ->
+                        Surface(
+                            onClick = { sessionTimeout = qt },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (sessionTimeout == qt) MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (sessionTimeout == qt) BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary) else null
+                        ) {
+                            Text(
+                                text = qt,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (sessionTimeout == qt) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = dataLimit,
+                    onValueChange = { dataLimit = it },
+                    label = { Text("حصة البيانات (اختياري، مثال: 2048MB)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         },
         confirmButton = {
             Button(
                 onClick = {
+                    val saleNum = price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
+                    val costNum = costPriceStr.filter { it.isDigit() }.toDoubleOrNull() ?: (saleNum * 0.40)
                     onConfirm(
                         profile.copy(
                             rateLimit = rateLimit.trim(),
                             sharedUsers = sharedUsers,
                             sessionTimeout = sessionTimeout.trim(),
-                            price = price.trim()
+                            price = price.trim(),
+                            priceNumber = saleNum,
+                            costPrice = costNum,
+                            dataLimit = dataLimit.trim()
                         )
                     )
                 },
@@ -562,20 +929,71 @@ fun EditProfileDialog(
 
 @Composable
 fun AddProfileDialog(
+    initialTemplate: PackageTemplate? = null,
     onDismiss: () -> Unit,
     onConfirm: (HotspotProfile) -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
-    var rateLimit by remember { mutableStateOf("3M/3M") }
-    var sharedUsers by remember { mutableIntStateOf(1) }
-    var sessionTimeout by remember { mutableStateOf("1d") }
-    var price by remember { mutableStateOf("500 ر.ي") }
+    var name by remember(initialTemplate) { mutableStateOf(initialTemplate?.title?.split("(")?.first()?.trim() ?: "") }
+    var rateLimit by remember(initialTemplate) { mutableStateOf(initialTemplate?.defaultRateLimit ?: "3M/3M") }
+    var sharedUsers by remember(initialTemplate) { mutableIntStateOf(initialTemplate?.sharedUsers ?: 1) }
+    var sessionTimeout by remember(initialTemplate) { mutableStateOf(initialTemplate?.defaultSessionTimeout ?: "1d") }
+    var price by remember(initialTemplate) { mutableStateOf(initialTemplate?.defaultPrice ?: "500 ر.ي") }
+    var dataLimit by remember(initialTemplate) { mutableStateOf(initialTemplate?.defaultDataQuota ?: "") }
+
+    val quickPrices = listOf("100 ر.ي", "200 ر.ي", "300 ر.ي", "500 ر.ي", "1000 ر.ي", "2000 ر.ي", "5000 ر.ي")
+    val quickTimes = listOf("30m", "1h", "2h", "3h", "6h", "12h", "1d", "3d", "7d", "30d")
+    val quickSpeeds = listOf("512k/1M", "1M/2M", "2M/3M", "2M/4M", "4M/8M", "5M/10M", "10M/20M")
+    val quickQuotas = listOf("500MB", "1024MB", "3072MB", "5120MB", "10240MB", "مفتوح")
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("إضافة باقة هوتسبوت جديدة", fontWeight = FontWeight.Bold) },
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Default.Tune, contentDescription = null, tint = CyberGreenPrimary)
+                Text(
+                    text = if (initialTemplate != null) "إضافة باقة من قالب: ${initialTemplate.badge}" else "إضافة باقة هوتسبوت جديدة",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Quick Templates Row
+                Text(
+                    text = "اختيار سريع من القوالب:",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(PREDEFINED_PACKAGE_TEMPLATES) { tpl ->
+                        Surface(
+                            onClick = {
+                                name = tpl.title.split("(").first().trim()
+                                rateLimit = tpl.defaultRateLimit
+                                sessionTimeout = tpl.defaultSessionTimeout
+                                price = tpl.defaultPrice
+                                sharedUsers = tpl.sharedUsers
+                                dataLimit = tpl.defaultDataQuota
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (name == tpl.title.split("(").first().trim()) BorderStroke(1.dp, CyberGreenPrimary) else null
+                        ) {
+                            Text(
+                                text = "${tpl.badge} (${tpl.defaultPrice})",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                }
+
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -592,6 +1010,25 @@ fun AddProfileDialog(
                     modifier = Modifier.fillMaxWidth().testTag("profile_price_input")
                 )
 
+                // Quick Prices
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(quickPrices) { qp ->
+                        Surface(
+                            onClick = { price = qp },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (price == qp) CyberGreenPrimary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (price == qp) BorderStroke(1.dp, CyberGreenPrimary) else null
+                        ) {
+                            Text(
+                                text = qp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (price == qp) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+
                 OutlinedTextField(
                     value = rateLimit,
                     onValueChange = { rateLimit = it },
@@ -599,6 +1036,25 @@ fun AddProfileDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("profile_rate_input")
                 )
+
+                // Quick Speeds
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(quickSpeeds) { qs ->
+                        Surface(
+                            onClick = { rateLimit = qs },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (rateLimit == qs) NetworkCyan.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (rateLimit == qs) BorderStroke(1.dp, NetworkCyan) else null
+                        ) {
+                            Text(
+                                text = qs,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (rateLimit == qs) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -628,6 +1084,50 @@ fun AddProfileDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                // Quick Timeouts
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(quickTimes) { qt ->
+                        Surface(
+                            onClick = { sessionTimeout = qt },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (sessionTimeout == qt) MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (sessionTimeout == qt) BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary) else null
+                        ) {
+                            Text(
+                                text = qt,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (sessionTimeout == qt) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = dataLimit,
+                    onValueChange = { dataLimit = it },
+                    label = { Text("حصة البيانات (اختياري، مثال: 2048MB)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Quick Quotas
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(quickQuotas) { qq ->
+                        Surface(
+                            onClick = { dataLimit = if (qq == "مفتوح") "" else qq },
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            Text(
+                                text = qq,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
@@ -641,7 +1141,9 @@ fun AddProfileDialog(
                                 rateLimit = rateLimit.trim(),
                                 sharedUsers = sharedUsers,
                                 sessionTimeout = sessionTimeout.trim(),
-                                price = price.trim()
+                                price = price.trim(),
+                                dataLimit = dataLimit.trim(),
+                                comment = if (initialTemplate != null) "Template: ${initialTemplate.badge}" else ""
                             )
                         )
                     }
@@ -649,7 +1151,7 @@ fun AddProfileDialog(
                 enabled = name.isNotBlank(),
                 modifier = Modifier.testTag("submit_profile_btn")
             ) {
-                Text("حفظ الباقة")
+                Text("حفظ وتطبيق في السيرفر")
             }
         },
         dismissButton = {
@@ -659,3 +1161,4 @@ fun AddProfileDialog(
         }
     )
 }
+

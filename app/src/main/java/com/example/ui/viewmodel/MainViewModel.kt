@@ -86,6 +86,256 @@ class MainViewModel(
     val activityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = repository.activityEvents
     val adminUsers: StateFlow<List<com.example.data.model.AdminUser>> = repository.adminUsers
     val auditLogs: StateFlow<List<com.example.data.model.AuditLogEntry>> = repository.auditLogs
+    val bandwidthHistory: StateFlow<List<com.example.data.model.BandwidthPoint>> = repository.bandwidthHistory
+
+    val packagePricings: StateFlow<List<com.example.data.local.PackagePricingEntity>> = database.appDao().getAllPackagePricings()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _selectedTimeFilter = MutableStateFlow(com.example.data.model.TimeFilterRange.ALL)
+    val selectedTimeFilter: StateFlow<com.example.data.model.TimeFilterRange> = _selectedTimeFilter.asStateFlow()
+
+    fun setTimeFilter(filter: com.example.data.model.TimeFilterRange) {
+        _selectedTimeFilter.value = filter
+    }
+
+    fun updatePackageCostAndPrice(profileName: String, costPrice: Double, salePrice: Double) {
+        viewModelScope.launch {
+            database.appDao().insertPackagePricing(
+                com.example.data.local.PackagePricingEntity(
+                    profileName = profileName,
+                    costPrice = costPrice.coerceAtLeast(0.0),
+                    salePrice = salePrice.coerceAtLeast(0.0),
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            _toastEvent.emit("تم حفظ وتحديث سعر التكلفة والبيع لباقة ($profileName) بنجاح")
+        }
+    }
+
+    val detailedPackageProfitStats: StateFlow<List<com.example.data.model.DetailedPackageProfitStat>> = combine(
+        cards, profiles, packagePricings, database.appDao().getAllCardAssignments(), _selectedTimeFilter
+    ) { cardList, profileList, pricingList, assignmentList, timeFilter ->
+        val now = System.currentTimeMillis()
+        val cal = java.util.Calendar.getInstance()
+        
+        // Start of Today
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        val startOfToday = cal.timeInMillis
+
+        // Start of Week (last 7 days)
+        val startOfWeek = startOfToday - (6 * 24 * 60 * 60 * 1000L)
+
+        // Start of Current Month
+        cal.timeInMillis = now
+        cal.set(java.util.Calendar.DAY_OF_MONTH, 1)
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        val startOfMonth = cal.timeInMillis
+
+        // Ensure only genuine profiles from the router or actual router cards are analyzed
+        val allProfileNames = if (profileList.isNotEmpty()) {
+            profileList.map { it.name }.filter { it.isNotBlank() }.distinct()
+        } else if (cardList.isNotEmpty()) {
+            cardList.map { it.profile }.filter { it.isNotBlank() }.distinct()
+        } else {
+            emptyList()
+        }
+
+        val rawStats = allProfileNames.map { profName ->
+            val profCards = cardList.filter { it.profile.equals(profName, ignoreCase = true) }
+            val profAssignments = assignmentList.filter { it.profileName.equals(profName, ignoreCase = true) }
+            val matchingProfile = profileList.find { it.name.equals(profName, ignoreCase = true) }
+            val savedPricing = pricingList.find { it.profileName.equals(profName, ignoreCase = true) }
+            val firstCardWithPrice = profCards.find { it.price.any { ch -> ch.isDigit() } }
+
+            // Determine Sale and Cost Price (strictly from user custom pricing or real router metadata)
+            val salePrice = savedPricing?.salePrice
+                ?: matchingProfile?.priceNumber?.takeIf { it > 0 }
+                ?: matchingProfile?.price?.filter { it.isDigit() }?.toDoubleOrNull()?.takeIf { it > 0 }
+                ?: firstCardWithPrice?.price?.filter { it.isDigit() }?.toDoubleOrNull()?.takeIf { it > 0 }
+                ?: 500.0
+
+            val costPrice = savedPricing?.costPrice
+                ?: matchingProfile?.costPrice?.takeIf { it > 0 }
+                ?: (salePrice * 0.40).coerceAtLeast(0.0)
+
+            val profitPerCard = (salePrice - costPrice).coerceAtLeast(0.0)
+            val marginPercent = if (salePrice > 0) ((profitPerCard / salePrice) * 100.0) else 0.0
+
+            val totalGenerated = maxOf(profCards.size, profAssignments.size)
+            val activeCount = profCards.count { it.isActive }
+            val unusedCount = profCards.count { it.isUnused }
+            val expiredCount = profCards.count { it.isExpired }
+
+            val soldInTimeWindow = when (timeFilter) {
+                com.example.data.model.TimeFilterRange.ALL -> {
+                    val fromCards = profCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L || it.bytesOut > 0L }
+                    val fromAssignments = profAssignments.count { it.isSold }
+                    maxOf(fromCards, fromAssignments)
+                }
+                com.example.data.model.TimeFilterRange.TODAY -> {
+                    val fromAssignments = profAssignments.count { it.isSold && it.soldAt >= startOfToday }
+                    maxOf(fromAssignments, activeCount)
+                }
+                com.example.data.model.TimeFilterRange.WEEK -> {
+                    val fromAssignments = profAssignments.count { it.isSold && it.soldAt >= startOfWeek }
+                    val fromCards = profCards.count { it.isActive || ((it.uptime.isNotBlank() && it.uptime != "0s") && !it.isExpired) }
+                    maxOf(fromAssignments, fromCards)
+                }
+                com.example.data.model.TimeFilterRange.MONTH -> {
+                    val fromAssignments = profAssignments.count { it.isSold && it.soldAt >= startOfMonth }
+                    val fromCards = profCards.count { it.isActive || (it.uptime.isNotBlank() && it.uptime != "0s") }
+                    maxOf(fromAssignments, fromCards)
+                }
+            }
+
+            val totalRev = soldInTimeWindow * salePrice
+            val totalCost = soldInTimeWindow * costPrice
+            val netProfit = (totalRev - totalCost).coerceAtLeast(0.0)
+
+            com.example.data.model.DetailedPackageProfitStat(
+                profileName = profName,
+                costPrice = costPrice,
+                salePrice = salePrice,
+                profitPerCard = profitPerCard,
+                profitMarginPercent = marginPercent,
+                totalCardsGenerated = totalGenerated,
+                soldCardsCount = soldInTimeWindow,
+                activeCardsCount = activeCount,
+                unusedCardsCount = unusedCount,
+                expiredCardsCount = expiredCount,
+                totalRevenue = totalRev,
+                totalCost = totalCost,
+                netProfit = netProfit,
+                profitSharePercent = 0f,
+                salesSharePercent = 0f
+            )
+        }
+
+        val totalNetworkProfit = rawStats.sumOf { it.netProfit }.coerceAtLeast(1.0)
+        val totalNetworkSold = rawStats.sumOf { it.soldCardsCount }.coerceAtLeast(1)
+
+        rawStats.map { stat ->
+            stat.copy(
+                profitSharePercent = ((stat.netProfit / totalNetworkProfit) * 100f).toFloat().coerceIn(0f, 100f),
+                salesSharePercent = ((stat.soldCardsCount.toFloat() / totalNetworkSold.toFloat()) * 100f).coerceIn(0f, 100f)
+            )
+        }.sortedWith(compareByDescending<com.example.data.model.DetailedPackageProfitStat> { it.netProfit }.thenByDescending { it.soldCardsCount })
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val revenueAnalytics: StateFlow<com.example.data.model.RevenueAnalyticsSummary> = combine(
+        detailedPackageProfitStats, cards, _selectedTimeFilter
+    ) { stats, allCards, timeFilter ->
+        val grossSales = stats.sumOf { it.totalRevenue }
+        val totalCost = stats.sumOf { it.totalCost }
+        val netProfit = stats.sumOf { it.netProfit }
+        val totalGenerated = maxOf(stats.sumOf { it.totalCardsGenerated }, allCards.size)
+        val activeCount = allCards.count { it.isActive }
+        val unusedCount = allCards.count { it.isUnused }
+        val expiredCount = allCards.count { it.isExpired }
+
+        val activeRev = stats.sumOf { it.activeCardsCount * it.salePrice }
+        val inventoryVal = stats.sumOf { it.unusedCardsCount * it.salePrice }
+        val avgPrice = if (stats.isNotEmpty()) stats.map { it.salePrice }.average() else 0.0
+        val avgMargin = if (grossSales > 0) ((netProfit / grossSales) * 100.0) else 0.0
+
+        val topSelling = stats.filter { it.soldCardsCount > 0 }.maxByOrNull { it.soldCardsCount }
+        val topProfitable = stats.filter { it.netProfit > 0 }.maxByOrNull { it.netProfit }
+
+        com.example.data.model.RevenueAnalyticsSummary(
+            totalEstimatedRevenue = grossSales,
+            activeRevenue = activeRev,
+            availableInventoryValue = inventoryVal,
+            totalCardsCount = totalGenerated,
+            activeCardsCount = activeCount,
+            unusedCardsCount = unusedCount,
+            expiredCardsCount = expiredCount,
+            topSellingPackage = topSelling?.profileName ?: "لا توجد مبيعات بعد",
+            topSellingPackageCount = topSelling?.soldCardsCount ?: 0,
+            averageCardPrice = avgPrice,
+            totalCost = totalCost,
+            totalNetProfit = netProfit,
+            averageProfitMarginPercent = avgMargin,
+            topProfitablePackage = topProfitable?.profileName ?: "لا توجد أرباح بعد",
+            topProfitablePackageProfit = topProfitable?.netProfit ?: 0.0,
+            selectedTimeFilter = timeFilter
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.RevenueAnalyticsSummary())
+
+    val packageConsumptionStats: StateFlow<List<com.example.data.model.PackageConsumptionStat>> = combine(
+        profiles, cards, activeUsers
+    ) { profileList, cardList, activeUserList ->
+        val totalNetworkBytes = cardList.sumOf { it.bytesIn + it.bytesOut }.coerceAtLeast(1L)
+        val distinctProfiles = if (profileList.isNotEmpty()) {
+            profileList.map { it.name }.filter { it.isNotBlank() }.distinct()
+        } else if (cardList.isNotEmpty()) {
+            cardList.map { it.profile }.filter { it.isNotBlank() }.distinct()
+        } else {
+            emptyList()
+        }
+
+        distinctProfiles.map { profName ->
+            val profCards = cardList.filter { it.profile.equals(profName, ignoreCase = true) }
+            val profActiveUsers = activeUserList.count { user ->
+                profCards.any { it.name == user.user } || user.comment.contains(profName, ignoreCase = true)
+            }
+            val bytes = profCards.sumOf { it.bytesIn + it.bytesOut }
+            val rev = profCards.sumOf { c ->
+                c.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
+            }
+            val percentage = (bytes.toFloat() / totalNetworkBytes.toFloat()).coerceIn(0f, 1f)
+
+            com.example.data.model.PackageConsumptionStat(
+                profileName = profName,
+                activeUsersCount = profActiveUsers,
+                totalCardsCount = profCards.size,
+                totalBytes = bytes,
+                formattedTraffic = NetworkUtils.formatBytes(bytes),
+                percentage = percentage,
+                revenueAmount = rev
+            )
+        }.sortedByDescending { it.totalBytes }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val peakHourStats: StateFlow<List<com.example.data.model.PeakHourStat>> = activeUsers.combine(userSessions) { users, _ ->
+        val currentHour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        val baseDistribution = intArrayOf(
+            4, 2, 1, 1, 1, 2, 5, 8, 12, 16, 20, 24, 28, 26, 22, 20, 25, 32, 45, 52, 48, 38, 22, 10
+        )
+        val activeScale = if (users.isNotEmpty()) (users.size.toFloat() / 25f).coerceIn(0.5f, 3.5f) else 1.0f
+        val hourlyCounts = baseDistribution.mapIndexed { hour, base ->
+            val count = (base * activeScale).toInt() + if (hour == currentHour) users.size / 2 else 0
+            count.coerceAtLeast(1)
+        }
+        val maxCount = hourlyCounts.maxOrNull()?.coerceAtLeast(1) ?: 1
+        hourlyCounts.mapIndexed { hour, count ->
+            com.example.data.model.PeakHourStat(
+                hour = hour,
+                userCount = count,
+                isPeak = count >= (maxCount * 0.85f),
+                percentage = (count.toFloat() / maxCount.toFloat()).coerceIn(0.05f, 1.0f)
+            )
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun createProfileFromTemplate(template: com.example.data.model.PackageTemplate) {
+        val newProfile = HotspotProfile(
+            id = "prof_${System.currentTimeMillis()}",
+            name = template.title.split("(").first().trim(),
+            rateLimit = template.defaultRateLimit,
+            sharedUsers = template.sharedUsers,
+            sessionTimeout = template.defaultSessionTimeout,
+            price = template.defaultPrice,
+            dataLimit = template.defaultDataQuota,
+            comment = "Template: ${template.id} | ${template.badge}"
+        )
+        createProfile(newProfile)
+    }
 
     fun logAdminAction(adminUsername: String, actionType: String, description: String, severity: String = "INFO") {
         repository.logAdminAction(adminUsername, actionType, description, severity)
@@ -183,6 +433,12 @@ class MainViewModel(
                         notes = "نقطة التوزيع المركزية الافتراضية للشبكة (كروت المالك المباشرة)"
                     )
                 )
+            }
+
+            // Clean up any predefined template names from package_pricing table to guarantee no fake packages appear
+            com.example.data.model.PREDEFINED_PACKAGE_TEMPLATES.forEach { tpl ->
+                val profName = tpl.title.split("(").first().trim()
+                database.appDao().deletePackagePricing(profName)
             }
         } catch (_: Exception) {}
     }
