@@ -573,6 +573,7 @@ class RouterOsApiClient {
     suspend fun addCard(card: HotspotCard): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
+                ensureConnected()
                 val words = mutableListOf("/ip/hotspot/user/add", "=name=${card.name}", "=password=${card.password}")
                 if (card.profile.isNotBlank()) words.add("=profile=${card.profile}")
                 if (card.limitUptime.isNotBlank()) words.add("=limit-uptime=${card.limitUptime}")
@@ -601,6 +602,7 @@ class RouterOsApiClient {
     suspend fun addProfile(profile: HotspotProfile): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
+                ensureConnected()
                 val words = mutableListOf("/ip/hotspot/user/profile/add", "=name=${profile.name}")
                 if (profile.rateLimit.isNotBlank() && profile.rateLimit != "غير محدد") {
                     words.add("=rate-limit=${profile.rateLimit}")

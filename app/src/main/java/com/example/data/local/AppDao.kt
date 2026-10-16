@@ -124,4 +124,16 @@ interface AppDao {
 
     @Query("DELETE FROM session_archive")
     suspend fun clearSessionArchive()
+
+    // ==========================================
+    // Router Error Logs
+    // ==========================================
+    @Query("SELECT * FROM router_error_logs ORDER BY timestamp DESC LIMIT 50")
+    fun getAllErrorLogs(): Flow<List<RouterErrorLogEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertErrorLog(log: RouterErrorLogEntity)
+
+    @Query("DELETE FROM router_error_logs")
+    suspend fun clearErrorLogs()
 }
