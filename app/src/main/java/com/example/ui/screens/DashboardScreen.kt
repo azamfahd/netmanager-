@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,11 +35,13 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -87,6 +90,7 @@ fun DashboardScreen(
     onNavigateToProfiles: () -> Unit,
     onOpenBatchGenerator: () -> Unit,
     onOpenPrintScreen: () -> Unit,
+    onNavigateToFinance: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
@@ -165,18 +169,128 @@ fun DashboardScreen(
             )
         }
 
-        // 5. Advanced Analytics & Statistics Hub (التحليلات والإحصائيات المتقدمة)
+        // 5. Clean Financial Overview & Direct Navigation to Finance Tab
         item {
-            com.example.ui.components.AdvancedAnalyticsHub(
-                bandwidthHistory = bandwidthHistory,
-                revenueSummary = revenueSummary,
-                peakHourStats = peakHourStats,
-                packageStats = packageStats,
-                detailedPackageStats = detailedPackageStats,
-                selectedTimeFilter = selectedTimeFilter,
-                onTimeFilterSelected = { viewModel.setTimeFilter(it) },
-                onEditPackagePricing = { prof, cost, sale -> viewModel.updatePackageCostAndPrice(prof, cost, sale) }
-            )
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onNavigateToFinance() },
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF00C853).copy(alpha = 0.12f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MonetizationOn,
+                                    contentDescription = null,
+                                    tint = Color(0xFF00C853),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "ملخص الأرباح والمبيعات",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "تم نقل وتخصيص كافة الإحصائيات والأرباح في قسم مستقل",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Icon(
+                            imageVector = Icons.Default.ArrowForward,
+                            contentDescription = "الانتقال لقسم الأرباح",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            color = Color(0xFF00C853).copy(alpha = 0.1f),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text("إجمالي المبيعات", style = MaterialTheme.typography.labelSmall, color = Color(0xFF00C853))
+                                Text(
+                                    "${"%,d".format(revenueSummary.totalEstimatedRevenue.toLong())} ر.ي",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF00C853)
+                                )
+                            }
+                        }
+
+                        Surface(
+                            color = Color(0xFF00B0FF).copy(alpha = 0.1f),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text("صافي الأرباح", style = MaterialTheme.typography.labelSmall, color = Color(0xFF00B0FF))
+                                Text(
+                                    "${"%,d".format(revenueSummary.totalNetProfit.toLong())} ر.ي",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF00B0FF)
+                                )
+                            }
+                        }
+
+                        Surface(
+                            color = Color(0xFFFFB300).copy(alpha = 0.1f),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text("الكروت غير المباعة", style = MaterialTheme.typography.labelSmall, color = Color(0xFFFF8F00))
+                                Text(
+                                    "${revenueSummary.unusedCardsCount} كرت",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFFF8F00)
+                                )
+                            }
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = onNavigateToFinance,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.TrendingUp, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("فتح قسم الأرباح والمبيعات والإحصائيات الشهرية الكاملة", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                }
+            }
         }
 
         // 6. Cyber Quick Actions (العمليات والإجراءات السريعة)

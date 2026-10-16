@@ -48,6 +48,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -131,6 +132,8 @@ fun ActiveUsersScreen(
 
     val onlineCount = allSessions.count { it.isOnline }
     val offlineCount = allSessions.count { !it.isOnline }
+    val quotaExpiredCount = allSessions.count { it.isQuotaExhausted || it.terminateReason.contains("رصيد") || it.terminateReason.contains("البيانات") }
+    val timeExpiredCount = allSessions.count { it.terminateReason.contains("الوقت") || it.logoutTime.contains("منتهي") }
 
     Column(
         modifier = modifier
@@ -150,7 +153,7 @@ fun ActiveUsersScreen(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { viewModel.updateSessionSearch(it) },
-                label = { Text("بحث برقم الكرت أو IP أو نوع الجهاز") },
+                label = { Text("بحث برقم الكرت أو IP أو MAC أو الجهاز") },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 trailingIcon = {
                     if (searchQuery.isNotBlank()) {
@@ -193,7 +196,7 @@ fun ActiveUsersScreen(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // 2. Filter Tabs: All, Online, Offline/History, Activity Log (Uniform compact size & scrollable)
+        // 2. Filter Tabs: All, Online, Quota Expired, Time Expired, Offline, Activity Log
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -228,9 +231,39 @@ fun ActiveUsersScreen(
             )
 
             FilterChip(
+                selected = currentFilter == "EXPIRED_QUOTA",
+                onClick = { viewModel.updateSessionFilter("EXPIRED_QUOTA") },
+                label = { Text("انتهى الرصيد ($quotaExpiredCount)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                leadingIcon = {
+                    Icon(Icons.Default.Timer, contentDescription = null, modifier = Modifier.size(15.dp), tint = StatusErrorRed)
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = StatusErrorRed.copy(alpha = 0.15f),
+                    selectedLabelColor = StatusErrorRed
+                ),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.height(36.dp)
+            )
+
+            FilterChip(
+                selected = currentFilter == "EXPIRED_TIME",
+                onClick = { viewModel.updateSessionFilter("EXPIRED_TIME") },
+                label = { Text("انتهت الصلاحية ($timeExpiredCount)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                leadingIcon = {
+                    Icon(Icons.Default.Schedule, contentDescription = null, modifier = Modifier.size(15.dp), tint = StatusWarningAmber)
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = StatusWarningAmber.copy(alpha = 0.15f),
+                    selectedLabelColor = StatusWarningAmber
+                ),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.height(36.dp)
+            )
+
+            FilterChip(
                 selected = currentFilter == "OFFLINE",
                 onClick = { viewModel.updateSessionFilter("OFFLINE") },
-                label = { Text("جلسات سابقة ($offlineCount)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                label = { Text("سجل الجلسات ($offlineCount)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                 leadingIcon = {
                     Icon(Icons.Default.PersonOff, contentDescription = null, modifier = Modifier.size(15.dp))
                 },
@@ -434,6 +467,16 @@ fun UserSessionCardItem(
                     }
 
                     Column {
+                        val isQuotaDepleted = session.isQuotaExhausted || session.terminateReason.contains("رصيد") || session.terminateReason.contains("البيانات")
+                        val isTimeExpired = session.terminateReason.contains("الوقت") || session.logoutTime.contains("منتهي")
+
+                        val (statusText, statusType) = when {
+                            session.isOnline -> "متصل الآن" to StatusType.SUCCESS
+                            isQuotaDepleted -> "انتهى الرصيد (استنفد البيانات)" to StatusType.ERROR
+                            isTimeExpired -> "انتهت الصلاحية (الوقت)" to StatusType.WARNING
+                            else -> "جلسة سابقة" to StatusType.INFO
+                        }
+
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -445,14 +488,14 @@ fun UserSessionCardItem(
                                 fontFamily = FontFamily.Monospace
                             )
                             StatusPill(
-                                text = if (session.isOnline) "متصل الآن" else "غير متصل",
-                                type = if (session.isOnline) StatusType.SUCCESS else StatusType.INFO
+                                text = statusText,
+                                type = statusType
                             )
                         }
 
                         // Device Type & Brand name
                         Text(
-                            text = "${session.deviceInfo.modelName} • ${session.deviceInfo.osName}",
+                            text = "${session.deviceInfo.brand} ${session.deviceInfo.modelName} • ${session.deviceInfo.osName}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontWeight = FontWeight.Medium
@@ -470,7 +513,7 @@ fun UserSessionCardItem(
                                 tint = RouterBlue
                             )
                             Text(
-                                text = "متصل عبر: ${session.nodeName.ifBlank { "الراوتر الرئيسي" }}",
+                                text = "عبر: ${session.nodeName.ifBlank { "الراوتر الرئيسي" }}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = RouterBlue,
                                 fontWeight = FontWeight.SemiBold,
@@ -519,7 +562,100 @@ fun UserSessionCardItem(
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // IP, MAC and Package Badge Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = "IP: ${session.ipAddress}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                    if (session.macAddress.isNotBlank() && session.macAddress != "منتهي الجلسة") {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = "MAC: ${session.macAddress}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = "${session.profile} (${session.price})",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            // Quota progress indicator if limit exists
+            val packageLimit = session.packageLimitBytes
+            if (packageLimit > 0L) {
+                Spacer(modifier = Modifier.height(6.dp))
+                val isQuotaDepleted = session.isQuotaExhausted || session.totalBytes >= packageLimit
+                val quotaFraction = (session.totalBytes.toFloat() / packageLimit.toFloat()).coerceIn(0f, 1f)
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = if (isQuotaDepleted) "⚠️ استنفد الحصة بالكامل (الرصيد منتهي)" else "حصة الباقة المستهلكة:",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 10.sp,
+                            fontWeight = if (isQuotaDepleted) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isQuotaDepleted) StatusErrorRed else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "${NetworkUtils.formatBytes(session.totalBytes)} / ${NetworkUtils.formatBytes(packageLimit)} (${(quotaFraction * 100).toInt()}%)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isQuotaDepleted) StatusErrorRed else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { quotaFraction },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = if (isQuotaDepleted) StatusErrorRed else MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Timings & Consumed Data Row
             Row(
@@ -569,11 +705,15 @@ fun UserSessionCardItem(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val isQuotaDepleted = session.isQuotaExhausted || session.terminateReason.contains("رصيد") || session.terminateReason.contains("البيانات")
+                    val isTimeExpired = session.terminateReason.contains("الوقت") || session.logoutTime.contains("منتهي")
+                    val reasonColor = if (isQuotaDepleted) StatusErrorRed else if (isTimeExpired) StatusWarningAmber else MaterialTheme.colorScheme.onSurfaceVariant
+                    Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(12.dp), tint = reasonColor)
                     Text(
                         text = session.terminateReason,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = reasonColor,
+                        fontWeight = if (isQuotaDepleted || isTimeExpired) FontWeight.Bold else FontWeight.Normal
                     )
                 }
             }

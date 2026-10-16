@@ -1808,6 +1808,9 @@ class MikrotikRepository {
             val loginTimeStr = java.text.SimpleDateFormat("hh:mm a", java.util.Locale("ar")).format(java.util.Date(loginTs))
             val loginDisplay = "بدأ الساعة $loginTimeStr (متصل منذ ${active.uptime})"
 
+            val packageLimit = matchingCard?.limitBytesTotal ?: 0L
+            val isQuotaOver = packageLimit > 0L && (active.bytesIn + active.bytesOut) >= packageLimit
+
             sessionList.add(
                 com.example.data.model.UserSessionRecord(
                     id = "sess_active_${active.id}_$index",
@@ -1821,12 +1824,14 @@ class MikrotikRepository {
                     bytesIn = active.bytesIn,
                     bytesOut = active.bytesOut,
                     totalBytes = active.bytesIn + active.bytesOut,
-                    terminateReason = "جلسة نشطة عبر ${active.nodeName}",
+                    terminateReason = if (isQuotaOver) "انتهى الرصيد (استنفد حصة البيانات)" else "جلسة نشطة متصلة عبر ${active.nodeName}",
                     profile = cardProfile,
                     price = resolvedPrice,
                     deviceInfo = detected,
                     comment = if (hostName.isNotBlank()) "اسم الجهاز: $hostName" else "مستخدم متصل",
-                    nodeName = active.nodeName
+                    nodeName = active.nodeName,
+                    packageLimitBytes = packageLimit,
+                    isQuotaExhausted = isQuotaOver
                 )
             )
         }
@@ -1835,27 +1840,41 @@ class MikrotikRepository {
         cardList.forEachIndexed { index, card ->
             if (!activeUsernames.contains(card.name)) {
                 val isUsed = card.uptime != "0s" || card.bytesIn > 0 || card.bytesOut > 0
-                val isExpired = card.isExpired
+                val packageLimit = card.limitBytesTotal
+                val isDataExhausted = packageLimit > 0L && (card.bytesIn + card.bytesOut) >= packageLimit
+                val isTimeExpired = (card.limitUptime.isNotBlank() && card.uptime.isNotBlank() && card.uptime == card.limitUptime) || 
+                        card.comment.contains("expired", ignoreCase = true) || card.comment.contains("منتهي", ignoreCase = true)
+                val isExpired = isDataExhausted || isTimeExpired || card.disabled || card.isExpired
+
+                val reason = when {
+                    isDataExhausted -> "انتهى الرصيد (استنفد حجم البيانات المقررة)"
+                    isTimeExpired -> "انتهت الصلاحية (انقضاء الوقت المحدد: ${card.limitUptime})"
+                    card.disabled -> "تم إيقاف الكرت من قبل الإدارة"
+                    isUsed -> "جلسة سابقة مكتملة (تسجيل خروج)"
+                    else -> "كرت متاح في المخزون (غير مباع بعد)"
+                }
 
                 sessionList.add(
                     com.example.data.model.UserSessionRecord(
                         id = "sess_card_${card.id}_$index",
                         username = card.name,
-                        ipAddress = "غير متصل",
-                        macAddress = "غير مربوط بـ MAC",
+                        ipAddress = "غير متصل حالياً",
+                        macAddress = "منتهي الجلسة",
                         isOnline = false,
                         loginTime = if (isUsed) "جلسة سابقة (استهلاك ${NetworkUtils.formatBytes(card.bytesIn + card.bytesOut)})" else "غير مستخدم بعد",
-                        logoutTime = if (isExpired) "منتهي الصلاحية" else if (isUsed) "جلسة مغلقة" else "جاهز للاستخدام",
+                        logoutTime = if (isExpired) "منتهي الرصيد / الصلاحية" else if (isUsed) "جلسة مغلقة" else "جاهز للاستخدام",
                         duration = card.uptime.ifBlank { "0s" },
                         bytesIn = card.bytesIn,
                         bytesOut = card.bytesOut,
                         totalBytes = card.bytesIn + card.bytesOut,
-                        terminateReason = if (isExpired) "انتهاء رصيد الكرت" else if (isUsed) "تسجيل خروج / توقف الجلسة" else "كرت جاهز للبيع",
+                        terminateReason = reason,
                         profile = card.profile,
                         price = card.price.ifBlank { "غير محدد" },
                         deviceInfo = com.example.data.util.DeviceDetector.detectDevice("", card.comment, card.name),
                         comment = card.comment.ifBlank { if (isUsed) "كرت مستخدم سابق" else "كرت جاهز للبيع" },
-                        nodeName = serverName
+                        nodeName = serverName,
+                        packageLimitBytes = packageLimit,
+                        isQuotaExhausted = isDataExhausted
                     )
                 )
             }
@@ -2146,6 +2165,14 @@ class MikrotikRepository {
 
     suspend fun generateBatch(config: BatchGenerationConfig): Result<List<HotspotCard>> {
         return withContext(Dispatchers.Default) {
+            // 1. Strict Validation: Profile MUST exist in router
+            val profileExists = _profiles.value.isEmpty() || _profiles.value.any { it.name.equals(config.profile, ignoreCase = true) }
+            if (!profileExists) {
+                return@withContext Result.failure(
+                    Exception("الباقة المحددة (${config.profile}) غير موجودة في الراوتر! يرجى إنشاء الباقة أولاً من قسم الباقات في التطبيق أو في الراوتر قبل توليد الكروت.")
+                )
+            }
+
             val generatedCards = mutableListOf<HotspotCard>()
             val existingCodes = _cards.value.map { it.name }.toMutableSet()
             val random = SecureRandom()
@@ -2195,13 +2222,22 @@ class MikrotikRepository {
                 }
             }
 
-            // Sync with real router
+            // 2. Real Router Verification & Synchronization
             val routerConfig = activeConfig
             if (routerConfig != null && !routerConfig.isDemoMode) {
+                val addedCards = mutableListOf<HotspotCard>()
+                val failureReasons = mutableListOf<String>()
+
                 withContext(Dispatchers.IO) {
                     if (isApiSocketMode) {
                         for (card in generatedCards) {
-                            routerOsApiClient.addCard(card)
+                            val res = routerOsApiClient.addCard(card)
+                            if (res.isSuccess) {
+                                addedCards.add(card)
+                            } else {
+                                val err = res.exceptionOrNull()?.message ?: "خطأ غير معروف"
+                                failureReasons.add(err)
+                            }
                         }
                     } else {
                         val protocol = if (routerConfig.useHttps) "https" else "http"
@@ -2224,16 +2260,46 @@ class MikrotikRepository {
                                     .put(jsonBody.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                httpClient.newCall(putReq).execute()
-                            } catch (_: Exception) {}
+                                val resp = httpClient.newCall(putReq).execute()
+                                if (resp.isSuccessful) {
+                                    addedCards.add(card)
+                                } else {
+                                    val errBody = resp.body?.string().orEmpty()
+                                    failureReasons.add("خطأ راوتر ($errBody)")
+                                }
+                            } catch (e: Exception) {
+                                failureReasons.add(e.message ?: "فشل الاتصال بالراوتر")
+                            }
                         }
                     }
+
+                    // Re-sync cards directly from router
+                    try {
+                        val freshCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
+                        if (freshCards.isNotEmpty()) {
+                            _cards.value = freshCards
+                        }
+                    } catch (_: Exception) {}
                 }
+
+                if (addedCards.isEmpty() && failureReasons.isNotEmpty()) {
+                    val primaryErr = failureReasons.first()
+                    return@withContext Result.failure(
+                        Exception("فشل إضافة الكروت في راوتر ميكروتك: $primaryErr. يرجى التحقق من صحة الباقة وصلاحيات المستخدم.")
+                    )
+                }
+
+                val currentList = _cards.value.toMutableList()
+                val newlyAdded = if (addedCards.isNotEmpty()) addedCards else generatedCards
+                currentList.addAll(0, newlyAdded)
+                _cards.value = currentList.distinctBy { it.name }
+                return@withContext Result.success(newlyAdded)
             }
 
+            // Demo Mode: Add generated cards locally
             val currentList = _cards.value.toMutableList()
             currentList.addAll(0, generatedCards)
-            _cards.value = currentList
+            _cards.value = currentList.distinctBy { it.name }
 
             Result.success(generatedCards)
         }
@@ -2241,6 +2307,14 @@ class MikrotikRepository {
 
     suspend fun addSingleCard(card: HotspotCard): Result<Boolean> {
         return withContext(Dispatchers.IO) {
+            // Strict Validation: Profile MUST exist
+            val profileExists = _profiles.value.isEmpty() || _profiles.value.any { it.name.equals(card.profile, ignoreCase = true) }
+            if (!profileExists) {
+                return@withContext Result.failure(
+                    Exception("الباقة المحددة (${card.profile}) غير موجودة في راوتر ميكروتك! يرجى إنشاء الباقة أولاً قبل إضافة الكرت.")
+                )
+            }
+
             val routerConfig = activeConfig
             if (routerConfig != null && !routerConfig.isDemoMode) {
                 if (isApiSocketMode) {
@@ -2270,17 +2344,26 @@ class MikrotikRepository {
                             .build()
                         val resp = httpClient.newCall(putReq).execute()
                         if (!resp.isSuccessful) {
-                            return@withContext Result.failure(Exception("استجاب الراوتر برمز خطأ ${resp.code}"))
+                            val errBody = resp.body?.string().orEmpty()
+                            return@withContext Result.failure(Exception("استجاب الراوتر برفض إضافة الكرت: $errBody"))
                         }
                     } catch (e: Exception) {
                         return@withContext Result.failure(e)
                     }
                 }
+
+                // Re-fetch real users from router to confirm
+                try {
+                    val freshCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
+                    if (freshCards.isNotEmpty()) {
+                        _cards.value = freshCards
+                    }
+                } catch (_: Exception) {}
             }
 
             val currentList = _cards.value.toMutableList()
             currentList.add(0, card)
-            _cards.value = currentList
+            _cards.value = currentList.distinctBy { it.name }
             Result.success(true)
         }
     }

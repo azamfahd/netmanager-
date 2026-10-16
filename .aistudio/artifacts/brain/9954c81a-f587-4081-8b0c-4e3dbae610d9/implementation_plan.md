@@ -1,57 +1,181 @@
-# Real-Router Connection Integrity & Data Audit
+# خطة العمل الشاملة: تطوير قسم الأرباح، سجل الجلسات المتقدم، وإصلاح توليد الكروت الحقيقي
 
-This plan outlines the steps required to ensure the application operates exclusively on real router data when connected to a real MikroTik device, completely eliminating any demo or placeholder data, and providing a professional empty state experience when the router is connected but lacks data.
+تهدف هذه الخطة إلى تنفيذ تحسينات جوهرية وترتيب النظام ليعمل بكفاءة واحترافية عالية، مع نقل الإحصائيات والأرباح إلى قسم مخصص جديد، وتسجيل وأرشفة جلسات المستخدمين وتفاصيل استهلاكهم، بالإضافة إلى إصلاح عيوب واجهة إدخال وتعديل الكروت وضمان توليد الكروت في راوتر MikroTik الحقيقي بدقة ومصداقية تامة خالية من أي بيانات وهمية.
+
+---
 
 ### User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following decisions were confirmed by user input and represent the core requirements for this audit and enhancement task:
+> تم تأكيد القرارات التالية بناءً على إجابات واختيارات المستخدم، وتعد الأساس الذي ستُبنى عليه هذه التحديثات:
+>
+> 1. **موقع قسم الأرباح والإحصائيات**: إنشاء **تبويب رئيسي مستقل في شريط التنقل السفلي** (Bottom Navigation Bar) يضم كافة التحليلات المالية، والمبيعات الشهرية، والأرباح، ومقارنة الكروت المباعة وغير المباعة.
+> 2. **أرشفة وتتبع الجلسات**: اعتماد **حفظ تلقائي محلي دائم لجميع الجلسات** وتفاصيل الاستهلاك والوقت والحالة (نشطة / منتهية الرصيد / متوقفة)، حتى لا تضيع بيانات الجلسات السابقة عند قطع الاتصال أو إعادة تشغيل الراوتر.
+> 3. **التحقق من الباقة قبل توليد الكروت**: **إيقاف عملية التوليد فوراً وعرض تنبيه خطأ صريح** يطلب من المستخدم إنشاء الباقة في الراوتر أولاً إذا كانت الباقة المحددة غير متوفرة، لمنع أي إضافة خاطئة أو وهمية.
 
-- **Confirmed Decision 1**: **Comprehensive Audit**: All app sections (Active Users, Cards, Profiles, Stats) will be audited and modified to strictly fetch and display data from the connected router.
-- **Confirmed Decision 2**: **Clear Separation**: Demo mode (for testing) will be explicitly separated from the real connection flow, ensuring no data cross-contamination.
-- **Confirmed Decision 3**: **Empty State UI**: When a real router is connected but contains no data (e.g., no active users, no cards), the app will display a dedicated, professional "Empty State" screen with clear instructions and a call-to-action to add data, rather than showing placeholder or hidden data.
+---
 
 ### 1. Overview & Core Concept
 
-- **What It Does**: This update removes all hardcoded or seeded "demo" data paths that could accidentally inject placeholder information during real-router sessions.
-- **Key Value**: Professional and trustworthy tool experience. Users will be confident that the data they see on their screen directly reflects their live network infrastructure.
+1. **قسم متكامل للأرباح والمبيعات (Finance & Analytics Hub)**:
+   - واجهة عصرية تركز على الإدارة المالية للشبكة.
+   - عرض إجمالي الأرباح والمبيعات، والإحصائيات التراكمية والشهرية لجميع الأشهر.
+   - تفصيل دقيق للكروت المباعة، الكروت المتاحة (غير المباعة)، النقص في المستهدفات المالية، ونسب الاستهلاك.
+
+2. **سجل الجلسات وتفاصيل المستخدمين (Session History & Audit Tracking)**:
+   - عرض الجلسات النشطة في الوقت الفعلي إلى جانب سجل الجلسات السابقة والمؤرشفة.
+   - تمييز بصري فوري وحاسم للجلسات التي انتهى رصيدها (وقت أو حجم بيانات) مقابل الجلسات النشطة.
+   - بطاقات تفصيلية تعرض: اسم المستخدم، عنوان IP، عنوان MAC، تاريخ ووقت البدء والانتهاء، إجمالي الرفع والتحميل (Upload/Download)، وسبب انتهاء الجلسة أو استنفاد الحصة.
+
+3. **إصلاح نموذج توليد الكروت (Voucher Batch Generator Fixes)**:
+   - حل مشكلة تعليق واهتزاز شاشة الإدخال وحقول التعديل (مثل الصلاحية، السعر، سعة النت) وجعل التفاعل سلساً تماماً ومتوافقاً مع لوحة المفاتيح عبر `imePadding` وضبط إعادة الرسم.
+   - التحقق الصارم من استجابة راوتر MikroTik عبر API (`!done` مقابل `!trap`) وعدم الإيهام بنجاح التوليد إلا بعد تأكيد قبول الراوتر للبيانات والتحقق من وجود الكروت في قائمة الراوتر الحقيقية.
+
+---
 
 ### 2. User Experience & Visual Design
 
-- **Empty State UX**:
-    - A centralized `EmptyStateComponent` will be used across `ActiveUsersScreen`, `CardsScreen`, and `ProfilesScreen`.
-    - Design: Minimalist, clean, utilizing Material 3 empty-state illustration patterns (icon + title + descriptive text + primary action button).
-- **Demo Indicator**:
-    - A clear, unobtrusive banner or chip in the dashboard header when in "Demo Mode" to remind users of the current context.
+- **شريط التنقل السفلي (Bottom Navigation)**:
+  - إضافة تبويب جديد: `الأرباح والمبيعات` (Finance / Analytics) بأيقونة بارزة (مثل `Insights` أو `AccountBalanceWallet`).
+  - التوزيع المتناسق للأقسام: (الرئيسية، المستخدمون والجلسات، الكروت، الباقات، الأرباح والمبيعات، الإعدادات).
+
+- **شاشة الأرباح والمبيعات (`FinanceAnalyticsScreen`)**:
+  - بطاقات ملخص إحصائي علوية: (إجمالي الدخل الكلي، دخل الشهر الحالي، الكروت المباعة، الكروت المتوفرة).
+  - قائمة المبيعات الشهرية لكل الأشهر، مع إمكانية التصفية (فلترة حسب الشهر أو الباقة).
+  - رسوم بيانية توضيحية خفيفة وعصرية لنسبة الكروت المباعة مقابل غير المباعة ومعدل النمو المالي.
+
+- **شاشة المستخدمين والجلسات المحسّنة (`ActiveUsersScreen`)**:
+  - تبويب فرعي: [الجلسات الحالية (نشطة)] و [سجل الجلسات السابقة (المكتملة والمنتهية)].
+  - شارات ملونة للحالة:
+    - أخضر نابض: `جلسة نشطة متصلة`.
+    - برتقالي/رمادي: `انتهت الصلاحية (الوقت)`.
+    - أحمر هادئ: `استنفد حجم البيانات (انتهى الرصيد)`.
+  - نافذة منبثقة أو تفاصيل سريعة لكل مستخدم عند الضغط تعرض كافة التفاصيل بدقة متناهية.
+
+- **مربع حوار توليد الكروت المحسّن (`VoucherBatchDialog`)**:
+  - تحسين حقول الإدخال لتجنب إعادة البناء المتكررة (Recomposition loops).
+  - استخدام نافذة كاملة قابلة للتمرير بسلاسة تتكيف مع ظهور لوحة المفاتيح دون حجب حقول الإدخال.
+  - إظهار مؤشر تقدم حقيقي أثناء إرسال الكروت إلى الراوتر، مع إشعار بالنتيجة الحقيقية الصادرة من الراوتر مباشرة.
+
+---
 
 ### 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1: Strict State Reset on Connect**:
-    - *Chosen Approach*: Explicitly nullify all router data stores (`cards`, `profiles`, `activeUsers`, `bandwidthHistory`) at the exact moment a connection to a real router is initiated.
-    - *Why*: Guaranteed removal of stale data and prevention of mixing demo telemetry with real router telemetry.
-- **Decision 2: Repository-Level Enforcement**:
-    - *Chosen Approach*: Move data-initialization logic out of generic initialization blocks and into specific `demoMode` flags or triggered flows.
-    - *Why*: Ensures that the repository remains lean and focused on real API interactions.
+1. **الأرشفة المحلية الدائمة للجلسات**:
+   - *القرار*: استخدام مستودع بيانات محلي دائم لحفظ الجلسات فور قراءتها من الراوتر وتحديث حالتها عند الانتهاء.
+   - *الميزة*: يضمن للمدير معرفة تاريخ كل جلسة حتى بعد إغلاق الراوتر أو خروج المستخدم، مع تجنب فقدان سجل الاستهلاك.
+
+2. **التعامل مع الباقات المفقودة في الراوتر**:
+   - *القرار*: التحقق الاستباقي قبل إرسال أوامر الإضافة؛ إذا لم يُعثر على الباقة (Profile) في الراوتر، تُلغى العملية فوراً وتظهر رسالة واضحة للمستخدم: *"الباقة المحددة غير موجودة في الراوتر، يرجى إنشاؤها من قسم الباقات أولاً"*.
+   - *الميزة*: منع توليد كروت معطوبة لا يمكن للعملاء تسجيل الدخول بها، وضمان تطابق التكوين مع الراوتر بنسبة 100%.
+
+3. **معالجة أخطاء RouterOS الصريحة**:
+   - *القرار*: فحص ردود أوامر الـ API، والتعامل الصارم مع حزم الخطأ `!trap` من MikroTik، وتسجيل وتمرير سبب الخطأ (مثل: "اسم الكرت مكرر"، "الذاكرة ممتلئة"، "الصلاحية غير صحيحة") مباشرة للمستخدم، ومنع أي إشعار بنجاح وهمي.
+
+---
 
 ### 4. Technical Architecture & Data Strategy
 
 ```text
-┌───────────────────────────┐
-│   MainViewModel (State)   │
-└─────────────┬─────────────┘
-              │
-    ┌─────────┴─────────┐
-    │ MikrotikRepository│
-    └─────────┴─────────┘
-              │
-    ┌─────────┴─────────┐
-    │   RouterOS API    │
-    └───────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                       Jetpack Compose UI                    │
+│   ┌─────────────────────┐       ┌───────────────────────┐   │
+│   │FinanceAnalyticsScreen│       │  ActiveUsersScreen    │   │
+│   └──────────┬──────────┘       └──────────┬────────────┘   │
+│              │                             │                │
+│   ┌──────────┴──────────┐       ┌──────────┴────────────┐   │
+│   │ VoucherBatchDialog  │       │  MainScreen (Nav)     │   │
+│   └──────────┬──────────┘       └──────────┬────────────┘   │
+└──────────────┼─────────────────────────────┼────────────────┘
+               ▼                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│                        MainViewModel                        │
+│   - financeStatsState        - sessionHistoryState          │
+│   - generateBatchWithValidation()                           │
+└──────────────────────────────┬──────────────────────────────┘
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      MikrotikRepository                     │
+│  - addCardsRealRouterVerification()                         │
+│  - archiveAndSyncSessions()                                 │
+│  - calculateFinancialMetrics()                              │
+└──────────────────────────────┬──────────────────────────────┘
+                               ▼
+         ┌─────────────────────┴─────────────────────┐
+         ▼                                           ▼
+┌──────────────────┐                       ┌──────────────────┐
+│ RouterOsApiClient│                       │ Local Session    │
+│  (!done / !trap) │                       │ & Sales Archive  │
+└──────────────────┘                       └──────────────────┘
 ```
 
-- **Data Flow**:
-    1.  `verifyAndConnect(config)` triggers a mandatory `clearLocalRouterData()` call.
-    2.  If `isDemoMode == false`, the repository initiates real-time fetching without calling any `populateInitialSampleData()` style functions.
-    3.  `MainViewModel` observers switch to empty list as the initial state during the `Verifying...` phase.
-    4.  UI components (`ProfilesScreen`, etc.) observe the state and conditionally render `EmptyStateComponent` if the list size is zero, once the connection state is `Connected`.
-- **State Cleanup**: All `StateFlow` holders for router data (cards, profiles, logs) in `MikrotikRepository` will have a `reset()` method invoked on `verifyAndConnect`.
+- **نموذج بيانات الجلسة المؤرشفة (`SessionHistoryRecord`)**:
+  - `id`: المعرف الفريد.
+  - `username`: اسم المستخدم / الكرت.
+  - `ipAddress`: عنوان IP.
+  - `macAddress`: عنوان الماك.
+  - `profileName`: الباقة المستخدمة.
+  - `startTime`: توقيت بدء الاتصال.
+  - `endTime`: توقيت انتهاء الجلسة أو الانفصال.
+  - `uptimeFormatted`: مدة الاستخدام.
+  - `bytesIn`: حجم الرفع الفعلي.
+  - `bytesOut`: حجم التحميل الفعلي.
+  - `status`: نشطة (ACTIVE)، منتهية الوقت (EXPIRED_TIME)، منتهية الرصيد/البيانات (EXPIRED_QUOTA)، أو انفصال يدوي (DISCONNECTED).
+
+- **نموذج إحصائيات المبيعات والأرباح (`MonthlySalesSummary`)**:
+  - `monthLabel`: اسم الشهر والسنة (مثلاً: أكتوبر 2026).
+  - `totalCardsGenerated`: إجمالي الكروت المضافة.
+  - `totalCardsSold`: الكروت المباعة فعلياً (التي تم استهلاكها أو تفعيلها).
+  - `totalCardsUnsold`: الكروت المتاحة غير المباعة.
+  - `totalRevenue`: إجمالي الإيرادات المحققة.
+  - `potentialRevenue`: الإيرادات المتوقعة من الكروت غير المباعة.
+  - `averagePricePerCard`: متوسط سعر الكرت.
+
+---
+
+### 5. Implementation Phases & Step-by-Step Plan
+
+#### المرحلة 1: إنشاء شاشة الأرباح والمبيعات والإحصائيات المستقلة
+1. إضافة عنصر التبويب الجديد `FINANCE` إلى شريط التنقل الرئيسي `AppTab` في `MainScreen.kt`.
+2. إنشاء شاشة `FinanceAnalyticsScreen.kt` بتصميم Material 3 متكامل:
+   - كروت ملخص الإيرادات والأرباح الإجمالية والشهرية.
+   - جدول/قائمة مبيعات كل الأشهر بتفاصيل الكروت المباعة وغير المباعة والأرباح.
+   - تفاصيل إحصائية حول معدل العجز والوفر المالي.
+3. ربط الشاشة مع `MainViewModel` لحساب ومزامنة الأرقام بدقة بالاعتماد على كروت وسجلات الراوتر الحقيقية.
+
+#### المرحلة 2: تطوير شاشة الجلسات وسجل المستخدمين والأرشفة
+1. إنشاء مخزن أرشفة الجلسات `SessionArchiveStore.kt` في `data/local` لحفظ وتحديث الجلسات تلقائياً محلياً.
+2. تحديث `MikrotikRepository.kt` ليقوم عند جلب المتصلين النشطين بمقارنة الجلسات وأرشفة الجلسات التي انفصلت أو استنفدت رصيدها، وتحديد سبب الانتهاء بدقة (وقت أو بايتات).
+3. ترقية `ActiveUsersScreen.kt`:
+   - إضافة تبويبات تصفية: [الجلسات النشطة الآن] و [سجل الجلسات المنتهية/التاريخية].
+   - تصميم بطاقات الجلسات لعرض الـ IP والـ MAC وتفاصيل الاستهلاك والحالة المنتهية بوضوح تام.
+   - توفير خيار البحث والفلترة حسب التاريخ أو المستخدم.
+
+#### المرحلة 3: إصلاح واجهة إدخال الكروت وحل مشكلة التعليق (`VoucherBatchDialog`)
+1. إعادة كتابة نموذج الحقول في `VoucherBatchDialog.kt`، وفصل إدارة حالة الحقول النصية (Text States) عن المعالجة المستمرة لإيقاف إعادة الحساب التي تسبب التعليق والقفز أثناء الكتابة.
+2. تفعيل دعم لوحة المفاتيح عبر `Modifier.imePadding()` واستخدام `LazyColumn` أو `verticalScroll` محسّن يضمن بقاء الحقل النشط مرئياً بدون تقطيع.
+3. منع وميض الأزرار وتثبيت تخطيط الحقول (الوقت، السعر، الباقة، سعة البيانات).
+
+#### المرحلة 4: التحقق الصارم وحل مشكلة توليد الكروت على الراوتر الحقيقي
+1. تحديث التحقق من الباقة قبل بدء التوليد:
+   - فحص وجود الباقة المختارة في قائمة باقات الراوتر `profiles`.
+   - في حال عدم وجودها: إيقاف التوليد فوراً وإرجاع رسالة خطأ صريحة توضح أن الباقة غير متوفرة ويجب إنشاؤها في الراوتر أولاً.
+2. تدقيق `RouterOsApiClient.kt` و `MikrotikRepository.kt`:
+   - فحص استجابة الراوتر والتأكد من التعامل مع أخطاء `!trap` الصادرة من RouterOS وإلغاء تسجيل النجاح عند فشل الإرسال.
+   - إضافة تأكيد فوري عبر فحص استرجاع قائمة المستخدمين للتأكد من إضافة الكروت فعلياً داخل MikroTik.
+3. إظهار تقرير حقيقي للمستخدم بعد التوليد بعدد الكروت المضافة بنجاح في الراوتر وتفاصيل أي خطأ إن وُجد.
+
+---
+
+### 6. Verification & Testing Strategy
+
+- **فحص بناء وتجميع المشروع (`compile_applet`)**:
+  - التأكد من خلو التعديلات من أي أخطاء برمجية أو استيرادات مفقودة بعد إجراء كافة التعديلات.
+- **التحقق من واجهة الإدخال**:
+  - اختبار سلاسة الكتابة في حقول مدة الصلاحية والسعر والسعة والتأكد من انعدام أي تعليق أو وميض.
+- **التحقق من قسم الأرباح والمبيعات**:
+  - التأكد من ظهور التبويب الجديد وعرض الإحصائيات الشهرية والكروت المباعة وغير المباعة بصورة دقيقة.
+- **التحقق من أرشفة وسجل الجلسات**:
+  - اختبار عرض الجلسات النشطة، وتسجيل الجلسات المنتهية مع تمييز سبب انتهاء الرصيد وتفاصيل الاستهلاك (IP, MAC, Start, End, Download/Upload).
+- **التحقق من التوليد الحقيقي في الراوتر**:
+  - اختبار محاكاة التوليد مع باقة غير موجودة والتحقق من إيقاف التوليد وعرض التنبيه، واختبار التوليد مع باقة صالحة والتأكد من إرسال أوامر MikroTik والتحقق من النتيجة دون أي بيانات وهمية.

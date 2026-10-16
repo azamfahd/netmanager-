@@ -16,15 +16,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ConfirmationNumber
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dataset
@@ -173,7 +176,7 @@ fun VoucherBatchDialog(
     preselectedAgentId: Long = 0L,
     onDismiss: () -> Unit,
     onGenerate: (BatchGenerationConfig) -> Unit,
-    onAddSingleCard: ((HotspotCard) -> Unit)? = null
+    onAddSingleCard: ((HotspotCard, Long, String, Double) -> Unit)? = null
 ) {
     var selectedTab by remember { mutableStateOf(VoucherDialogTab.BATCH_GENERATE) }
 
@@ -237,8 +240,14 @@ fun VoucherBatchDialog(
         }
     }
 
+    val isProfileValid = profiles.isEmpty() || profiles.any { it.name.equals(selectedProfile, ignoreCase = true) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier
+            .fillMaxWidth(0.95f)
+            .imePadding(),
         shape = RoundedCornerShape(22.dp),
         containerColor = MaterialTheme.colorScheme.surface,
         title = {
@@ -746,7 +755,12 @@ fun VoucherBatchDialog(
                     )
                 } else {
                     // ---- SINGLE CARD MANUAL MODE ----
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "كود الكرت (يمكنك كتابة كود مخصص يدوياً أو التوليد تلقائياً):",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -759,6 +773,17 @@ fun VoucherBatchDialog(
                                     if (isSingleCode) singlePassword = it
                                 },
                                 label = { Text("كود الكرت / اسم المستخدم") },
+                                placeholder = { Text("أدخل كود مخصص...") },
+                                trailingIcon = {
+                                    if (singleCode.isNotBlank()) {
+                                        IconButton(onClick = {
+                                            singleCode = ""
+                                            if (isSingleCode) singlePassword = ""
+                                        }) {
+                                            Icon(Icons.Default.Clear, contentDescription = "مسح الكود", modifier = Modifier.size(18.dp))
+                                        }
+                                    }
+                                },
                                 singleLine = true,
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(10.dp)
@@ -818,6 +843,25 @@ fun VoucherBatchDialog(
                     )
                 }
 
+                // Time Limit Quick Chips & Field
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("مدة الصلاحية (الوقت):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf("1h" to "1ساعة", "3h" to "3ساعات", "1d" to "يوم", "3d" to "3أيام", "7d" to "أسبوع", "30d" to "شهر").forEach { (vKey, vLabel) ->
+                            FilterChip(
+                                selected = timeLimit == vKey,
+                                onClick = { timeLimit = vKey },
+                                label = { Text(vLabel, fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
                 // Time Limit & Price Customization Fields
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -843,6 +887,25 @@ fun VoucherBatchDialog(
                     )
                 }
 
+                // Data Quota Quick Chips & Field
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("حد وحصة البيانات:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf(0L to "مفتوح", 500L to "500M", 1024L to "1GB", 2560L to "2.5G", 5120L to "5GB", 10240L to "10G").forEach { (mbVal, mbLabel) ->
+                            FilterChip(
+                                selected = dataLimitMBInput == mbVal.toString(),
+                                onClick = { dataLimitMBInput = mbVal.toString() },
+                                label = { Text(mbLabel, fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
                 OutlinedTextField(
                     value = dataLimitMBInput,
                     onValueChange = { input ->
@@ -855,6 +918,28 @@ fun VoucherBatchDialog(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 )
+
+                if (!isProfileValid) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                            Text(
+                                text = "⚠️ الباقة المحددة ($selectedProfile) غير موجودة في راوتر MikroTik! تم إيقاف التوليد لحماية الراوتر. يرجى اختيار باقة متوفرة أو إنشاؤها من قسم الباقات أولاً.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
@@ -865,6 +950,7 @@ fun VoucherBatchDialog(
             if (selectedTab == VoucherDialogTab.BATCH_GENERATE) {
                 Button(
                     onClick = {
+                        if (!isProfileValid) return@Button
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
                         val config = BatchGenerationConfig(
                             count = parsedCount,
@@ -884,7 +970,11 @@ fun VoucherBatchDialog(
                         onGenerate(config)
                         onDismiss()
                     },
+                    enabled = isProfileValid,
                     shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isProfileValid) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                    ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(48.dp)
@@ -893,14 +983,16 @@ fun VoucherBatchDialog(
                     Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "توليد وحفظ ($parsedCount كرت) في الراوتر فوراً",
+                        text = if (isProfileValid) "توليد وحفظ ($parsedCount كرت) في الراوتر فوراً" else "يرجى اختيار باقة صالحة أولاً",
                         fontWeight = FontWeight.Bold
                     )
                 }
             } else {
                 Button(
                     onClick = {
+                        if (!isProfileValid) return@Button
                         if (singleCode.isNotBlank()) {
+                            val selectedAgent = posAgents.find { it.id == selectedAgentId }
                             val card = HotspotCard(
                                 id = "card_${System.currentTimeMillis()}",
                                 name = singleCode.trim(),
@@ -911,15 +1003,20 @@ fun VoucherBatchDialog(
                                 bytesOut = 0,
                                 limitUptime = timeLimit,
                                 limitBytesTotal = if (parsedDataLimitMB > 0) parsedDataLimitMB * 1024 * 1024L else 0L,
-                                comment = singleComment.ifBlank { "كرت فردي" },
+                                comment = if (selectedAgent != null) "${singleComment.ifBlank { "كرت فردي" }} (نقطة: ${selectedAgent.name})" else singleComment.ifBlank { "كرت فردي" },
                                 disabled = false,
                                 price = price
                             )
-                            onAddSingleCard?.invoke(card)
+                            onAddSingleCard?.invoke(
+                                card,
+                                selectedAgent?.id ?: 0L,
+                                selectedAgent?.name.orEmpty(),
+                                selectedAgent?.discountPercent ?: 0.0
+                            )
                             onDismiss()
                         }
                     },
-                    enabled = singleCode.isNotBlank(),
+                    enabled = isProfileValid && singleCode.isNotBlank(),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -929,7 +1026,7 @@ fun VoucherBatchDialog(
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "إضافة وتفعيل الكرت الفردي في الراوتر",
+                        text = if (isProfileValid) "إضافة وتفعيل الكرت الفردي في الراوتر" else "يرجى اختيار باقة صالحة أولاً",
                         fontWeight = FontWeight.Bold
                     )
                 }

@@ -100,4 +100,28 @@ interface AppDao {
 
     @Query("DELETE FROM package_pricing WHERE profileName = :profileName")
     suspend fun deletePackagePricing(profileName: String)
+
+    // ==========================================
+    // Session History & Audit Archive
+    // ==========================================
+    @Query("SELECT * FROM session_archive ORDER BY timestamp DESC")
+    fun getAllArchivedSessions(): Flow<List<SessionArchiveEntity>>
+
+    @Query("SELECT * FROM session_archive WHERE isOnline = 1 ORDER BY timestamp DESC")
+    fun getActiveArchivedSessions(): Flow<List<SessionArchiveEntity>>
+
+    @Query("SELECT * FROM session_archive WHERE isQuotaExhausted = 1 ORDER BY timestamp DESC")
+    fun getQuotaExhaustedSessions(): Flow<List<SessionArchiveEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateSession(session: SessionArchiveEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateSessions(sessions: List<SessionArchiveEntity>)
+
+    @Query("UPDATE session_archive SET isOnline = 0, logoutTime = :logoutTime, terminateReason = :reason, isQuotaExhausted = :isQuotaExhausted WHERE sessionId = :sessionId")
+    suspend fun markSessionOffline(sessionId: String, logoutTime: String, reason: String, isQuotaExhausted: Boolean)
+
+    @Query("DELETE FROM session_archive")
+    suspend fun clearSessionArchive()
 }

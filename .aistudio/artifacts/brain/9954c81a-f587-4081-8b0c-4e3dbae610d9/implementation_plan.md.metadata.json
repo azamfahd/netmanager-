@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan to ensure the application connects to real MikroTik routers without leaking demo data, with clear separation between demo and real modes, and implementation of robust empty states.",
-  "updatedAt": "2026-10-13T20:21:27.126438442Z",
+  "summary": "خطة عمل شاملة ومفصلة لنقل وترتيب قسم الأرباح والمبيعات والإحصائيات إلى تبويب رئيسي مستقل، وتطوير نظام أرشفة وتتبع الجلسات والمستخدمين المنتهية والنشطة مع التفاصيل الكاملة، وإصلاح مشاكل تعليق حقول الإدخال ومعالجة توليد الكروت في الراوتر الحقيقي بشكل فعلي ومؤكد.",
+  "updatedAt": "2026-10-16T17:59:06.685139494Z",
   "requestFeedback": true,
   "userFacing": true
 }

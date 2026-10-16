@@ -24,7 +24,11 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ConfirmationNumber
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Wifi
@@ -75,6 +79,7 @@ import kotlinx.coroutines.flow.collectLatest
 
 enum class AppTab(val title: String, val icon: ImageVector) {
     DASHBOARD("الرئيسية", Icons.Default.Dashboard),
+    FINANCE("المالية والأرباح", Icons.Default.MonetizationOn),
     ACTIVE_USERS("المتصلين", Icons.Default.Group),
     NODES("النقاط", Icons.Default.CellTower),
     CARDS("الكروت", Icons.Default.ConfirmationNumber),
@@ -182,6 +187,7 @@ fun MainScreen(
                     Text(
                         text = when (currentTab) {
                             AppTab.DASHBOARD -> routerTitle
+                            AppTab.FINANCE -> "الأرباح والمبيعات والإحصائيات"
                             AppTab.ACTIVE_USERS -> "المستخدمين المتصلين ($routerIp)"
                             AppTab.NODES -> "نقاط وأبراج الشبكة (${networkNodes.size})"
                             AppTab.CARDS -> "إدارة كروت الشبكة"
@@ -231,45 +237,76 @@ fun MainScreen(
             )
         },
         bottomBar = {
-            NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surface,
-                tonalElevation = 6.dp
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
+                shadowElevation = 8.dp,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                AppTab.entries.forEach { tab ->
-                    NavigationBarItem(
-                        selected = currentTab == tab,
-                        onClick = { currentTab = tab },
-                        icon = {
-                            if (tab == AppTab.ACTIVE_USERS && activeUsers.isNotEmpty()) {
-                                BadgedBox(badge = {
-                                    Badge { Text("${activeUsers.size}") }
-                                }) {
-                                    Icon(tab.icon, contentDescription = tab.title)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AppTab.entries.forEach { tab ->
+                        val isSelected = currentTab == tab
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                            modifier = Modifier
+                                .clickable { currentTab = tab }
+                                .testTag("nav_item_${tab.name.lowercase()}")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                if (tab == AppTab.ACTIVE_USERS && activeUsers.isNotEmpty()) {
+                                    BadgedBox(badge = {
+                                        Badge { Text("${activeUsers.size}") }
+                                    }) {
+                                        Icon(
+                                            tab.icon,
+                                            contentDescription = tab.title,
+                                            tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                } else if (tab == AppTab.NODES && networkNodes.isNotEmpty()) {
+                                    BadgedBox(badge = {
+                                        Badge { Text("${networkNodes.count { it.isOnline }}") }
+                                    }) {
+                                        Icon(
+                                            tab.icon,
+                                            contentDescription = tab.title,
+                                            tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                } else {
+                                    Icon(
+                                        tab.icon,
+                                        contentDescription = tab.title,
+                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(20.dp)
+                                    )
                                 }
-                            } else if (tab == AppTab.NODES && networkNodes.isNotEmpty()) {
-                                BadgedBox(badge = {
-                                    Badge { Text("${networkNodes.count { it.isOnline }}") }
-                                }) {
-                                    Icon(tab.icon, contentDescription = tab.title)
-                                }
-                            } else {
-                                Icon(tab.icon, contentDescription = tab.title)
+
+                                Spacer(modifier = Modifier.height(3.dp))
+
+                                Text(
+                                    text = tab.title,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    fontSize = 11.sp,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
-                        },
-                        label = {
-                            Text(
-                                text = tab.title,
-                                fontWeight = if (currentTab == tab) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = 11.sp
-                            )
-                        },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primaryContainer
-                        ),
-                        modifier = Modifier.testTag("nav_item_${tab.name.lowercase()}")
-                    )
+                        }
+                    }
                 }
             }
         }
@@ -286,6 +323,15 @@ fun MainScreen(
                         viewModel.setPrintableCards(viewModel.cards.value)
                         isShowingPrintScreen = true
                     },
+                    onNavigateToFinance = { currentTab = AppTab.FINANCE },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            AppTab.FINANCE -> {
+                FinanceAnalyticsScreen(
+                    viewModel = viewModel,
+                    onNavigateToCards = { currentTab = AppTab.CARDS },
+                    onNavigateToPosAgents = { currentTab = AppTab.POS_AGENTS },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -352,8 +398,8 @@ fun MainScreen(
             onGenerate = { config ->
                 viewModel.generateBatch(config)
             },
-            onAddSingleCard = { card ->
-                viewModel.addSingleCard(card)
+            onAddSingleCard = { card, agentId, agentName, discount ->
+                viewModel.addSingleCard(card, agentId, agentName, discount)
             }
         )
     }

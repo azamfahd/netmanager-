@@ -530,6 +530,22 @@ data class RevenueAnalyticsSummary(
     val selectedTimeFilter: TimeFilterRange = TimeFilterRange.ALL
 )
 
+data class MonthlySalesSummary(
+    val monthKey: String, // e.g. "2026-10"
+    val monthName: String, // e.g. "أكتوبر 2026"
+    val totalCardsGenerated: Int = 0,
+    val totalCardsSold: Int = 0,
+    val totalCardsUnsold: Int = 0,
+    val totalRevenue: Double = 0.0,
+    val totalCost: Double = 0.0,
+    val netProfit: Double = 0.0,
+    val potentialUnsoldValue: Double = 0.0,
+    val salesPercentage: Float = 0f, // (sold / total) * 100
+    val targetDeficit: Double = 0.0, // target gap or unrealized sales
+    val isCurrentMonth: Boolean = false
+)
+
+
 
 
 

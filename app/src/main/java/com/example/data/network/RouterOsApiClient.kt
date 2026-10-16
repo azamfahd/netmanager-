@@ -581,8 +581,17 @@ class RouterOsApiClient {
 
                 writeSentence(words)
                 val sentences = readAllSentencesUntilDone()
+                val trapSentence = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (trapSentence != null) {
+                    val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                        ?: "رفض راوتر ميكروتك إضافة الكرت"
+                    return@withContext Result.failure(Exception(trapMsg))
+                }
                 val isDone = sentences.any { it.firstOrNull() == "!done" }
-                Result.success(isDone)
+                if (!isDone) {
+                    return@withContext Result.failure(Exception("لم يؤكد الراوتر إضافة الكرت"))
+                }
+                Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -603,8 +612,17 @@ class RouterOsApiClient {
 
                 writeSentence(words)
                 val sentences = readAllSentencesUntilDone()
+                val trapSentence = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (trapSentence != null) {
+                    val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                        ?: "رفض راوتر ميكروتك إنشاء الباقة"
+                    return@withContext Result.failure(Exception(trapMsg))
+                }
                 val isDone = sentences.any { it.firstOrNull() == "!done" }
-                Result.success(isDone)
+                if (!isDone) {
+                    return@withContext Result.failure(Exception("لم يؤكد الراوتر إنشاء الباقة"))
+                }
+                Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
             }
