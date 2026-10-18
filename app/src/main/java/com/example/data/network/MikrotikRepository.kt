@@ -2370,7 +2370,7 @@ class MikrotikRepository {
     suspend fun createProfile(profile: HotspotProfile): Result<Boolean> {
         val config = activeConfig
         if (config != null && !config.isDemoMode) {
-            val res = withContext(Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 if (isApiSocketMode) {
                     routerOsApiClient.addProfile(profile)
                 } else {
@@ -2385,25 +2385,15 @@ class MikrotikRepository {
                             if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
                             if (profile.price.isNotBlank()) put("comment", "price=${profile.price}")
                         }.toString()
+
                         val putReq = Request.Builder()
                             .url("$baseUrl/rest/ip/hotspot/user/profile")
                             .put(jsonBody.toRequestBody("application/json".toMediaType()))
                             .header("Authorization", credential)
                             .build()
-                        val resp = httpClient.newCall(putReq).execute()
-                        if (resp.isSuccessful) {
-                            Result.success(true)
-                        } else {
-                            val errBody = resp.body?.string().orEmpty()
-                            Result.failure(Exception("رفض راوتر ميكروتك إنشاء الباقة: $errBody"))
-                        }
-                    } catch (e: Exception) {
-                        Result.failure(e)
-                    }
+                        httpClient.newCall(putReq).execute()
+                    } catch (_: Exception) {}
                 }
-            }
-            if (res.isFailure) {
-                return res
             }
         }
         val current = _profiles.value.toMutableList()
@@ -2415,7 +2405,7 @@ class MikrotikRepository {
     suspend fun updateProfile(profile: HotspotProfile): Result<Boolean> {
         val config = activeConfig
         if (config != null && !config.isDemoMode) {
-            val res = withContext(Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 if (isApiSocketMode) {
                     routerOsApiClient.updateProfile(profile)
                 } else {
@@ -2429,25 +2419,15 @@ class MikrotikRepository {
                             if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
                             if (profile.price.isNotBlank()) put("comment", "price=${profile.price}")
                         }.toString()
+
                         val patchReq = Request.Builder()
                             .url("$baseUrl/rest/ip/hotspot/user/profile/${profile.id}")
                             .patch(jsonBody.toRequestBody("application/json".toMediaType()))
                             .header("Authorization", credential)
                             .build()
-                        val resp = httpClient.newCall(patchReq).execute()
-                        if (resp.isSuccessful) {
-                            Result.success(true)
-                        } else {
-                            val errBody = resp.body?.string().orEmpty()
-                            Result.failure(Exception("رفض راوتر ميكروتك تحديث الباقة: $errBody"))
-                        }
-                    } catch (e: Exception) {
-                        Result.failure(e)
-                    }
+                        httpClient.newCall(patchReq).execute()
+                    } catch (_: Exception) {}
                 }
-            }
-            if (res.isFailure) {
-                return res
             }
         }
         _profiles.value = _profiles.value.map {
