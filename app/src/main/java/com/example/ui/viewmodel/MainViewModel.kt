@@ -530,53 +530,6 @@ class MainViewModel(
                 }
             }
         }
-        viewModelScope.launch(Dispatchers.IO) {
-            cards.collectLatest { cardList ->
-                if (cardList.isNotEmpty()) {
-                    try {
-                        val usedOrExpired = cardList.filter {
-                            it.isExpired || (it.bytesIn + it.bytesOut > 0) || (it.uptime.isNotBlank() && it.uptime != "0s")
-                        }
-                        if (usedOrExpired.isNotEmpty()) {
-                            val entities = usedOrExpired.map { card ->
-                                val total = card.bytesIn + card.bytesOut
-                                val reason = when {
-                                    card.limitBytesTotal > 0 && total >= card.limitBytesTotal -> "استنفاد حجم البيانات (${card.limitBytesTotal / (1024 * 1024)} MB)"
-                                    card.limitUptime.isNotBlank() && card.uptime == card.limitUptime -> "انتهاء الوقت المحدد (${card.limitUptime})"
-                                    card.disabled -> "تم تعطيل الكرت من الإدارة"
-                                    card.isExpired -> "انتهاء رصيد الكرت"
-                                    else -> "كرت مستخدم"
-                                }
-                                com.example.data.local.SessionArchiveEntity(
-                                    sessionId = "card_${card.id}_${card.name}",
-                                    username = card.name,
-                                    ipAddress = "192.168.88.x",
-                                    macAddress = "",
-                                    isOnline = !card.isExpired && !card.disabled,
-                                    loginTime = if (card.uptime != "0s") "جلسة سابقة" else "غير متصل",
-                                    logoutTime = if (card.isExpired) "انتهت الجلسة" else "نشط",
-                                    duration = card.uptime,
-                                    bytesIn = card.bytesIn,
-                                    bytesOut = card.bytesOut,
-                                    totalBytes = total,
-                                    terminateReason = reason,
-                                    profile = card.profile,
-                                    price = card.price,
-                                    nodeName = "MikroTik Hotspot",
-                                    deviceModel = "مستخدم هوتسبوت",
-                                    deviceBrand = "MikroTik",
-                                    deviceCategory = "SMART_DEVICE",
-                                    packageLimitBytes = card.limitBytesTotal,
-                                    isQuotaExhausted = card.isExpired,
-                                    timestamp = System.currentTimeMillis()
-                                )
-                            }
-                            database.appDao().insertOrUpdateSessions(entities)
-                        }
-                    } catch (_: Exception) {}
-                }
-            }
-        }
         viewModelScope.launch {
             seedInitialPosDataIfEmpty()
         }

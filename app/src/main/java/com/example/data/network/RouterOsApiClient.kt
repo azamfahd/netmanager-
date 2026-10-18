@@ -582,7 +582,6 @@ class RouterOsApiClient {
                             val comment = map["comment"] ?: ""
                             val profile = map["profile"] ?: "default"
                             val parsedPrice = extractPriceFromText(comment, profile, name)
-                            val isDisabled = map["disabled"] == "true" || map["disabled"] == "yes" || map["disabled"] == "" || (map.containsKey("disabled") && map["disabled"] != "false" && map["disabled"] != "no")
                             list.add(
                                 HotspotCard(
                                     id = map[".id"] ?: "c_${list.size}",
@@ -595,7 +594,7 @@ class RouterOsApiClient {
                                     limitUptime = map["limit-uptime"] ?: "",
                                     limitBytesTotal = map["limit-bytes-total"]?.toLongOrNull() ?: 0L,
                                     comment = comment,
-                                    disabled = isDisabled,
+                                    disabled = map["disabled"] == "true" || map["disabled"] == "yes",
                                     price = parsedPrice
                                 )
                             )
@@ -1151,11 +1150,6 @@ class RouterOsApiClient {
                     val key = word.substring(1, eqIdx)
                     val value = word.substring(eqIdx + 1)
                     map[key] = value
-                } else {
-                    val key = word.removePrefix("=")
-                    if (key.isNotBlank()) {
-                        map[key] = "true"
-                    }
                 }
             }
         }

@@ -2011,7 +2011,6 @@ class MikrotikRepository {
                 }
             }
             _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
-            logAdminAction("admin", "قطع اتصال مستخدم", "تم فصل جلسة المستخدم (${user.user}) ذو العنوان (${user.address}) من راوتر ميكروتك", "WARN")
             Result.success(true)
         }
     }
@@ -2053,8 +2052,6 @@ class MikrotikRepository {
                     }
                 }
             }
-            val cardName = card?.name ?: cardId
-            logAdminAction("admin", "حذف كرت هوتسبوت", "تم حذف الكرت ($cardName) نهائياً من راوتر ميكروتك", "WARN")
             Result.success(true)
         }
     }
@@ -2111,8 +2108,6 @@ class MikrotikRepository {
                     }
                 }
             }
-            val cardName = card?.name ?: cardId
-            logAdminAction("admin", "إعادة شحن وتفعيل كرت", "تم تصفير استهلاك وإعادة شحن وتفعيل الكرت ($cardName) في الراوتر بنجاح", "SUCCESS")
             Result.success(true)
         }
     }
@@ -2168,7 +2163,6 @@ class MikrotikRepository {
                     }
                 }
             }
-            logAdminAction("admin", "تعديل بيانات كرت", "تم تعديل بيانات الكرت (${updatedCard.name}) - باقة: ${updatedCard.profile} - مهلة: ${updatedCard.limitUptime}", "INFO")
             Result.success(true)
         }
     }
@@ -2214,10 +2208,6 @@ class MikrotikRepository {
                     }
                 }
             }
-            val cardName = card?.name ?: cardId
-            val actionType = if (newStatus) "تعطيل كرت" else "تفعيل كرت"
-            val actionDesc = if (newStatus) "تم تعطيل وإيقاف الكرت ($cardName) في سيرفر الميكروتك" else "تم تفعيل وتشغيل الكرت ($cardName) في سيرفر الميكروتك بنجاح"
-            logAdminAction("admin", actionType, actionDesc, if (newStatus) "WARN" else "SUCCESS")
             Result.success(true)
         }
     }
@@ -2352,7 +2342,6 @@ class MikrotikRepository {
                 val newlyAdded = if (addedCards.isNotEmpty()) addedCards else generatedCards
                 currentList.addAll(0, newlyAdded)
                 _cards.value = currentList.distinctBy { it.name }
-                logAdminAction("admin", "توليد دفعة كروت", "تم توليد وحفظ (${newlyAdded.size} كرت) باقة (${config.profile}) بسعر (${config.price}) في سيرفر الميكروتك بنجاح", "SUCCESS")
                 return@withContext Result.success(newlyAdded)
             }
 
@@ -2360,7 +2349,6 @@ class MikrotikRepository {
             val currentList = _cards.value.toMutableList()
             currentList.addAll(0, generatedCards)
             _cards.value = currentList.distinctBy { it.name }
-            logAdminAction("admin", "توليد دفعة كروت", "تم توليد (${generatedCards.size} كرت) باقة (${config.profile}) محلياً", "SUCCESS")
 
             Result.success(generatedCards)
         }
@@ -2425,7 +2413,6 @@ class MikrotikRepository {
             val currentList = _cards.value.toMutableList()
             currentList.add(0, card)
             _cards.value = currentList.distinctBy { it.name }
-            logAdminAction("admin", "توليد كرت فردي", "تمت إضافة وتفعيل الكرت الفردي (${card.name}) باقة (${card.profile}) سعر (${card.price}) في الراوتر", "SUCCESS")
             Result.success(true)
         }
     }
@@ -2470,7 +2457,6 @@ class MikrotikRepository {
             val current = _profiles.value.toMutableList()
             current.add(profile)
             _profiles.value = current.distinctBy { it.name }
-            logAdminAction("admin", "إنشاء باقة هوتسبوت", "تم إنشاء باقة (${profile.name}) بسرعة: ${profile.rateLimit} وسعر: ${profile.price} في سيرفر الميكروتك بنجاح", "SUCCESS")
             Result.success(true)
         }
     }
@@ -2514,7 +2500,6 @@ class MikrotikRepository {
             _profiles.value = _profiles.value.map {
                 if (it.id == profile.id || it.name == profile.name) profile else it
             }
-            logAdminAction("admin", "تعديل باقة هوتسبوت", "تم تحديث إعدادات باقة (${profile.name}) - سرعة: ${profile.rateLimit} - سعر: ${profile.price}", "INFO")
             Result.success(true)
         }
     }
@@ -2549,7 +2534,6 @@ class MikrotikRepository {
                 }
             }
             _profiles.value = _profiles.value.filter { it.name != profile.name }
-            logAdminAction("admin", "حذف باقة هوتسبوت", "تم حذف باقة (${profile.name}) من راوتر ميكروتك", "WARN")
             Result.success(true)
         }
     }
