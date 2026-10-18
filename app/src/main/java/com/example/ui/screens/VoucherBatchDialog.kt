@@ -191,6 +191,12 @@ fun VoucherBatchDialog(
     var selectedProfile by remember {
         mutableStateOf(profiles.firstOrNull()?.name ?: "default")
     }
+
+    androidx.compose.runtime.LaunchedEffect(profiles) {
+        if (profiles.isNotEmpty() && (selectedProfile == "default" || !profiles.any { it.name.equals(selectedProfile, ignoreCase = true) })) {
+            selectedProfile = profiles.firstOrNull()?.name ?: selectedProfile
+        }
+    }
     var price by remember { mutableStateOf(PRESET_CATEGORIES[2].priceLabel) }
     var timeLimit by remember { mutableStateOf(PRESET_CATEGORIES[2].timeLimit) }
     var dataLimitMBInput by remember { mutableStateOf(PRESET_CATEGORIES[2].dataLimitMB.toString()) }
@@ -240,7 +246,7 @@ fun VoucherBatchDialog(
         }
     }
 
-    val isProfileValid = profiles.isEmpty() || profiles.any { it.name.equals(selectedProfile, ignoreCase = true) }
+    val isProfileValid = profiles.isEmpty() || profiles.any { it.name.equals(selectedProfile, ignoreCase = true) } || selectedProfile.isNotBlank()
 
     AlertDialog(
         onDismissRequest = onDismiss,
