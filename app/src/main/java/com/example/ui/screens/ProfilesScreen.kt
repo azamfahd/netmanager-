@@ -29,9 +29,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -80,7 +77,6 @@ fun ProfilesScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var initialTemplateForAdd by remember { mutableStateOf<PackageTemplate?>(null) }
     var profileToEdit by remember { mutableStateOf<HotspotProfile?>(null) }
-    var profileToDelete by remember { mutableStateOf<HotspotProfile?>(null) }
 
     // Calculate overall statistics across all profiles from real cards
     val totalProfiles = profiles.size
@@ -243,7 +239,6 @@ fun ProfilesScreen(
                             cards = cards,
                             pricing = pricing,
                             onEditClick = { profileToEdit = profile },
-                            onDeleteClick = { profileToDelete = profile },
                             onEditPricing = { cost, sale ->
                                 viewModel.updatePackageCostAndPrice(profile.name, cost, sale)
                             }
@@ -312,31 +307,6 @@ fun ProfilesScreen(
             }
         )
     }
-
-    profileToDelete?.let { profile ->
-        AlertDialog(
-            onDismissRequest = { profileToDelete = null },
-            icon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-            title = { Text("حذف الباقة من الراوتر", fontWeight = FontWeight.Bold) },
-            text = { Text("هل أنت متأكد من رغبتك في حذف باقة (${profile.name}) نهائياً من راوتر ميكروتك؟") },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.deleteProfile(profile)
-                        profileToDelete = null
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("حذف الباقة")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { profileToDelete = null }) {
-                    Text("إلغاء")
-                }
-            }
-        )
-    }
 }
 
 @Composable
@@ -345,7 +315,6 @@ fun ProfileCardItem(
     cards: List<HotspotCard>,
     pricing: com.example.data.local.PackagePricingEntity? = null,
     onEditClick: () -> Unit,
-    onDeleteClick: (() -> Unit)? = null,
     onEditPricing: ((cost: Double, sale: Double) -> Unit)? = null
 ) {
     // Filter cards belonging to this profile
@@ -445,20 +414,6 @@ fun ProfileCardItem(
                             tint = CyberGreenPrimary,
                             modifier = Modifier.size(18.dp)
                         )
-                    }
-
-                    if (onDeleteClick != null) {
-                        IconButton(
-                            onClick = onDeleteClick,
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Delete,
-                                contentDescription = "حذف الباقة",
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
                     }
                 }
             }

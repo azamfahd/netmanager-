@@ -2165,27 +2165,24 @@ class MikrotikRepository {
 
     suspend fun generateBatch(config: BatchGenerationConfig): Result<List<HotspotCard>> {
         return withContext(Dispatchers.Default) {
-            // 1. Strict Validation with Fallback to fetched program profiles
+            // 1. Strict Validation: Profile MUST exist in router
             val profileExists = _profiles.value.isEmpty() || _profiles.value.any { it.name.equals(config.profile, ignoreCase = true) }
-            val effectiveProfile = if (_profiles.value.isNotEmpty() && (!profileExists || config.profile.equals("default", ignoreCase = true))) {
-                _profiles.value.firstOrNull()?.name ?: config.profile
-            } else {
-                config.profile
-            }
-            val finalProfileExists = _profiles.value.isEmpty() || _profiles.value.any { it.name.equals(effectiveProfile, ignoreCase = true) } || effectiveProfile.isNotBlank()
-            if (!finalProfileExists) {
+            if (!profileExists) {
                 return@withContext Result.failure(
                     Exception("الباقة المحددة (${config.profile}) غير موجودة في الراوتر! يرجى إنشاء الباقة أولاً من قسم الباقات في التطبيق أو في الراوتر قبل توليد الكروت.")
                 )
             }
+
             val generatedCards = mutableListOf<HotspotCard>()
             val existingCodes = _cards.value.map { it.name }.toMutableSet()
             val random = SecureRandom()
+
             val charPool = when (config.characterSet) {
                 CodeCharType.NUMBERS_ONLY -> "1234567890"
                 CodeCharType.LETTERS_AND_NUMBERS -> "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
                 CodeCharType.LETTERS_ONLY -> "ABCDEFGHJKLMNPQRSTUVWXYZ"
             }
+
             var attempts = 0
             while (generatedCards.size < config.count && attempts < config.count * 10) {
                 attempts++
@@ -2204,12 +2201,14 @@ class MikrotikRepository {
                         }
                         passBuilder.toString()
                     }
+
                     val limitBytes = if (config.dataLimitMB > 0) config.dataLimitMB * 1024 * 1024L else 0L
+
                     val card = HotspotCard(
                         id = "gen_${System.currentTimeMillis()}_${generatedCards.size}",
                         name = code,
                         password = password,
-                        profile = effectiveProfile,
+                        profile = config.profile,
                         uptime = "0s",
                         bytesIn = 0,
                         bytesOut = 0,
@@ -2222,11 +2221,13 @@ class MikrotikRepository {
                     generatedCards.add(card)
                 }
             }
+
             // 2. Real Router Verification & Synchronization
             val routerConfig = activeConfig
             if (routerConfig != null && !routerConfig.isDemoMode) {
                 val addedCards = mutableListOf<HotspotCard>()
                 val failureReasons = mutableListOf<String>()
+
                 withContext(Dispatchers.IO) {
                     if (isApiSocketMode) {
                         for (card in generatedCards) {
@@ -2242,6 +2243,7 @@ class MikrotikRepository {
                         val protocol = if (routerConfig.useHttps) "https" else "http"
                         val baseUrl = "$protocol://${routerConfig.ipAddress}:${routerConfig.port}"
                         val credential = Credentials.basic(routerConfig.username, routerConfig.password)
+
                         for (card in generatedCards) {
                             try {
                                 val jsonBody = JSONObject().apply {
@@ -2252,6 +2254,7 @@ class MikrotikRepository {
                                     if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal)
                                     put("comment", card.comment)
                                 }.toString()
+
                                 val putReq = Request.Builder()
                                     .url("$baseUrl/rest/ip/hotspot/user")
                                     .put(jsonBody.toRequestBody("application/json".toMediaType()))
@@ -2269,6 +2272,7 @@ class MikrotikRepository {
                             }
                         }
                     }
+
                     // Re-sync cards directly from router
                     try {
                         val freshCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
@@ -2277,42 +2281,39 @@ class MikrotikRepository {
                         }
                     } catch (_: Exception) {}
                 }
+
                 if (addedCards.isEmpty() && failureReasons.isNotEmpty()) {
                     val primaryErr = failureReasons.first()
                     return@withContext Result.failure(
                         Exception("فشل إضافة الكروت في راوتر ميكروتك: $primaryErr. يرجى التحقق من صحة الباقة وصلاحيات المستخدم.")
                     )
                 }
+
                 val currentList = _cards.value.toMutableList()
                 val newlyAdded = if (addedCards.isNotEmpty()) addedCards else generatedCards
                 currentList.addAll(0, newlyAdded)
                 _cards.value = currentList.distinctBy { it.name }
                 return@withContext Result.success(newlyAdded)
             }
+
             // Demo Mode: Add generated cards locally
             val currentList = _cards.value.toMutableList()
             currentList.addAll(0, generatedCards)
             _cards.value = currentList.distinctBy { it.name }
+
             Result.success(generatedCards)
         }
     }
 
     suspend fun addSingleCard(card: HotspotCard): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            // Strict Validation with Fallback to fetched program profiles
+            // Strict Validation: Profile MUST exist
             val profileExists = _profiles.value.isEmpty() || _profiles.value.any { it.name.equals(card.profile, ignoreCase = true) }
-            val effectiveProfile = if (_profiles.value.isNotEmpty() && (!profileExists || card.profile.equals("default", ignoreCase = true))) {
-                _profiles.value.firstOrNull()?.name ?: card.profile
-            } else {
-                card.profile
-            }
-            val finalProfileExists = _profiles.value.isEmpty() || _profiles.value.any { it.name.equals(effectiveProfile, ignoreCase = true) } || effectiveProfile.isNotBlank()
-            if (!finalProfileExists) {
+            if (!profileExists) {
                 return@withContext Result.failure(
                     Exception("الباقة المحددة (${card.profile}) غير موجودة في راوتر ميكروتك! يرجى إنشاء الباقة أولاً قبل إضافة الكرت.")
                 )
             }
-            val card = card.copy(profile = effectiveProfile)
 
             val routerConfig = activeConfig
             if (routerConfig != null && !routerConfig.isDemoMode) {
