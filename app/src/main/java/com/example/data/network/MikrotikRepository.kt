@@ -2011,68 +2011,60 @@ class MikrotikRepository {
                 }
             }
             _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
+            logAdminAction("admin", "قطع اتصال مستخدم", "تم فصل جلسة المستخدم (${user.user}) ذو العنوان (${user.address}) من راوتر ميكروتك", "WARN")
             Result.success(true)
         }
     }
 
     suspend fun deleteCard(cardId: String): Result<Boolean> {
         return withContext(Dispatchers.IO) {
+            val originalCards = _cards.value
+            val card = originalCards.find { it.id == cardId }
+            // Optimistic update: remove immediately so UI reacts instantly
+            _cards.value = originalCards.filter { it.id != cardId }
+
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
                 if (isApiSocketMode) {
-                    val socketRes = routerOsApiClient.deleteCard(cardId)
-                    if (socketRes.isSuccess) {
-                        _cards.value = _cards.value.filter { it.id != cardId }
+                    val socketRes = routerOsApiClient.deleteCard(cardId, card?.name.orEmpty())
+                    if (!socketRes.isSuccess) {
+                        _cards.value = originalCards // Rollback on failure
+                        return@withContext socketRes
                     }
-                    return@withContext socketRes
-                }
-                try {
-                    val protocol = if (config.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-                    val credential = Credentials.basic(config.username, config.password)
-                    val delRequest = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/$cardId")
-                        .delete()
-                        .header("Authorization", credential)
-                        .build()
-                    val resp = httpClient.newCall(delRequest).execute()
-                    if (resp.isSuccessful) {
-                        _cards.value = _cards.value.filter { it.id != cardId }
-                        return@withContext Result.success(true)
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val delRequest = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/$cardId")
+                            .delete()
+                            .header("Authorization", credential)
+                            .build()
+                        val resp = httpClient.newCall(delRequest).execute()
+                        if (!resp.isSuccessful) {
+                            _cards.value = originalCards // Rollback on failure
+                            val errBody = resp.body?.string().orEmpty()
+                            return@withContext Result.failure(Exception("رفض الراوتر حذف الكرت: $errBody"))
+                        }
+                    } catch (e: Exception) {
+                        _cards.value = originalCards // Rollback on failure
+                        return@withContext Result.failure(e)
                     }
-                } catch (e: Exception) {
-                    return@withContext Result.failure(e)
                 }
             }
-            _cards.value = _cards.value.filter { it.id != cardId }
+            val cardName = card?.name ?: cardId
+            logAdminAction("admin", "حذف كرت هوتسبوت", "تم حذف الكرت ($cardName) نهائياً من راوتر ميكروتك", "WARN")
             Result.success(true)
         }
     }
 
     suspend fun reactivateCard(cardId: String): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            val config = activeConfig
-            if (config != null && !config.isDemoMode) {
-                try {
-                    val protocol = if (config.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-                    val credential = Credentials.basic(config.username, config.password)
-                    val jsonBody = JSONObject().apply {
-                        put("disabled", "false")
-                        put("uptime", "0s")
-                        put("bytes-in", "0")
-                        put("bytes-out", "0")
-                    }
-                    val req = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/$cardId")
-                        .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                        .header("Authorization", credential)
-                        .build()
-                    httpClient.newCall(req).execute()
-                } catch (_: Exception) {}
-            }
-            // Update in local state
-            _cards.value = _cards.value.map {
+            val originalCards = _cards.value
+            val card = originalCards.find { it.id == cardId }
+            // Optimistic update: reset counters and enable in memory immediately
+            _cards.value = originalCards.map {
                 if (it.id == cardId) {
                     it.copy(
                         bytesIn = 0L,
@@ -2082,41 +2074,101 @@ class MikrotikRepository {
                     )
                 } else it
             }
+
+            val config = activeConfig
+            if (config != null && !config.isDemoMode) {
+                if (isApiSocketMode) {
+                    val socketRes = routerOsApiClient.reactivateCard(cardId, card?.name.orEmpty())
+                    if (!socketRes.isSuccess) {
+                        _cards.value = originalCards // Rollback on failure
+                        return@withContext socketRes
+                    }
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val jsonBody = JSONObject().apply {
+                            put("disabled", "false")
+                            put("uptime", "0s")
+                            put("bytes-in", "0")
+                            put("bytes-out", "0")
+                        }
+                        val req = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/$cardId")
+                            .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+                            .header("Authorization", credential)
+                            .build()
+                        val resp = httpClient.newCall(req).execute()
+                        if (!resp.isSuccessful) {
+                            _cards.value = originalCards // Rollback on failure
+                            val errBody = resp.body?.string().orEmpty()
+                            return@withContext Result.failure(Exception("رفض الراوتر إعادة تفعيل الكرت: $errBody"))
+                        }
+                    } catch (e: Exception) {
+                        _cards.value = originalCards // Rollback on failure
+                        return@withContext Result.failure(e)
+                    }
+                }
+            }
+            val cardName = card?.name ?: cardId
+            logAdminAction("admin", "إعادة شحن وتفعيل كرت", "تم تصفير استهلاك وإعادة شحن وتفعيل الكرت ($cardName) في الراوتر بنجاح", "SUCCESS")
             Result.success(true)
         }
     }
 
     suspend fun updateCard(updatedCard: HotspotCard): Result<Boolean> {
         return withContext(Dispatchers.IO) {
+            val originalCards = _cards.value
+            // Optimistic update
+            _cards.value = originalCards.map {
+                if (it.id == updatedCard.id || it.name == updatedCard.name) updatedCard else it
+            }
+
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
-                try {
-                    val protocol = if (config.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-                    val credential = Credentials.basic(config.username, config.password)
-                    val jsonBody = JSONObject().apply {
-                        put("name", updatedCard.name)
-                        put("password", updatedCard.password)
-                        put("profile", updatedCard.profile)
-                        put("comment", updatedCard.comment)
-                        if (updatedCard.limitUptime.isNotBlank()) {
-                            put("limit-uptime", updatedCard.limitUptime)
-                        }
-                        if (updatedCard.limitBytesTotal > 0) {
-                            put("limit-bytes-total", updatedCard.limitBytesTotal.toString())
-                        }
+                if (isApiSocketMode) {
+                    val socketRes = routerOsApiClient.updateCard(updatedCard)
+                    if (!socketRes.isSuccess) {
+                        _cards.value = originalCards // Rollback on failure
+                        return@withContext socketRes
                     }
-                    val req = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/${updatedCard.id}")
-                        .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                        .header("Authorization", credential)
-                        .build()
-                    httpClient.newCall(req).execute()
-                } catch (_: Exception) {}
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val jsonBody = JSONObject().apply {
+                            put("name", updatedCard.name)
+                            put("password", updatedCard.password)
+                            put("profile", updatedCard.profile)
+                            put("comment", updatedCard.comment)
+                            if (updatedCard.limitUptime.isNotBlank()) {
+                                put("limit-uptime", updatedCard.limitUptime)
+                            }
+                            if (updatedCard.limitBytesTotal > 0) {
+                                put("limit-bytes-total", updatedCard.limitBytesTotal.toString())
+                            }
+                            put("disabled", if (updatedCard.disabled) "yes" else "no")
+                        }
+                        val req = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/${updatedCard.id}")
+                            .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+                            .header("Authorization", credential)
+                            .build()
+                        val resp = httpClient.newCall(req).execute()
+                        if (!resp.isSuccessful) {
+                            _cards.value = originalCards // Rollback on failure
+                            val errBody = resp.body?.string().orEmpty()
+                            return@withContext Result.failure(Exception("رفض الراوتر تعديل بيانات الكرت: $errBody"))
+                        }
+                    } catch (e: Exception) {
+                        _cards.value = originalCards // Rollback on failure
+                        return@withContext Result.failure(e)
+                    }
+                }
             }
-            _cards.value = _cards.value.map {
-                if (it.id == updatedCard.id) updatedCard else it
-            }
+            logAdminAction("admin", "تعديل بيانات كرت", "تم تعديل بيانات الكرت (${updatedCard.name}) - باقة: ${updatedCard.profile} - مهلة: ${updatedCard.limitUptime}", "INFO")
             Result.success(true)
         }
     }
@@ -2124,41 +2176,48 @@ class MikrotikRepository {
     suspend fun toggleCardDisabled(cardId: String, currentDisabled: Boolean): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             val newStatus = !currentDisabled
+            val originalCards = _cards.value
+            val card = originalCards.find { it.id == cardId }
+            // Optimistic update: flip toggle immediately
+            _cards.value = originalCards.map {
+                if (it.id == cardId) it.copy(disabled = newStatus) else it
+            }
+
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
                 if (isApiSocketMode) {
-                    val socketRes = routerOsApiClient.toggleCardDisabled(cardId, currentDisabled)
-                    if (socketRes.isSuccess) {
-                        _cards.value = _cards.value.map {
-                            if (it.id == cardId) it.copy(disabled = newStatus) else it
-                        }
+                    val socketRes = routerOsApiClient.toggleCardDisabled(cardId, card?.name.orEmpty(), currentDisabled)
+                    if (!socketRes.isSuccess) {
+                        _cards.value = originalCards // Rollback on failure
+                        return@withContext socketRes
                     }
-                    return@withContext socketRes
-                }
-                try {
-                    val protocol = if (config.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-                    val credential = Credentials.basic(config.username, config.password)
-                    val jsonBody = JSONObject().put("disabled", if (newStatus) "yes" else "no").toString()
-                    val patchRequest = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/$cardId")
-                        .patch(jsonBody.toRequestBody("application/json".toMediaType()))
-                        .header("Authorization", credential)
-                        .build()
-                    val resp = httpClient.newCall(patchRequest).execute()
-                    if (resp.isSuccessful) {
-                        _cards.value = _cards.value.map {
-                            if (it.id == cardId) it.copy(disabled = newStatus) else it
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val jsonBody = JSONObject().put("disabled", if (newStatus) "yes" else "no").toString()
+                        val patchRequest = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/$cardId")
+                            .patch(jsonBody.toRequestBody("application/json".toMediaType()))
+                            .header("Authorization", credential)
+                            .build()
+                        val resp = httpClient.newCall(patchRequest).execute()
+                        if (!resp.isSuccessful) {
+                            _cards.value = originalCards // Rollback on failure
+                            val errBody = resp.body?.string().orEmpty()
+                            return@withContext Result.failure(Exception("رفض الراوتر تغيير حالة الكرت: $errBody"))
                         }
-                        return@withContext Result.success(true)
+                    } catch (e: Exception) {
+                        _cards.value = originalCards // Rollback on failure
+                        return@withContext Result.failure(e)
                     }
-                } catch (e: Exception) {
-                    return@withContext Result.failure(e)
                 }
             }
-            _cards.value = _cards.value.map {
-                if (it.id == cardId) it.copy(disabled = newStatus) else it
-            }
+            val cardName = card?.name ?: cardId
+            val actionType = if (newStatus) "تعطيل كرت" else "تفعيل كرت"
+            val actionDesc = if (newStatus) "تم تعطيل وإيقاف الكرت ($cardName) في سيرفر الميكروتك" else "تم تفعيل وتشغيل الكرت ($cardName) في سيرفر الميكروتك بنجاح"
+            logAdminAction("admin", actionType, actionDesc, if (newStatus) "WARN" else "SUCCESS")
             Result.success(true)
         }
     }
@@ -2293,6 +2352,7 @@ class MikrotikRepository {
                 val newlyAdded = if (addedCards.isNotEmpty()) addedCards else generatedCards
                 currentList.addAll(0, newlyAdded)
                 _cards.value = currentList.distinctBy { it.name }
+                logAdminAction("admin", "توليد دفعة كروت", "تم توليد وحفظ (${newlyAdded.size} كرت) باقة (${config.profile}) بسعر (${config.price}) في سيرفر الميكروتك بنجاح", "SUCCESS")
                 return@withContext Result.success(newlyAdded)
             }
 
@@ -2300,6 +2360,7 @@ class MikrotikRepository {
             val currentList = _cards.value.toMutableList()
             currentList.addAll(0, generatedCards)
             _cards.value = currentList.distinctBy { it.name }
+            logAdminAction("admin", "توليد دفعة كروت", "تم توليد (${generatedCards.size} كرت) باقة (${config.profile}) محلياً", "SUCCESS")
 
             Result.success(generatedCards)
         }
@@ -2364,16 +2425,20 @@ class MikrotikRepository {
             val currentList = _cards.value.toMutableList()
             currentList.add(0, card)
             _cards.value = currentList.distinctBy { it.name }
+            logAdminAction("admin", "توليد كرت فردي", "تمت إضافة وتفعيل الكرت الفردي (${card.name}) باقة (${card.profile}) سعر (${card.price}) في الراوتر", "SUCCESS")
             Result.success(true)
         }
     }
 
     suspend fun createProfile(profile: HotspotProfile): Result<Boolean> {
-        val config = activeConfig
-        if (config != null && !config.isDemoMode) {
-            withContext(Dispatchers.IO) {
+        return withContext(Dispatchers.IO) {
+            val config = activeConfig
+            if (config != null && !config.isDemoMode) {
                 if (isApiSocketMode) {
-                    routerOsApiClient.addProfile(profile)
+                    val res = routerOsApiClient.addProfile(profile)
+                    if (!res.isSuccess) {
+                        return@withContext res
+                    }
                 } else {
                     try {
                         val protocol = if (config.useHttps) "https" else "http"
@@ -2392,23 +2457,33 @@ class MikrotikRepository {
                             .put(jsonBody.toRequestBody("application/json".toMediaType()))
                             .header("Authorization", credential)
                             .build()
-                        httpClient.newCall(putReq).execute()
-                    } catch (_: Exception) {}
+                        val resp = httpClient.newCall(putReq).execute()
+                        if (!resp.isSuccessful) {
+                            val errBody = resp.body?.string().orEmpty()
+                            return@withContext Result.failure(Exception("استجاب الراوتر برفض إنشاء الباقة: $errBody"))
+                        }
+                    } catch (e: Exception) {
+                        return@withContext Result.failure(e)
+                    }
                 }
             }
+            val current = _profiles.value.toMutableList()
+            current.add(profile)
+            _profiles.value = current.distinctBy { it.name }
+            logAdminAction("admin", "إنشاء باقة هوتسبوت", "تم إنشاء باقة (${profile.name}) بسرعة: ${profile.rateLimit} وسعر: ${profile.price} في سيرفر الميكروتك بنجاح", "SUCCESS")
+            Result.success(true)
         }
-        val current = _profiles.value.toMutableList()
-        current.add(profile)
-        _profiles.value = current
-        return Result.success(true)
     }
 
     suspend fun updateProfile(profile: HotspotProfile): Result<Boolean> {
-        val config = activeConfig
-        if (config != null && !config.isDemoMode) {
-            withContext(Dispatchers.IO) {
+        return withContext(Dispatchers.IO) {
+            val config = activeConfig
+            if (config != null && !config.isDemoMode) {
                 if (isApiSocketMode) {
-                    routerOsApiClient.updateProfile(profile)
+                    val res = routerOsApiClient.updateProfile(profile)
+                    if (!res.isSuccess) {
+                        return@withContext res
+                    }
                 } else {
                     try {
                         val protocol = if (config.useHttps) "https" else "http"
@@ -2426,15 +2501,57 @@ class MikrotikRepository {
                             .patch(jsonBody.toRequestBody("application/json".toMediaType()))
                             .header("Authorization", credential)
                             .build()
-                        httpClient.newCall(patchReq).execute()
-                    } catch (_: Exception) {}
+                        val resp = httpClient.newCall(patchReq).execute()
+                        if (!resp.isSuccessful) {
+                            val errBody = resp.body?.string().orEmpty()
+                            return@withContext Result.failure(Exception("استجاب الراوتر برفض تعديل الباقة: $errBody"))
+                        }
+                    } catch (e: Exception) {
+                        return@withContext Result.failure(e)
+                    }
                 }
             }
+            _profiles.value = _profiles.value.map {
+                if (it.id == profile.id || it.name == profile.name) profile else it
+            }
+            logAdminAction("admin", "تعديل باقة هوتسبوت", "تم تحديث إعدادات باقة (${profile.name}) - سرعة: ${profile.rateLimit} - سعر: ${profile.price}", "INFO")
+            Result.success(true)
         }
-        _profiles.value = _profiles.value.map {
-            if (it.id == profile.id || it.name == profile.name) profile else it
+    }
+
+    suspend fun deleteProfile(profile: HotspotProfile): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            val config = activeConfig
+            if (config != null && !config.isDemoMode) {
+                if (isApiSocketMode) {
+                    val res = routerOsApiClient.deleteProfile(profile.id, profile.name)
+                    if (!res.isSuccess) {
+                        return@withContext res
+                    }
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val delReq = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/profile/${profile.id}")
+                            .delete()
+                            .header("Authorization", credential)
+                            .build()
+                        val resp = httpClient.newCall(delReq).execute()
+                        if (!resp.isSuccessful) {
+                            val errBody = resp.body?.string().orEmpty()
+                            return@withContext Result.failure(Exception("رفض الراوتر حذف الباقة: $errBody"))
+                        }
+                    } catch (e: Exception) {
+                        return@withContext Result.failure(e)
+                    }
+                }
+            }
+            _profiles.value = _profiles.value.filter { it.name != profile.name }
+            logAdminAction("admin", "حذف باقة هوتسبوت", "تم حذف باقة (${profile.name}) من راوتر ميكروتك", "WARN")
+            Result.success(true)
         }
-        return Result.success(true)
     }
 
     suspend fun addNetworkNode(node: com.example.data.model.NetworkNode): Result<Boolean> {

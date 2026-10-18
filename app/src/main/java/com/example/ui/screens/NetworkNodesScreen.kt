@@ -276,7 +276,7 @@ fun NetworkNodesScreen(
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     val tabs = listOf(
-                        Triple(0, "🕸️ رسم شبكي عنكبوتي", Icons.Default.Dns),
+                        Triple(0, "🌐 المخطط السيبراني", Icons.Default.Dns),
                         Triple(1, "📋 قائمة النقاط", Icons.Default.CellTower),
                         Triple(2, "⚡ إحصائيات الضغط", Icons.Default.Speed)
                     )
@@ -426,7 +426,7 @@ fun NetworkNodesScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "🕸️ خريطة التوزيع العنكبوتية (${displayedNodes.size} نقطة)",
+                                        text = "🌐 خريطة وتخطيط الشبكة السيبرانية (${displayedNodes.size} نقطة)",
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface

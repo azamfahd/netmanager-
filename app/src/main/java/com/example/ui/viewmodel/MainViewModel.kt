@@ -23,6 +23,7 @@ import com.example.data.model.RouterConnectionConfig
 import com.example.data.model.RouterResource
 import com.example.data.network.MikrotikRepository
 import com.example.data.network.NetworkUtils
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -529,6 +530,53 @@ class MainViewModel(
                 }
             }
         }
+        viewModelScope.launch(Dispatchers.IO) {
+            cards.collectLatest { cardList ->
+                if (cardList.isNotEmpty()) {
+                    try {
+                        val usedOrExpired = cardList.filter {
+                            it.isExpired || (it.bytesIn + it.bytesOut > 0) || (it.uptime.isNotBlank() && it.uptime != "0s")
+                        }
+                        if (usedOrExpired.isNotEmpty()) {
+                            val entities = usedOrExpired.map { card ->
+                                val total = card.bytesIn + card.bytesOut
+                                val reason = when {
+                                    card.limitBytesTotal > 0 && total >= card.limitBytesTotal -> "استنفاد حجم البيانات (${card.limitBytesTotal / (1024 * 1024)} MB)"
+                                    card.limitUptime.isNotBlank() && card.uptime == card.limitUptime -> "انتهاء الوقت المحدد (${card.limitUptime})"
+                                    card.disabled -> "تم تعطيل الكرت من الإدارة"
+                                    card.isExpired -> "انتهاء رصيد الكرت"
+                                    else -> "كرت مستخدم"
+                                }
+                                com.example.data.local.SessionArchiveEntity(
+                                    sessionId = "card_${card.id}_${card.name}",
+                                    username = card.name,
+                                    ipAddress = "192.168.88.x",
+                                    macAddress = "",
+                                    isOnline = !card.isExpired && !card.disabled,
+                                    loginTime = if (card.uptime != "0s") "جلسة سابقة" else "غير متصل",
+                                    logoutTime = if (card.isExpired) "انتهت الجلسة" else "نشط",
+                                    duration = card.uptime,
+                                    bytesIn = card.bytesIn,
+                                    bytesOut = card.bytesOut,
+                                    totalBytes = total,
+                                    terminateReason = reason,
+                                    profile = card.profile,
+                                    price = card.price,
+                                    nodeName = "MikroTik Hotspot",
+                                    deviceModel = "مستخدم هوتسبوت",
+                                    deviceBrand = "MikroTik",
+                                    deviceCategory = "SMART_DEVICE",
+                                    packageLimitBytes = card.limitBytesTotal,
+                                    isQuotaExhausted = card.isExpired,
+                                    timestamp = System.currentTimeMillis()
+                                )
+                            }
+                            database.appDao().insertOrUpdateSessions(entities)
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        }
         viewModelScope.launch {
             seedInitialPosDataIfEmpty()
         }
@@ -864,110 +912,120 @@ class MainViewModel(
     }
 
     fun kickUser(user: HotspotActiveUser) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val result = repository.kickUser(user)
             if (result.isSuccess) {
-                _toastEvent.emit("تم قطع اتصال المستخدم: ${user.user}")
+                _toastEvent.emit("تم قطع اتصال المستخدم: ${user.user} بنجاح من الراوتر")
             } else {
-                _toastEvent.emit("تعذر قطع اتصال المستخدم: ${result.exceptionOrNull()?.message}")
+                _toastEvent.emit("تعذر قطع اتصال المستخدم: ${result.exceptionOrNull()?.message ?: "رفض الراوتر العملية"}")
             }
         }
     }
 
+    private val _isGeneratingBatch = MutableStateFlow(false)
+    val isGeneratingBatch: StateFlow<Boolean> = _isGeneratingBatch.asStateFlow()
+
     fun deleteCard(cardId: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val result = repository.deleteCard(cardId)
             if (result.isSuccess) {
-                _toastEvent.emit("تم حذف الكرت بنجاح")
+                _toastEvent.emit("تم حذف الكرت بنجاح من راوتر ميكروتك وقاعدة البيانات")
             } else {
-                _toastEvent.emit("فشل حذف الكرت")
+                _toastEvent.emit("فشل حذف الكرت: ${result.exceptionOrNull()?.message ?: "خطأ غير معروف"}")
             }
         }
     }
 
     fun reactivateCard(card: HotspotCard) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val result = repository.reactivateCard(card.id)
             if (result.isSuccess) {
-                _toastEvent.emit("تمت إعادة تفعيل وتصفير عدادات الكرت (${card.name}) بنجاح!")
+                _toastEvent.emit("تمت إعادة تفعيل وتصفير عدادات الكرت (${card.name}) في الراوتر بنجاح!")
             } else {
-                _toastEvent.emit("فشلت إعادة تفعيل الكرت: ${result.exceptionOrNull()?.message}")
+                _toastEvent.emit("فشلت إعادة تفعيل الكرت: ${result.exceptionOrNull()?.message ?: "خطأ غير معروف"}")
             }
         }
     }
 
     fun updateCard(updatedCard: HotspotCard) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val result = repository.updateCard(updatedCard)
             if (result.isSuccess) {
-                _toastEvent.emit("تم تحديث بيانات الكرت (${updatedCard.name}) بنجاح")
+                _toastEvent.emit("تم تحديث بيانات الكرت (${updatedCard.name}) في راوتر ميكروتك بنجاح")
             } else {
-                _toastEvent.emit("فشل تحديث الكرت")
+                _toastEvent.emit("فشل تحديث بيانات الكرت: ${result.exceptionOrNull()?.message ?: "خطأ غير معروف"}")
             }
         }
     }
 
     fun toggleCardDisabled(cardId: String, currentDisabled: Boolean) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val result = repository.toggleCardDisabled(cardId, currentDisabled)
             if (result.isSuccess) {
-                _toastEvent.emit(if (!currentDisabled) "تم إيقاف الكرت" else "تم تفعيل الكرت")
+                _toastEvent.emit(if (!currentDisabled) "تم إيقاف الكرت في الراوتر" else "تم تفعيل الكرت في الراوتر")
+            } else {
+                _toastEvent.emit("فشل تغيير حالة الكرت: ${result.exceptionOrNull()?.message ?: "رفض الراوتر العملية"}")
             }
         }
     }
 
     fun generateBatch(config: BatchGenerationConfig) {
-        viewModelScope.launch {
-            val result = repository.generateBatch(config)
-            if (result.isSuccess) {
-                val cards = result.getOrNull().orEmpty()
-                _toastEvent.emit("تم توليد ${cards.size} كرت بنجاح!")
-                // Save batch history
-                val jsonArr = JSONArray()
-                cards.take(10).forEach { jsonArr.put(it.name) }
-                val batchId = "batch_${System.currentTimeMillis()}"
-                database.appDao().insertBatch(
-                    BatchHistoryEntity(
-                        batchId = batchId,
-                        name = config.batchComment.ifBlank { "دفعة ${cards.size} كروت" },
-                        profileName = config.profile,
-                        cardCount = cards.size,
-                        price = config.price,
-                        createdAt = System.currentTimeMillis(),
-                        cardsJson = jsonArr.toString()
-                    )
-                )
-
-                // If assigned to a POS Agent, save assignments
-                if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
-                    val priceNum = config.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
-                    val assignments = cards.map { card ->
-                        PosCardAssignmentEntity(
-                            agentId = config.posAgentId,
-                            agentName = config.posAgentName,
-                            cardName = card.name,
+        viewModelScope.launch(Dispatchers.IO) {
+            _isGeneratingBatch.value = true
+            try {
+                val result = repository.generateBatch(config)
+                if (result.isSuccess) {
+                    val cards = result.getOrNull().orEmpty()
+                    _toastEvent.emit("تم توليد ${cards.size} كرت وحفظها في راوتر ميكروتك بنجاح!")
+                    // Save batch history
+                    val jsonArr = JSONArray()
+                    cards.take(10).forEach { jsonArr.put(it.name) }
+                    val batchId = "batch_${System.currentTimeMillis()}"
+                    database.appDao().insertBatch(
+                        BatchHistoryEntity(
                             batchId = batchId,
+                            name = config.batchComment.ifBlank { "دفعة ${cards.size} كروت" },
                             profileName = config.profile,
-                            priceAmount = priceNum,
-                            discountPercent = config.discountPercent,
-                            assignedAt = System.currentTimeMillis(),
-                            isSold = false
+                            cardCount = cards.size,
+                            price = config.price,
+                            createdAt = System.currentTimeMillis(),
+                            cardsJson = jsonArr.toString()
                         )
-                    }
-                    database.appDao().insertCardAssignments(assignments)
-                    _toastEvent.emit("تم تخصيص وتسليم ${cards.size} كرت لنقطة (${config.posAgentName}) بنجاح!")
-                }
+                    )
 
-                // Set printable cards for instant preview
-                _printableCards.value = cards
-            } else {
-                _toastEvent.emit("فشل توليد الكروت: ${result.exceptionOrNull()?.message}")
+                    // If assigned to a POS Agent, save assignments
+                    if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
+                        val priceNum = config.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                        val assignments = cards.map { card ->
+                            PosCardAssignmentEntity(
+                                agentId = config.posAgentId,
+                                agentName = config.posAgentName,
+                                cardName = card.name,
+                                batchId = batchId,
+                                profileName = config.profile,
+                                priceAmount = priceNum,
+                                discountPercent = config.discountPercent,
+                                assignedAt = System.currentTimeMillis(),
+                                isSold = false
+                            )
+                        }
+                        database.appDao().insertCardAssignments(assignments)
+                        _toastEvent.emit("تم تخصيص وتسليم ${cards.size} كرت لنقطة (${config.posAgentName}) بنجاح!")
+                    }
+
+                    // Set printable cards for instant preview
+                    _printableCards.value = cards
+                } else {
+                    _toastEvent.emit("فشل توليد الكروت: ${result.exceptionOrNull()?.message}")
+                }
+            } finally {
+                _isGeneratingBatch.value = false
             }
         }
     }
 
     fun addSingleCard(card: HotspotCard, posAgentId: Long = 0L, posAgentName: String = "", discountPercent: Double = 0.0) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val result = repository.addSingleCard(card)
             if (result.isSuccess) {
                 if (posAgentId > 0L && posAgentName.isNotBlank()) {
@@ -984,9 +1042,9 @@ class MainViewModel(
                         isSold = false
                     )
                     database.appDao().insertCardAssignments(listOf(assignment))
-                    _toastEvent.emit("تمت إضافة الكرت (${card.name}) وتخصيصه لنقطة ($posAgentName) في الراوتر وقاعدة البيانات!")
+                    _toastEvent.emit("تمت إضافة الكرت (${card.name}) وتخصيصه لنقطة ($posAgentName) في الراوتر بنجاح!")
                 } else {
-                    _toastEvent.emit("تمت إضافة وتفعيل الكرت (${card.name}) في الراوتر بنجاح!")
+                    _toastEvent.emit("تمت إضافة وتفعيل الكرت (${card.name}) في راوتر ميكروتك بنجاح!")
                 }
             } else {
                 _toastEvent.emit("فشل إضافة الكرت: ${result.exceptionOrNull()?.message}")
@@ -1069,16 +1127,35 @@ class MainViewModel(
     }
 
     fun createProfile(profile: HotspotProfile) {
-        viewModelScope.launch {
-            repository.createProfile(profile)
-            _toastEvent.emit("تم إنشاء باقة: ${profile.name}")
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.createProfile(profile)
+            if (res.isSuccess) {
+                _toastEvent.emit("تم إنشاء باقة: ${profile.name} في راوتر ميكروتك بنجاح")
+            } else {
+                _toastEvent.emit("فشل إنشاء الباقة: ${res.exceptionOrNull()?.message ?: "رفض الراوتر العملية"}")
+            }
         }
     }
 
     fun updateProfile(profile: HotspotProfile) {
-        viewModelScope.launch {
-            repository.updateProfile(profile)
-            _toastEvent.emit("تم حفظ وتحديث باقة: ${profile.name}")
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.updateProfile(profile)
+            if (res.isSuccess) {
+                _toastEvent.emit("تم حفظ وتحديث باقة: ${profile.name} في راوتر ميكروتك بنجاح")
+            } else {
+                _toastEvent.emit("فشل تحديث الباقة: ${res.exceptionOrNull()?.message ?: "رفض الراوتر العملية"}")
+            }
+        }
+    }
+
+    fun deleteProfile(profile: HotspotProfile) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.deleteProfile(profile)
+            if (res.isSuccess) {
+                _toastEvent.emit("تم حذف الباقة (${profile.name}) من راوتر ميكروتك بنجاح")
+            } else {
+                _toastEvent.emit("فشل حذف الباقة: ${res.exceptionOrNull()?.message ?: "رفض الراوتر العملية"}")
+            }
         }
     }
 
