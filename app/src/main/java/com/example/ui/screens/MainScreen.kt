@@ -358,6 +358,9 @@ fun MainScreen(
                         showBatchGeneratorDialog = true
                     },
                     onOpenPrintScreen = { isShowingPrintScreen = true },
+                    onOpenSessionDetail = { session ->
+                        selectedSessionForDetailScreen = session
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }

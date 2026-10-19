@@ -479,6 +479,8 @@ class MainViewModel(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private var previousActiveUsernames = emptySet<String>()
+
     init {
         viewModelScope.launch {
             cards.collectLatest { cardList ->
@@ -487,12 +489,38 @@ class MainViewModel(
         }
         viewModelScope.launch {
             activeUsers.collectLatest { activeList ->
+                val now = System.currentTimeMillis()
                 if (activeList.isNotEmpty()) {
-                    val now = System.currentTimeMillis()
                     activeList.forEach { user ->
                         database.appDao().markCardAsSold(user.user, now)
                     }
                 }
+
+                // Detect users who disconnected since last check to archive their logout and reason
+                val currentNames = activeList.map { it.user }.toSet()
+                if (previousActiveUsernames.isNotEmpty()) {
+                    val disconnectedNames = previousActiveUsernames - currentNames
+                    if (disconnectedNames.isNotEmpty()) {
+                        val nowFormatted = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm", java.util.Locale("ar", "SA")).format(java.util.Date(now))
+                        val currentCards = cards.value
+                        disconnectedNames.forEach { discoName ->
+                            val matchingCard = currentCards.firstOrNull { it.name == discoName }
+                            val isQuotaOver = matchingCard != null && matchingCard.limitBytesTotal > 0L && (matchingCard.bytesIn + matchingCard.bytesOut) >= matchingCard.limitBytesTotal
+                            val isTimeOver = matchingCard != null && matchingCard.limitUptime.isNotBlank() && matchingCard.uptime == matchingCard.limitUptime
+                            val reason = when {
+                                isQuotaOver -> "انتهى الرصيد (استنفاد حجم البيانات المقررة)"
+                                isTimeOver -> "انتهت الصلاحية (انقضاء وقت الكرت: ${matchingCard.limitUptime})"
+                                matchingCard?.disabled == true -> "تم إيقاف الكرت من قبل الإدارة"
+                                else -> "انفصال الجلسة / خروج المستخدم"
+                            }
+                            try {
+                                val targetSessionId = "sess_active_$discoName"
+                                database.appDao().markSessionOffline(targetSessionId, nowFormatted, reason, isQuotaOver)
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+                previousActiveUsernames = currentNames
             }
         }
         viewModelScope.launch {
@@ -650,6 +678,144 @@ class MainViewModel(
 
     fun updateSessionFilter(filter: String) {
         _sessionFilter.value = filter
+    }
+
+    val networkConsumptionReport: StateFlow<com.example.data.model.NetworkConsumptionReport> = combine(
+        allArchivedUserSessions,
+        cards,
+        _selectedTimeFilter
+    ) { sessions, cardList, timeFilter ->
+        var totalDown = 0L
+        var totalUp = 0L
+        var totalAllBytes = 0L
+
+        sessions.forEach { s ->
+            totalDown += s.bytesOut
+            totalUp += s.bytesIn
+            totalAllBytes += s.totalBytes
+        }
+
+        // Add cards that had historical data usage not in session list
+        val sessionUsernames = sessions.map { it.username }.toSet()
+        cardList.forEach { card ->
+            if (!sessionUsernames.contains(card.name)) {
+                totalDown += card.bytesOut
+                totalUp += card.bytesIn
+                totalAllBytes += (card.bytesIn + card.bytesOut)
+            }
+        }
+
+        val activeCount = sessions.count { it.isOnline }
+        val offlineCount = sessions.count { !it.isOnline }
+
+        // Expired Cards tracking
+        val expiredSummaries = mutableListOf<com.example.data.model.ExpiredCardSummary>()
+        cardList.forEach { card ->
+            val isUsed = card.uptime != "0s" || card.bytesIn > 0 || card.bytesOut > 0
+            val packageLimit = card.limitBytesTotal
+            val isQuotaDepleted = packageLimit > 0L && (card.bytesIn + card.bytesOut) >= packageLimit
+            val isTimeOver = card.limitUptime.isNotBlank() && card.uptime.isNotBlank() && card.uptime == card.limitUptime
+            val isExplicitExpired = card.comment.contains("expired", ignoreCase = true) || card.comment.contains("منتهي", ignoreCase = true) || card.isExpired
+
+            if (isQuotaDepleted || isTimeOver || isExplicitExpired || (card.disabled && isUsed)) {
+                val reason = when {
+                    isQuotaDepleted -> "انتهى الرصيد (استنفاد حصة الميجابايت)"
+                    isTimeOver -> "انتهت الصلاحية (انقضاء وقت الكرت: ${card.limitUptime})"
+                    card.disabled -> "كرت متوقف / معطل من الإدارة"
+                    else -> "كرت منتهي الصلاحية"
+                }
+                expiredSummaries.add(
+                    com.example.data.model.ExpiredCardSummary(
+                        cardId = card.id,
+                        cardName = card.name,
+                        profile = card.profile,
+                        price = card.price.ifBlank { "غير محدد" },
+                        uptime = card.uptime,
+                        limitUptime = card.limitUptime.ifBlank { "غير محدد" },
+                        totalBytes = card.bytesIn + card.bytesOut,
+                        limitBytes = packageLimit,
+                        expiredReason = reason,
+                        isQuotaExhausted = isQuotaDepleted,
+                        isTimeExpired = isTimeOver,
+                        lastSeenDate = if (card.uptime != "0s") "تم استهلاك ${card.uptime}" else "كرت منتهي"
+                    )
+                )
+            }
+        }
+
+        val quotaExhaustedTotal = expiredSummaries.count { it.isQuotaExhausted }
+        val timeExpiredTotal = expiredSummaries.count { it.isTimeExpired }
+
+        // Group by packages
+        val packageMap = mutableMapOf<String, Long>()
+        val packageCountMap = mutableMapOf<String, Int>()
+        sessions.forEach { s ->
+            val prof = s.profile.ifBlank { "افتراضي" }
+            packageMap[prof] = (packageMap[prof] ?: 0L) + s.totalBytes
+            packageCountMap[prof] = (packageCountMap[prof] ?: 0) + 1
+        }
+        cardList.forEach { c ->
+            val prof = c.profile.ifBlank { "افتراضي" }
+            packageMap[prof] = (packageMap[prof] ?: 0L) + (c.bytesIn + c.bytesOut)
+        }
+
+        val topPackages = packageMap.entries.map { (name, bytes) ->
+            val pct = if (totalAllBytes > 0) (bytes.toFloat() / totalAllBytes.toFloat()) * 100f else 0f
+            com.example.data.model.PackageConsumptionSummary(
+                profileName = name,
+                totalBytes = bytes,
+                sessionsCount = packageCountMap[name] ?: 1,
+                percentageOfTotal = pct
+            )
+        }.sortedByDescending { it.totalBytes }
+
+        // Top devices
+        val topDevices = sessions
+            .filter { it.totalBytes > 0 }
+            .sortedByDescending { it.totalBytes }
+            .take(10)
+            .map {
+                com.example.data.model.DeviceConsumptionSummary(
+                    deviceBrand = it.deviceInfo.brand,
+                    deviceModel = it.deviceInfo.modelName,
+                    macAddress = it.macAddress,
+                    username = it.username,
+                    totalBytes = it.totalBytes
+                )
+            }
+
+        val avgBytes = if (sessions.isNotEmpty()) totalAllBytes / sessions.size else 0L
+
+        com.example.data.model.NetworkConsumptionReport(
+            totalDownloadBytes = totalDown,
+            totalUploadBytes = totalUp,
+            totalBytes = totalAllBytes,
+            totalSessionsCount = sessions.size,
+            activeSessionsCount = activeCount,
+            offlineSessionsCount = offlineCount,
+            expiredCardsCount = expiredSummaries.size,
+            quotaExhaustedCount = quotaExhaustedTotal,
+            timeExpiredCount = timeExpiredTotal,
+            averageBytesPerUser = avgBytes,
+            topPackagesByConsumption = topPackages,
+            topDevicesByConsumption = topDevices,
+            expiredCardsList = expiredSummaries,
+            selectedTimeFilter = timeFilter
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.NetworkConsumptionReport())
+
+    fun clearSessionArchive() {
+        viewModelScope.launch {
+            database.appDao().clearSessionArchive()
+            _toastEvent.emit("تم إفراغ أرشيف الجلسات السابقة بنجاح")
+        }
+    }
+
+    fun reactivateCardFromReport(cardId: String) {
+        val target = cards.value.firstOrNull { it.id == cardId || it.name == cardId }
+        if (target != null) {
+            reactivateCard(target)
+        }
     }
 
     // Nodes Search, Sorting & Filtering
@@ -887,7 +1053,7 @@ class MainViewModel(
 
     fun reactivateCard(card: HotspotCard) {
         viewModelScope.launch {
-            val result = repository.reactivateCard(card.id)
+            val result = repository.reactivateCard(card)
             if (result.isSuccess) {
                 _toastEvent.emit("تمت إعادة تفعيل وتصفير عدادات الكرت (${card.name}) بنجاح!")
             } else {
@@ -1079,6 +1245,13 @@ class MainViewModel(
         viewModelScope.launch {
             repository.updateProfile(profile)
             _toastEvent.emit("تم حفظ وتحديث باقة: ${profile.name}")
+        }
+    }
+
+    fun deleteProfile(profile: HotspotProfile) {
+        viewModelScope.launch {
+            repository.deleteProfile(profile)
+            _toastEvent.emit("تم حذف باقة: ${profile.name}")
         }
     }
 

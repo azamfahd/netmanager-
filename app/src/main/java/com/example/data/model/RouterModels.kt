@@ -545,7 +545,49 @@ data class MonthlySalesSummary(
     val isCurrentMonth: Boolean = false
 )
 
+data class NetworkConsumptionReport(
+    val totalDownloadBytes: Long = 0L,
+    val totalUploadBytes: Long = 0L,
+    val totalBytes: Long = 0L,
+    val totalSessionsCount: Int = 0,
+    val activeSessionsCount: Int = 0,
+    val offlineSessionsCount: Int = 0,
+    val expiredCardsCount: Int = 0,
+    val quotaExhaustedCount: Int = 0,
+    val timeExpiredCount: Int = 0,
+    val averageBytesPerUser: Long = 0L,
+    val topPackagesByConsumption: List<PackageConsumptionSummary> = emptyList(),
+    val topDevicesByConsumption: List<DeviceConsumptionSummary> = emptyList(),
+    val expiredCardsList: List<ExpiredCardSummary> = emptyList(),
+    val selectedTimeFilter: TimeFilterRange = TimeFilterRange.ALL
+)
 
+data class PackageConsumptionSummary(
+    val profileName: String,
+    val totalBytes: Long,
+    val sessionsCount: Int,
+    val percentageOfTotal: Float
+)
 
+data class DeviceConsumptionSummary(
+    val deviceBrand: String,
+    val deviceModel: String,
+    val macAddress: String,
+    val username: String,
+    val totalBytes: Long
+)
 
-
+data class ExpiredCardSummary(
+    val cardId: String,
+    val cardName: String,
+    val profile: String,
+    val price: String,
+    val uptime: String,
+    val limitUptime: String,
+    val totalBytes: Long,
+    val limitBytes: Long,
+    val expiredReason: String,
+    val isQuotaExhausted: Boolean,
+    val isTimeExpired: Boolean,
+    val lastSeenDate: String = "سجل الأرشيف"
+)

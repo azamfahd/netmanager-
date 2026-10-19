@@ -31,6 +31,10 @@ class RouterOsApiClient {
     private var lastUsername: String = ""
     private var lastPassword: String = ""
 
+    private val cachedProfiles = mutableListOf<HotspotProfile>()
+
+    fun getCachedProfiles(): List<HotspotProfile> = synchronized(cachedProfiles) { cachedProfiles.toList() }
+
     suspend fun ensureConnected(): Boolean {
         if (socket != null && socket?.isClosed == false && socket?.isConnected == true) {
             return true
@@ -299,7 +303,7 @@ class RouterOsApiClient {
                                     downloadLimit = "",
                                     validity = validity,
                                     dataLimit = "",
-                                    source = "usermanager",
+                                    source = "usermanager_v7",
                                     comment = map["comment"].orEmpty(),
                                     priceNumber = priceNum
                                 )
@@ -319,6 +323,7 @@ class RouterOsApiClient {
                             if (list.any { it.name.equals(name, ignoreCase = true) }) continue
                             val rawPrice = map["price"]?.takeIf { it.isNotBlank() && it != "0" }
                             val priceStr = if (rawPrice != null) "$rawPrice ر.ي" else extractPriceFromText(map["comment"].orEmpty(), name, "")
+                            val customer = map["customer"]?.takeIf { it.isNotBlank() } ?: "admin"
                             list.add(
                                 HotspotProfile(
                                     id = map[".id"] ?: "tum_${list.size}",
@@ -327,13 +332,18 @@ class RouterOsApiClient {
                                     sharedUsers = 1,
                                     sessionTimeout = map["validity"] ?: "1d",
                                     price = priceStr,
-                                    source = "usermanager",
-                                    comment = map["comment"].orEmpty()
+                                    source = "usermanager_v6",
+                                    comment = customer
                                 )
                             )
                         }
                     }
                 } catch (_: Exception) {}
+
+                synchronized(cachedProfiles) {
+                    cachedProfiles.clear()
+                    cachedProfiles.addAll(list)
+                }
 
                 Result.success(list)
             } catch (e: Exception) {
@@ -543,27 +553,55 @@ class RouterOsApiClient {
         }
     }
 
-    suspend fun deleteCard(cardId: String): Result<Boolean> {
+    suspend fun deleteCard(cardId: String, cardName: String = ""): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
+                ensureConnected()
+                // 1. Try Hotspot removal
                 writeSentence(listOf("/ip/hotspot/user/remove", "=.id=$cardId"))
                 val sentences = readAllSentencesUntilDone()
-                val isDone = sentences.any { it.firstOrNull() == "!done" }
-                Result.success(isDone)
+                if (sentences.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+
+                // 2. Try User Manager v7
+                writeSentence(listOf("/user-manager/user/remove", "=.id=$cardId"))
+                val um7Sentences = readAllSentencesUntilDone()
+                if (um7Sentences.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+
+                // 3. Try User Manager v6
+                val targetName = cardName.ifBlank { cardId }
+                writeSentence(listOf("/tool/user-manager/user/remove", "=numbers=$targetName"))
+                val um6Sentences = readAllSentencesUntilDone()
+                if (um6Sentences.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+
+                Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
             }
         }
     }
 
-    suspend fun toggleCardDisabled(cardId: String, currentDisabled: Boolean): Result<Boolean> {
+    suspend fun toggleCardDisabled(cardId: String, currentDisabled: Boolean, cardName: String = ""): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
+                ensureConnected()
                 val newVal = if (currentDisabled) "no" else "yes"
+                // 1. Try Hotspot
                 writeSentence(listOf("/ip/hotspot/user/set", "=.id=$cardId", "=disabled=$newVal"))
                 val sentences = readAllSentencesUntilDone()
-                val isDone = sentences.any { it.firstOrNull() == "!done" }
-                Result.success(isDone)
+                if (sentences.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+
+                // 2. Try User Manager v7
+                writeSentence(listOf("/user-manager/user/set", "=.id=$cardId", "=disabled=$newVal"))
+                val um7Sentences = readAllSentencesUntilDone()
+                if (um7Sentences.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+
+                // 3. Try User Manager v6
+                val targetName = cardName.ifBlank { cardId }
+                writeSentence(listOf("/tool/user-manager/user/set", "=numbers=$targetName", "=disabled=$newVal"))
+                val um6Sentences = readAllSentencesUntilDone()
+                if (um6Sentences.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+
+                Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -574,29 +612,299 @@ class RouterOsApiClient {
         return withContext(Dispatchers.IO) {
             try {
                 ensureConnected()
-                val words = mutableListOf("/ip/hotspot/user/add", "=name=${card.name}", "=password=${card.password}")
-                if (card.profile.isNotBlank()) words.add("=profile=${card.profile}")
-                if (card.limitUptime.isNotBlank()) words.add("=limit-uptime=${card.limitUptime}")
-                if (card.limitBytesTotal > 0) words.add("=limit-bytes-total=${card.limitBytesTotal}")
-                if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
+                val targetProfile = synchronized(cachedProfiles) {
+                    cachedProfiles.firstOrNull { it.name.trim().equals(card.profile.trim(), ignoreCase = true) }
+                }
+                val source = targetProfile?.source ?: ""
 
+                // 1. If it is User-Manager v7
+                if (source == "usermanager_v7") {
+                    val umResult = addUserManagerV7User(card)
+                    if (umResult.isSuccess) return@withContext umResult
+                }
+
+                // 2. If it is User-Manager v6 (/tool/user-manager)
+                if (source == "usermanager_v6") {
+                    val customer = targetProfile?.comment?.takeIf { it.isNotBlank() } ?: "admin"
+                    val umResult = addUserManagerV6User(card, customer)
+                    if (umResult.isSuccess) return@withContext umResult
+                }
+
+                // 3. Try Native Hotspot /ip/hotspot/user/add
+                val hsResult = addHotspotNativeUser(card)
+                if (hsResult.isSuccess) {
+                    return@withContext hsResult
+                }
+
+                val errMsg = hsResult.exceptionOrNull()?.message.orEmpty()
+                // If failed because profile is not found on the router, auto-create it or fallback
+                if (errMsg.contains("profile", ignoreCase = true) || errMsg.contains("not found", ignoreCase = true)) {
+                    val profileToCreate = targetProfile ?: HotspotProfile(
+                        id = "",
+                        name = card.profile,
+                        rateLimit = "غير محدد",
+                        sessionTimeout = formatRouterOsTime(card.limitUptime) ?: "1d"
+                    )
+                    addProfile(profileToCreate)
+                    val retryHs = addHotspotNativeUser(card)
+                    if (retryHs.isSuccess) {
+                        return@withContext retryHs
+                    }
+
+                    // Fallback to User Manager v7 then v6 if profile might be there
+                    if (source.isBlank()) {
+                        val tryV7 = addUserManagerV7User(card)
+                        if (tryV7.isSuccess) return@withContext tryV7
+                        val tryV6 = addUserManagerV6User(card, "admin")
+                        if (tryV6.isSuccess) return@withContext tryV6
+                    }
+                }
+
+                return@withContext hsResult
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    private fun addHotspotNativeUser(card: HotspotCard): Result<Boolean> {
+        val words = mutableListOf("/ip/hotspot/user/add", "=name=${card.name}", "=password=${card.password}")
+        if (card.profile.isNotBlank()) words.add("=profile=${card.profile}")
+        val validUptime = formatRouterOsTime(card.limitUptime)
+        if (!validUptime.isNullOrBlank()) {
+            words.add("=limit-uptime=$validUptime")
+        }
+        if (card.limitBytesTotal > 0) {
+            words.add("=limit-bytes-total=${card.limitBytesTotal}")
+        }
+        if (card.comment.isNotBlank()) {
+            words.add("=comment=${card.comment}")
+        }
+
+        writeSentence(words)
+        val sentences = readAllSentencesUntilDone()
+        val trapSentence = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+        if (trapSentence != null) {
+            val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                ?: "رفض راوتر ميكروتك إضافة الكرت"
+            // If failed due to argument issue (e.g. limit-uptime or limit-bytes-total unsupported), retry simple add
+            if (trapMsg.contains("argument", ignoreCase = true) || trapMsg.contains("limit", ignoreCase = true)) {
+                val simpleWords = mutableListOf("/ip/hotspot/user/add", "=name=${card.name}", "=password=${card.password}")
+                if (card.profile.isNotBlank()) simpleWords.add("=profile=${card.profile}")
+                if (card.comment.isNotBlank()) simpleWords.add("=comment=${card.comment}")
+                writeSentence(simpleWords)
+                val retrySentences = readAllSentencesUntilDone()
+                val retryTrap = retrySentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (retryTrap == null && retrySentences.any { it.firstOrNull() == "!done" }) {
+                    return Result.success(true)
+                }
+            }
+            return Result.failure(Exception(trapMsg))
+        }
+        val isDone = sentences.any { it.firstOrNull() == "!done" }
+        if (!isDone) {
+            return Result.failure(Exception("لم يؤكد الراوتر إضافة الكرت"))
+        }
+        return Result.success(true)
+    }
+
+    private fun addUserManagerV7User(card: HotspotCard): Result<Boolean> {
+        try {
+            val words = mutableListOf("/user-manager/user/add", "=name=${card.name}", "=password=${card.password}")
+            if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
+            writeSentence(words)
+            val sentences = readAllSentencesUntilDone()
+            val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+            if (trap != null) {
+                val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إضافة مستخدم يوزرمانجر"
+                if (!msg.contains("already exists", ignoreCase = true)) {
+                    return Result.failure(Exception(msg))
+                }
+            }
+            if (card.profile.isNotBlank()) {
+                val profWords = listOf(
+                    "/user-manager/user-profile/add",
+                    "=user=${card.name}",
+                    "=profile=${card.profile}"
+                )
+                writeSentence(profWords)
+                readAllSentencesUntilDone()
+            }
+            return Result.success(true)
+        } catch (e: Exception) {
+            return Result.failure(e)
+        }
+    }
+
+    private fun addUserManagerV6User(card: HotspotCard, customer: String): Result<Boolean> {
+        try {
+            val cust = if (customer.isBlank()) "admin" else customer
+            val words = mutableListOf(
+                "/tool/user-manager/user/add",
+                "=username=${card.name}",
+                "=password=${card.password}",
+                "=customer=$cust"
+            )
+            if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
+            writeSentence(words)
+            val sentences = readAllSentencesUntilDone()
+            val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+            if (trap != null) {
+                val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إضافة كرت يوزرمانجر"
+                if (!msg.contains("already exists", ignoreCase = true)) {
+                    return Result.failure(Exception(msg))
+                }
+            }
+            if (card.profile.isNotBlank()) {
+                val actWords = listOf(
+                    "/tool/user-manager/user/create-and-activate-profile",
+                    "=numbers=${card.name}",
+                    "=profile=${card.profile}",
+                    "=customer=$cust"
+                )
+                writeSentence(actWords)
+                val actSentences = readAllSentencesUntilDone()
+                if (actSentences.none { it.firstOrNull() == "!done" }) {
+                    writeSentence(listOf(
+                        "/tool/user-manager/user/set",
+                        "=numbers=${card.name}",
+                        "=actual-profile=${card.profile}"
+                    ))
+                    readAllSentencesUntilDone()
+                }
+            }
+            return Result.success(true)
+        } catch (e: Exception) {
+            return Result.failure(e)
+        }
+    }
+
+    suspend fun updateCard(card: HotspotCard): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            try {
+                ensureConnected()
+                val targetProfile = synchronized(cachedProfiles) {
+                    cachedProfiles.firstOrNull { it.name.trim().equals(card.profile.trim(), ignoreCase = true) }
+                }
+                val source = targetProfile?.source ?: ""
+
+                if (source == "usermanager_v6") {
+                    writeSentence(listOf(
+                        "/tool/user-manager/user/set",
+                        "=numbers=${card.name}",
+                        "=password=${card.password}",
+                        "=actual-profile=${card.profile}",
+                        "=comment=${card.comment}"
+                    ))
+                    readAllSentencesUntilDone()
+                    return@withContext Result.success(true)
+                }
+
+                if (source == "usermanager_v7") {
+                    writeSentence(listOf(
+                        "/user-manager/user/set",
+                        "=.id=${card.id}",
+                        "=password=${card.password}",
+                        "=comment=${card.comment}"
+                    ))
+                    readAllSentencesUntilDone()
+                    if (card.profile.isNotBlank()) {
+                        writeSentence(listOf(
+                            "/user-manager/user-profile/add",
+                            "=user=${card.name}",
+                            "=profile=${card.profile}"
+                        ))
+                        readAllSentencesUntilDone()
+                    }
+                    return@withContext Result.success(true)
+                }
+
+                val words = mutableListOf(
+                    "/ip/hotspot/user/set",
+                    "=.id=${card.id}",
+                    "=name=${card.name}",
+                    "=password=${card.password}",
+                    "=profile=${card.profile}",
+                    "=comment=${card.comment}"
+                )
+                val validUptime = formatRouterOsTime(card.limitUptime)
+                if (!validUptime.isNullOrBlank()) {
+                    words.add("=limit-uptime=$validUptime")
+                }
+                if (card.limitBytesTotal > 0) {
+                    words.add("=limit-bytes-total=${card.limitBytesTotal}")
+                }
                 writeSentence(words)
-                val sentences = readAllSentencesUntilDone()
-                val trapSentence = sentences.firstOrNull { it.firstOrNull() == "!trap" }
-                if (trapSentence != null) {
-                    val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
-                        ?: "رفض راوتر ميكروتك إضافة الكرت"
-                    return@withContext Result.failure(Exception(trapMsg))
-                }
-                val isDone = sentences.any { it.firstOrNull() == "!done" }
-                if (!isDone) {
-                    return@withContext Result.failure(Exception("لم يؤكد الراوتر إضافة الكرت"))
-                }
+                readAllSentencesUntilDone()
                 Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
             }
         }
+    }
+
+    suspend fun reactivateCard(card: HotspotCard): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            try {
+                ensureConnected()
+                // 1. Hotspot reset counters & enable
+                writeSentence(listOf("/ip/hotspot/user/reset-counters", "=.id=${card.id}"))
+                val s1 = readAllSentencesUntilDone()
+                if (s1.none { it.firstOrNull() == "!done" }) {
+                    writeSentence(listOf("/ip/hotspot/user/reset-counters", "=numbers=${card.name}"))
+                    readAllSentencesUntilDone()
+                }
+                writeSentence(listOf("/ip/hotspot/user/set", "=.id=${card.id}", "=disabled=no"))
+                readAllSentencesUntilDone()
+
+                // 2. User Manager v7 reset counters & enable
+                writeSentence(listOf("/user-manager/user/reset-counters", "=.id=${card.id}"))
+                readAllSentencesUntilDone()
+                writeSentence(listOf("/user-manager/user/set", "=.id=${card.id}", "=disabled=no"))
+                readAllSentencesUntilDone()
+
+                // 3. User Manager v6 reset counters & enable
+                writeSentence(listOf("/tool/user-manager/user/reset-counters", "=numbers=${card.name}"))
+                readAllSentencesUntilDone()
+                writeSentence(listOf("/tool/user-manager/user/set", "=numbers=${card.name}", "=disabled=no"))
+                readAllSentencesUntilDone()
+
+                Result.success(true)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    fun formatRouterOsTime(raw: String): String? {
+        val clean = raw.trim().lowercase()
+        if (clean.isBlank() || clean == "غير محدد" || clean == "مفتوح" || clean == "0" || clean == "0s") {
+            return null
+        }
+        val digits = Regex("""\d+""").find(clean)?.value?.toIntOrNull() ?: 1
+        if (clean.contains("ساعة") || clean.contains("ساعات")) {
+            return "${digits}h"
+        }
+        if (clean.contains("يوم") || clean.contains("أيام") || clean.contains("ايام")) {
+            return "${digits}d"
+        }
+        if (clean.contains("أسبوع") || clean.contains("اسبوع")) {
+            return "${digits * 7}d"
+        }
+        if (clean.contains("شهر")) {
+            return "${digits * 30}d"
+        }
+        if (clean.contains("دقيقة") || clean.contains("دقائق")) {
+            return "${digits}m"
+        }
+        if (Regex("""^(\d+[wdhms])+$""").matches(clean) || Regex("""^\d{1,2}:\d{2}(:\d{2})?$""").matches(clean)) {
+            return clean
+        }
+        val match = Regex("""(\d+)\s*([wdhms])""").find(clean)
+        if (match != null) {
+            return "${match.groupValues[1]}${match.groupValues[2]}"
+        }
+        return null
     }
 
     suspend fun addProfile(profile: HotspotProfile): Result<Boolean> {
@@ -624,6 +932,33 @@ class RouterOsApiClient {
                 if (!isDone) {
                     return@withContext Result.failure(Exception("لم يؤكد الراوتر إنشاء الباقة"))
                 }
+                Result.success(true)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun deleteProfile(profileId: String, profileName: String = ""): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            try {
+                ensureConnected()
+                // 1. Try Hotspot profile removal
+                writeSentence(listOf("/ip/hotspot/user/profile/remove", "=.id=$profileId"))
+                val s1 = readAllSentencesUntilDone()
+                if (s1.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+
+                // 2. Try User Manager v7 profile removal
+                writeSentence(listOf("/user-manager/profile/remove", "=.id=$profileId"))
+                val s2 = readAllSentencesUntilDone()
+                if (s2.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+
+                // 3. Try User Manager v6 profile removal
+                val name = profileName.ifBlank { profileId }
+                writeSentence(listOf("/tool/user-manager/profile/remove", "=numbers=$name"))
+                val s3 = readAllSentencesUntilDone()
+                if (s3.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+
                 Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)

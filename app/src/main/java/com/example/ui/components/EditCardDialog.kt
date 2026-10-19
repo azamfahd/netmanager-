@@ -147,7 +147,14 @@ fun EditCardDialog(
                                 text = { Text("${prof.name} (${prof.rateLimit} - ${prof.price})") },
                                 onClick = {
                                     selectedProfile = prof.name
-                                    if (prof.price.isNotBlank()) price = prof.price
+                                    if (prof.price.isNotBlank() && prof.price != "0 ر.ي") {
+                                        price = prof.price
+                                    }
+                                    if (prof.validity.isNotBlank() && prof.validity != "غير محدد") {
+                                        timeLimit = prof.validity
+                                    } else if (prof.sessionTimeout.isNotBlank() && prof.sessionTimeout != "غير محدد") {
+                                        timeLimit = prof.sessionTimeout
+                                    }
                                     expandedProfileDropdown = false
                                 }
                             )
@@ -194,7 +201,7 @@ fun EditCardDialog(
                     onSave(
                         card.copy(
                             password = password,
-                            profile = selectedProfile,
+                            profile = selectedProfile.trim(),
                             price = price,
                             limitUptime = timeLimit,
                             comment = comment

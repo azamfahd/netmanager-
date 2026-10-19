@@ -99,6 +99,7 @@ fun CardsScreen(
     viewModel: MainViewModel,
     onOpenBatchGenerator: () -> Unit,
     onOpenPrintScreen: () -> Unit,
+    onOpenSessionDetail: ((UserSessionRecord) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val filteredCards by viewModel.filteredCards.collectAsStateWithLifecycle()
@@ -305,7 +306,11 @@ fun CardsScreen(
                                     deviceInfo = DeviceDetector.detectDevice(activeUser?.macAddress ?: "", card.comment, card.name),
                                     comment = card.comment.ifBlank { "كرت شبكة ميكروتك" }
                                 )
-                                selectedSessionForDetail = session
+                                if (onOpenSessionDetail != null) {
+                                    onOpenSessionDetail(session)
+                                } else {
+                                    selectedSessionForDetail = session
+                                }
                             },
                             onEdit = { cardToEdit = card },
                             onReactivate = { cardToReactivate = card },

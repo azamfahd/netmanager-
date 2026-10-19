@@ -2015,14 +2015,15 @@ class MikrotikRepository {
         }
     }
 
-    suspend fun deleteCard(cardId: String): Result<Boolean> {
+    suspend fun deleteCard(cardId: String, cardName: String = ""): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
                 if (isApiSocketMode) {
-                    val socketRes = routerOsApiClient.deleteCard(cardId)
+                    val targetName = cardName.ifBlank { _cards.value.find { it.id == cardId }?.name.orEmpty() }
+                    val socketRes = routerOsApiClient.deleteCard(cardId, targetName)
                     if (socketRes.isSuccess) {
-                        _cards.value = _cards.value.filter { it.id != cardId }
+                        _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
                     }
                     return@withContext socketRes
                 }
@@ -2049,31 +2050,35 @@ class MikrotikRepository {
         }
     }
 
-    suspend fun reactivateCard(cardId: String): Result<Boolean> {
+    suspend fun reactivateCard(card: HotspotCard): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
-                try {
-                    val protocol = if (config.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-                    val credential = Credentials.basic(config.username, config.password)
-                    val jsonBody = JSONObject().apply {
-                        put("disabled", "false")
-                        put("uptime", "0s")
-                        put("bytes-in", "0")
-                        put("bytes-out", "0")
-                    }
-                    val req = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/$cardId")
-                        .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                        .header("Authorization", credential)
-                        .build()
-                    httpClient.newCall(req).execute()
-                } catch (_: Exception) {}
+                if (isApiSocketMode) {
+                    routerOsApiClient.reactivateCard(card)
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val jsonBody = JSONObject().apply {
+                            put("disabled", "false")
+                            put("uptime", "0s")
+                            put("bytes-in", "0")
+                            put("bytes-out", "0")
+                        }
+                        val req = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/${card.id}")
+                            .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+                            .header("Authorization", credential)
+                            .build()
+                        httpClient.newCall(req).execute()
+                    } catch (_: Exception) {}
+                }
             }
             // Update in local state
             _cards.value = _cards.value.map {
-                if (it.id == cardId) {
+                if (it.id == card.id || it.name == card.name) {
                     it.copy(
                         bytesIn = 0L,
                         bytesOut = 0L,
@@ -2090,32 +2095,36 @@ class MikrotikRepository {
         return withContext(Dispatchers.IO) {
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
-                try {
-                    val protocol = if (config.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-                    val credential = Credentials.basic(config.username, config.password)
-                    val jsonBody = JSONObject().apply {
-                        put("name", updatedCard.name)
-                        put("password", updatedCard.password)
-                        put("profile", updatedCard.profile)
-                        put("comment", updatedCard.comment)
-                        if (updatedCard.limitUptime.isNotBlank()) {
-                            put("limit-uptime", updatedCard.limitUptime)
+                if (isApiSocketMode) {
+                    routerOsApiClient.updateCard(updatedCard)
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val jsonBody = JSONObject().apply {
+                            put("name", updatedCard.name)
+                            put("password", updatedCard.password)
+                            put("profile", updatedCard.profile)
+                            put("comment", updatedCard.comment)
+                            if (updatedCard.limitUptime.isNotBlank()) {
+                                put("limit-uptime", updatedCard.limitUptime)
+                            }
+                            if (updatedCard.limitBytesTotal > 0) {
+                                put("limit-bytes-total", updatedCard.limitBytesTotal.toString())
+                            }
                         }
-                        if (updatedCard.limitBytesTotal > 0) {
-                            put("limit-bytes-total", updatedCard.limitBytesTotal.toString())
-                        }
-                    }
-                    val req = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/${updatedCard.id}")
-                        .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                        .header("Authorization", credential)
-                        .build()
-                    httpClient.newCall(req).execute()
-                } catch (_: Exception) {}
+                        val req = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/${updatedCard.id}")
+                            .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+                            .header("Authorization", credential)
+                            .build()
+                        httpClient.newCall(req).execute()
+                    } catch (_: Exception) {}
+                }
             }
             _cards.value = _cards.value.map {
-                if (it.id == updatedCard.id) updatedCard else it
+                if (it.id == updatedCard.id || it.name == updatedCard.name) updatedCard else it
             }
             Result.success(true)
         }
@@ -2127,7 +2136,8 @@ class MikrotikRepository {
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
                 if (isApiSocketMode) {
-                    val socketRes = routerOsApiClient.toggleCardDisabled(cardId, currentDisabled)
+                    val targetName = _cards.value.find { it.id == cardId }?.name.orEmpty()
+                    val socketRes = routerOsApiClient.toggleCardDisabled(cardId, currentDisabled, targetName)
                     if (socketRes.isSuccess) {
                         _cards.value = _cards.value.map {
                             if (it.id == cardId) it.copy(disabled = newStatus) else it
@@ -2165,11 +2175,15 @@ class MikrotikRepository {
 
     suspend fun generateBatch(config: BatchGenerationConfig): Result<List<HotspotCard>> {
         return withContext(Dispatchers.Default) {
-            // 1. Strict Validation: Profile MUST exist in router
-            val profileExists = _profiles.value.isEmpty() || _profiles.value.any { it.name.equals(config.profile, ignoreCase = true) }
-            if (!profileExists) {
+            // 1. Validation: Verify profile against router profiles (case-insensitive & trimmed)
+            val cleanProfileName = config.profile.trim()
+            val existingProfiles = _profiles.value
+            val targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
+            val profileExists = cleanProfileName.isNotBlank() && (existingProfiles.isEmpty() || targetProfile != null || cleanProfileName.equals("default", ignoreCase = true))
+
+            if (!profileExists && existingProfiles.isNotEmpty()) {
                 return@withContext Result.failure(
-                    Exception("الباقة المحددة (${config.profile}) غير موجودة في الراوتر! يرجى إنشاء الباقة أولاً من قسم الباقات في التطبيق أو في الراوتر قبل توليد الكروت.")
+                    Exception("الباقة المحددة ($cleanProfileName) غير مسجلة في الراوتر. يرجى اختيار باقة متوفرة من القائمة.")
                 )
             }
 
@@ -2208,7 +2222,7 @@ class MikrotikRepository {
                         id = "gen_${System.currentTimeMillis()}_${generatedCards.size}",
                         name = code,
                         password = password,
-                        profile = config.profile,
+                        profile = cleanProfileName,
                         uptime = "0s",
                         bytesIn = 0,
                         bytesOut = 0,
@@ -2246,26 +2260,87 @@ class MikrotikRepository {
 
                         for (card in generatedCards) {
                             try {
-                                val jsonBody = JSONObject().apply {
-                                    put("name", card.name)
-                                    put("password", card.password)
-                                    put("profile", card.profile)
-                                    if (card.limitUptime.isNotBlank()) put("limit-uptime", card.limitUptime)
-                                    if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal)
-                                    put("comment", card.comment)
-                                }.toString()
+                                val isUmProfile = targetProfile?.source?.startsWith("usermanager") == true
+                                var cardAdded = false
 
-                                val putReq = Request.Builder()
-                                    .url("$baseUrl/rest/ip/hotspot/user")
-                                    .put(jsonBody.toRequestBody("application/json".toMediaType()))
-                                    .header("Authorization", credential)
-                                    .build()
-                                val resp = httpClient.newCall(putReq).execute()
-                                if (resp.isSuccessful) {
+                                if (isUmProfile) {
+                                    // Try REST user-manager endpoint first
+                                    try {
+                                        val umUserJson = JSONObject().apply {
+                                            put("name", card.name)
+                                            put("password", card.password)
+                                            put("comment", card.comment)
+                                        }.toString()
+                                        val umReq = Request.Builder()
+                                            .url("$baseUrl/rest/user-manager/user")
+                                            .put(umUserJson.toRequestBody("application/json".toMediaType()))
+                                            .header("Authorization", credential)
+                                            .build()
+                                        val umResp = httpClient.newCall(umReq).execute()
+                                        if (umResp.isSuccessful) {
+                                            cardAdded = true
+                                            // Assign profile
+                                            val umProfJson = JSONObject().apply {
+                                                put("user", card.name)
+                                                put("profile", card.profile)
+                                            }.toString()
+                                            val assignReq = Request.Builder()
+                                                .url("$baseUrl/rest/user-manager/user-profile")
+                                                .put(umProfJson.toRequestBody("application/json".toMediaType()))
+                                                .header("Authorization", credential)
+                                                .build()
+                                            httpClient.newCall(assignReq).execute()
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+
+                                if (!cardAdded) {
+                                    val jsonBody = JSONObject().apply {
+                                        put("name", card.name)
+                                        put("password", card.password)
+                                        put("profile", card.profile)
+                                        val validUptime = routerOsApiClient.formatRouterOsTime(card.limitUptime)
+                                        if (!validUptime.isNullOrBlank()) put("limit-uptime", validUptime)
+                                        if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal)
+                                        put("comment", card.comment)
+                                    }.toString()
+
+                                    val putReq = Request.Builder()
+                                        .url("$baseUrl/rest/ip/hotspot/user")
+                                        .put(jsonBody.toRequestBody("application/json".toMediaType()))
+                                        .header("Authorization", credential)
+                                        .build()
+                                    val resp = httpClient.newCall(putReq).execute()
+                                    if (resp.isSuccessful) {
+                                        cardAdded = true
+                                    } else {
+                                        val errBody = resp.body?.string().orEmpty()
+                                        // Auto-create missing hotspot profile and retry
+                                        if (errBody.contains("profile", ignoreCase = true) || errBody.contains("not found", ignoreCase = true)) {
+                                            try {
+                                                val createProfBody = JSONObject().apply {
+                                                    put("name", card.profile)
+                                                    put("shared-users", "1")
+                                                }.toString()
+                                                val createReq = Request.Builder()
+                                                    .url("$baseUrl/rest/ip/hotspot/user/profile")
+                                                    .put(createProfBody.toRequestBody("application/json".toMediaType()))
+                                                    .header("Authorization", credential)
+                                                    .build()
+                                                httpClient.newCall(createReq).execute()
+
+                                                val retryResp = httpClient.newCall(putReq).execute()
+                                                if (retryResp.isSuccessful) cardAdded = true
+                                            } catch (_: Exception) {}
+                                        }
+                                        if (!cardAdded) {
+                                            failureReasons.add("خطأ راوتر ($errBody)")
+                                        }
+                                    }
+                                }
+
+                                if (cardAdded) {
                                     addedCards.add(card)
-                                } else {
-                                    val errBody = resp.body?.string().orEmpty()
-                                    failureReasons.add("خطأ راوتر ($errBody)")
                                 }
                             } catch (e: Exception) {
                                 failureReasons.add(e.message ?: "فشل الاتصال بالراوتر")
@@ -2273,19 +2348,14 @@ class MikrotikRepository {
                         }
                     }
 
-                    // Re-sync cards directly from router
-                    try {
-                        val freshCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
-                        if (freshCards.isNotEmpty()) {
-                            _cards.value = freshCards
-                        }
-                    } catch (_: Exception) {}
+                    // Re-sync all cards (both Hotspot & User-Manager) directly from router
+                    refreshCardsFromRouter()
                 }
 
                 if (addedCards.isEmpty() && failureReasons.isNotEmpty()) {
                     val primaryErr = failureReasons.first()
                     return@withContext Result.failure(
-                        Exception("فشل إضافة الكروت في راوتر ميكروتك: $primaryErr. يرجى التحقق من صحة الباقة وصلاحيات المستخدم.")
+                        Exception("فشل إضافة الكروت في راوتر ميكروتك: $primaryErr. يرجى التأكد من باقة الراوتر وصلاحيات المستخدم.")
                     )
                 }
 
@@ -2307,18 +2377,22 @@ class MikrotikRepository {
 
     suspend fun addSingleCard(card: HotspotCard): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            // Strict Validation: Profile MUST exist
-            val profileExists = _profiles.value.isEmpty() || _profiles.value.any { it.name.equals(card.profile, ignoreCase = true) }
-            if (!profileExists) {
+            val cleanProfileName = card.profile.trim()
+            val existingProfiles = _profiles.value
+            val targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
+            val profileExists = cleanProfileName.isNotBlank() && (existingProfiles.isEmpty() || targetProfile != null || cleanProfileName.equals("default", ignoreCase = true))
+
+            if (!profileExists && existingProfiles.isNotEmpty()) {
                 return@withContext Result.failure(
-                    Exception("الباقة المحددة (${card.profile}) غير موجودة في راوتر ميكروتك! يرجى إنشاء الباقة أولاً قبل إضافة الكرت.")
+                    Exception("الباقة المحددة ($cleanProfileName) غير مسجلة في راوتر ميكروتك! يرجى اختيار باقة متوفرة من القائمة.")
                 )
             }
 
+            val sanitizedCard = card.copy(profile = cleanProfileName)
             val routerConfig = activeConfig
             if (routerConfig != null && !routerConfig.isDemoMode) {
                 if (isApiSocketMode) {
-                    val socketRes = routerOsApiClient.addCard(card)
+                    val socketRes = routerOsApiClient.addCard(sanitizedCard)
                     if (!socketRes.isSuccess) {
                         return@withContext socketRes
                     }
@@ -2328,44 +2402,151 @@ class MikrotikRepository {
                         val baseUrl = "$protocol://${routerConfig.ipAddress}:${routerConfig.port}"
                         val credential = Credentials.basic(routerConfig.username, routerConfig.password)
 
-                        val jsonBody = JSONObject().apply {
-                            put("name", card.name)
-                            put("password", card.password)
-                            put("profile", card.profile)
-                            if (card.limitUptime.isNotBlank()) put("limit-uptime", card.limitUptime)
-                            if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal)
-                            put("comment", card.comment)
-                        }.toString()
+                        val isUmProfile = targetProfile?.source?.startsWith("usermanager") == true
+                        var added = false
 
-                        val putReq = Request.Builder()
-                            .url("$baseUrl/rest/ip/hotspot/user")
-                            .put(jsonBody.toRequestBody("application/json".toMediaType()))
-                            .header("Authorization", credential)
-                            .build()
-                        val resp = httpClient.newCall(putReq).execute()
-                        if (!resp.isSuccessful) {
-                            val errBody = resp.body?.string().orEmpty()
-                            return@withContext Result.failure(Exception("استجاب الراوتر برفض إضافة الكرت: $errBody"))
+                        if (isUmProfile) {
+                            try {
+                                val umUserJson = JSONObject().apply {
+                                    put("name", sanitizedCard.name)
+                                    put("password", sanitizedCard.password)
+                                    put("comment", sanitizedCard.comment)
+                                }.toString()
+                                val umReq = Request.Builder()
+                                    .url("$baseUrl/rest/user-manager/user")
+                                    .put(umUserJson.toRequestBody("application/json".toMediaType()))
+                                    .header("Authorization", credential)
+                                    .build()
+                                val umResp = httpClient.newCall(umReq).execute()
+                                if (umResp.isSuccessful) {
+                                    added = true
+                                    val umProfJson = JSONObject().apply {
+                                        put("user", sanitizedCard.name)
+                                        put("profile", sanitizedCard.profile)
+                                    }.toString()
+                                    val assignReq = Request.Builder()
+                                        .url("$baseUrl/rest/user-manager/user-profile")
+                                        .put(umProfJson.toRequestBody("application/json".toMediaType()))
+                                        .header("Authorization", credential)
+                                        .build()
+                                    httpClient.newCall(assignReq).execute()
+                                }
+                            } catch (_: Exception) {}
+                        }
+
+                        if (!added) {
+                            val jsonBody = JSONObject().apply {
+                                put("name", sanitizedCard.name)
+                                put("password", sanitizedCard.password)
+                                put("profile", sanitizedCard.profile)
+                                val validUptime = routerOsApiClient.formatRouterOsTime(sanitizedCard.limitUptime)
+                                if (!validUptime.isNullOrBlank()) put("limit-uptime", validUptime)
+                                if (sanitizedCard.limitBytesTotal > 0) put("limit-bytes-total", sanitizedCard.limitBytesTotal)
+                                put("comment", sanitizedCard.comment)
+                            }.toString()
+
+                            val putReq = Request.Builder()
+                                .url("$baseUrl/rest/ip/hotspot/user")
+                                .put(jsonBody.toRequestBody("application/json".toMediaType()))
+                                .header("Authorization", credential)
+                                .build()
+                            val resp = httpClient.newCall(putReq).execute()
+                            if (!resp.isSuccessful) {
+                                val errBody = resp.body?.string().orEmpty()
+                                if (errBody.contains("profile", ignoreCase = true) || errBody.contains("not found", ignoreCase = true)) {
+                                    try {
+                                        val createProfBody = JSONObject().apply {
+                                            put("name", sanitizedCard.profile)
+                                            put("shared-users", "1")
+                                        }.toString()
+                                        val createReq = Request.Builder()
+                                            .url("$baseUrl/rest/ip/hotspot/user/profile")
+                                            .put(createProfBody.toRequestBody("application/json".toMediaType()))
+                                            .header("Authorization", credential)
+                                            .build()
+                                        httpClient.newCall(createReq).execute()
+                                        val retryResp = httpClient.newCall(putReq).execute()
+                                        if (retryResp.isSuccessful) added = true
+                                    } catch (_: Exception) {}
+                                }
+                                if (!added) {
+                                    return@withContext Result.failure(Exception("استجاب الراوتر برفض إضافة الكرت: $errBody"))
+                                }
+                            }
                         }
                     } catch (e: Exception) {
                         return@withContext Result.failure(e)
                     }
                 }
 
-                // Re-fetch real users from router to confirm
-                try {
-                    val freshCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
-                    if (freshCards.isNotEmpty()) {
-                        _cards.value = freshCards
-                    }
-                } catch (_: Exception) {}
+                // Re-sync all cards directly from router
+                refreshCardsFromRouter()
             }
 
             val currentList = _cards.value.toMutableList()
-            currentList.add(0, card)
+            currentList.add(0, sanitizedCard)
             _cards.value = currentList.distinctBy { it.name }
             Result.success(true)
         }
+    }
+
+    private suspend fun refreshCardsFromRouter() {
+        try {
+            if (isApiSocketMode) {
+                val hotspotCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
+                val umCards = routerOsApiClient.getUserManagerUsers().getOrDefault(emptyList())
+                val combined = mutableListOf<HotspotCard>()
+                combined.addAll(hotspotCards)
+                val existingNames = hotspotCards.map { it.name }.toSet()
+                umCards.forEach {
+                    if (!existingNames.contains(it.name)) combined.add(it)
+                }
+                if (combined.isNotEmpty()) {
+                    _cards.value = combined.distinctBy { it.name }
+                }
+            } else {
+                activeConfig?.let { config ->
+                    val protocol = if (config.useHttps) "https" else "http"
+                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                    val credential = Credentials.basic(config.username, config.password)
+                    val cardList = mutableListOf<HotspotCard>()
+                    try {
+                        val req = Request.Builder().url("$baseUrl/rest/ip/hotspot/user").header("Authorization", credential).build()
+                        val resp = httpClient.newCall(req).execute()
+                        if (resp.isSuccessful) {
+                            val arr = JSONArray(resp.body?.string() ?: "[]")
+                            for (i in 0 until arr.length()) {
+                                val obj = arr.getJSONObject(i)
+                                val name = obj.optString("name", "")
+                                if (name.isNotBlank()) {
+                                    val comment = obj.optString("comment", "")
+                                    val profile = obj.optString("profile", "default")
+                                    cardList.add(
+                                        HotspotCard(
+                                            id = obj.optString(".id", "c$i"),
+                                            name = name,
+                                            password = obj.optString("password", ""),
+                                            profile = profile,
+                                            uptime = obj.optString("uptime", "0s"),
+                                            bytesIn = obj.optLong("bytes-in", 0L),
+                                            bytesOut = obj.optLong("bytes-out", 0L),
+                                            limitUptime = obj.optString("limit-uptime", ""),
+                                            limitBytesTotal = obj.optLong("limit-bytes-total", 0L),
+                                            comment = comment,
+                                            disabled = obj.optBoolean("disabled", false),
+                                            price = extractPriceFromText(comment, profile, name)
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                    if (cardList.isNotEmpty()) {
+                        _cards.value = cardList.distinctBy { it.name }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     suspend fun createProfile(profile: HotspotProfile): Result<Boolean> {
@@ -2434,6 +2615,31 @@ class MikrotikRepository {
         _profiles.value = _profiles.value.map {
             if (it.id == profile.id || it.name == profile.name) profile else it
         }
+        return Result.success(true)
+    }
+
+    suspend fun deleteProfile(profile: HotspotProfile): Result<Boolean> {
+        val config = activeConfig
+        if (config != null && !config.isDemoMode) {
+            withContext(Dispatchers.IO) {
+                if (isApiSocketMode) {
+                    routerOsApiClient.deleteProfile(profile.id, profile.name)
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val delReq = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/profile/${profile.id}")
+                            .delete()
+                            .header("Authorization", credential)
+                            .build()
+                        httpClient.newCall(delReq).execute()
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+        _profiles.value = _profiles.value.filter { it.id != profile.id && it.name != profile.name }
         return Result.success(true)
     }
 

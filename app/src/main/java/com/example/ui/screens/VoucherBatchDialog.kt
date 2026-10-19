@@ -187,10 +187,14 @@ fun VoucherBatchDialog(
     var selectedAgentId by remember { mutableLongStateOf(preselectedAgentId) }
     var expandedAgentDropdown by remember { mutableStateOf(false) }
 
-    // Common configuration state
-    var selectedProfile by remember {
-        mutableStateOf(profiles.firstOrNull()?.name ?: "default")
+    // Pick first non-default real router profile if available
+    val initialProfile = remember(profiles) {
+        profiles.firstOrNull { it.name.contains("500") }?.name
+            ?: profiles.firstOrNull { !it.name.equals("default", ignoreCase = true) }?.name
+            ?: profiles.firstOrNull()?.name
+            ?: "default"
     }
+    var selectedProfile by remember { mutableStateOf(initialProfile) }
     var price by remember { mutableStateOf(PRESET_CATEGORIES[2].priceLabel) }
     var timeLimit by remember { mutableStateOf(PRESET_CATEGORIES[2].timeLimit) }
     var dataLimitMBInput by remember { mutableStateOf(PRESET_CATEGORIES[2].dataLimitMB.toString()) }
@@ -210,6 +214,31 @@ fun VoucherBatchDialog(
 
     var expandedDropdown by remember { mutableStateOf(false) }
 
+    // Helper to apply real router profile settings
+    fun applyRouterProfile(profile: HotspotProfile) {
+        selectedProfile = profile.name
+        if (profile.price.isNotBlank() && profile.price != "0 ر.ي") {
+            price = profile.price
+        }
+        if (profile.validity.isNotBlank() && profile.validity != "غير محدد") {
+            timeLimit = profile.validity
+        } else if (profile.sessionTimeout.isNotBlank() && profile.sessionTimeout != "غير محدد") {
+            timeLimit = profile.sessionTimeout
+        }
+        val parsedDataMb = Regex("""\d+""").find(profile.dataLimit)?.value?.toLongOrNull()
+        if (parsedDataMb != null && parsedDataMb > 0) {
+            dataLimitMBInput = parsedDataMb.toString()
+        }
+    }
+
+    // Auto-populate router profile settings on dialog launch if router profile is available
+    androidx.compose.runtime.LaunchedEffect(profiles) {
+        val initialMatch = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+        if (initialMatch != null) {
+            applyRouterProfile(initialMatch)
+        }
+    }
+
     // Helper to apply preset category
     fun applyPreset(preset: VoucherPreset) {
         price = preset.priceLabel
@@ -217,14 +246,14 @@ fun VoucherBatchDialog(
         dataLimitMBInput = preset.dataLimitMB.toString()
         batchComment = "دفعة ${preset.title}"
         singleComment = "كرت ${preset.title}"
-        // Find matching profile if available
+        // Find matching real profile from router if available
         val matchedProfile = profiles.firstOrNull {
             it.name.contains(preset.priceValue.toString()) ||
                     it.name.contains(preset.timeLimit, ignoreCase = true) ||
                     it.price.contains(preset.priceValue.toString())
         }
         if (matchedProfile != null) {
-            selectedProfile = matchedProfile.name
+            applyRouterProfile(matchedProfile)
         }
     }
 
@@ -240,7 +269,7 @@ fun VoucherBatchDialog(
         }
     }
 
-    val isProfileValid = profiles.isEmpty() || profiles.any { it.name.equals(selectedProfile, ignoreCase = true) }
+    val isProfileValid = profiles.isEmpty() || profiles.any { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -574,21 +603,107 @@ fun VoucherBatchDialog(
                                             horizontalArrangement = Arrangement.SpaceBetween,
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Text(profile.name, fontWeight = FontWeight.SemiBold)
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                val isUm = profile.source.contains("usermanager")
+                                                val badgeText = if (isUm) "يوزرمانجر" else "هوتسبوت"
+                                                val badgeColor = if (isUm) Color(0xFF00897B) else Color(0xFF1976D2)
+                                                Surface(
+                                                    color = badgeColor.copy(alpha = 0.15f),
+                                                    shape = RoundedCornerShape(4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = badgeText,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = badgeColor,
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                                Text(profile.name, fontWeight = FontWeight.Bold)
+                                            }
                                             Text(
                                                 "${profile.rateLimit} • ${profile.price}",
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.primary
+                                                color = MaterialTheme.colorScheme.primary,
+                                                fontWeight = FontWeight.SemiBold
                                             )
                                         }
                                     },
                                     onClick = {
-                                        selectedProfile = profile.name
-                                        if (profile.price.isNotBlank() && profile.price != "0 ر.ي") {
-                                            price = profile.price
-                                        }
+                                        applyRouterProfile(profile)
                                         expandedDropdown = false
                                     }
+                                )
+                            }
+                        }
+                    }
+
+                    // Automatic Router Profile Info Card
+                    val activeProfileObj = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+                    if (activeProfileObj != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "تم جلب وتعيين إعدادات باقة (${activeProfileObj.name}) تلقائياً من الراوتر:",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    val valText = if (activeProfileObj.validity.isNotBlank() && activeProfileObj.validity != "غير محدد") {
+                                        activeProfileObj.validity
+                                    } else if (activeProfileObj.sessionTimeout.isNotBlank() && activeProfileObj.sessionTimeout != "غير محدد") {
+                                        activeProfileObj.sessionTimeout
+                                    } else "غير محدد"
+                                    Text(
+                                        text = "⏱️ الصلاحية: $valText",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    val dataText = if (activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد") {
+                                        activeProfileObj.dataLimit
+                                    } else "مفتوح"
+                                    Text(
+                                        text = "📊 البيانات: $dataText",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = "💰 ${activeProfileObj.price}",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Text(
+                                    text = "💡 تم تعبئة الصلاحية وحصة البيانات والسعر تلقائياً، ويمكنك تعديلها يدوياً أدناه حسب رغبتك (اختياري).",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
@@ -954,7 +1069,7 @@ fun VoucherBatchDialog(
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
                         val config = BatchGenerationConfig(
                             count = parsedCount,
-                            profile = selectedProfile,
+                            profile = selectedProfile.trim(),
                             prefix = prefix,
                             codeLength = parsedCodeLength,
                             characterSet = charType,
@@ -997,7 +1112,7 @@ fun VoucherBatchDialog(
                                 id = "card_${System.currentTimeMillis()}",
                                 name = singleCode.trim(),
                                 password = if (isSingleCode) singleCode.trim() else singlePassword.trim(),
-                                profile = selectedProfile,
+                                profile = selectedProfile.trim(),
                                 uptime = "0s",
                                 bytesIn = 0,
                                 bytesOut = 0,

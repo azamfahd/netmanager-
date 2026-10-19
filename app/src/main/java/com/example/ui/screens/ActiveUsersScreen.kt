@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.PersonOff
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PhoneIphone
+import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Schedule
@@ -281,12 +282,32 @@ fun ActiveUsersScreen(
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier.height(36.dp)
             )
+
+            FilterChip(
+                selected = currentFilter == "REPORTS",
+                onClick = { viewModel.updateSessionFilter("REPORTS") },
+                label = { Text("تقارير الاستهلاك والأرشيف", fontSize = 12.sp, fontWeight = FontWeight.Bold) },
+                leadingIcon = {
+                    Icon(Icons.Default.PieChart, contentDescription = null, modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                    selectedLabelColor = MaterialTheme.colorScheme.primary
+                ),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.height(36.dp)
+            )
         }
 
         Spacer(modifier = Modifier.height(10.dp))
 
         // 3. Main Content List
-        if (currentFilter == "LOGS") {
+        if (currentFilter == "REPORTS") {
+            com.example.ui.components.NetworkConsumptionReportView(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else if (currentFilter == "LOGS") {
             // Activity Events Log List
             if (activityEvents.isEmpty()) {
                 EmptyStateView(
