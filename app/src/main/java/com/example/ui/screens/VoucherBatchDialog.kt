@@ -176,7 +176,8 @@ fun VoucherBatchDialog(
     preselectedAgentId: Long = 0L,
     onDismiss: () -> Unit,
     onGenerate: (BatchGenerationConfig) -> Unit,
-    onAddSingleCard: ((HotspotCard, Long, String, Double) -> Unit)? = null
+    onAddSingleCard: ((HotspotCard, Long, String, Double) -> Unit)? = null,
+    onUpdateProfile: ((HotspotProfile) -> Unit)? = null
 ) {
     var selectedTab by remember { mutableStateOf(VoucherDialogTab.BATCH_GENERATE) }
 
@@ -213,6 +214,7 @@ fun VoucherBatchDialog(
     var singleComment by remember { mutableStateOf("كرت فردي") }
 
     var expandedDropdown by remember { mutableStateOf(false) }
+    var profileToEdit by remember { mutableStateOf<HotspotProfile?>(null) }
 
     // Helper to apply real router profile settings
     fun applyRouterProfile(profile: HotspotProfile) {
@@ -655,21 +657,36 @@ fun VoucherBatchDialog(
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Check,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = "تم جلب وتعيين إعدادات باقة (${activeProfileObj.name}) تلقائياً من الراوتر:",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "إعدادات باقة (${activeProfileObj.name}):",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick = { profileToEdit = activeProfileObj },
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.height(30.dp)
+                                    ) {
+                                        Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(12.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("تحرير الباقة", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    }
                                 }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -1157,4 +1174,96 @@ fun VoucherBatchDialog(
             }
         }
     )
+
+    // Edit Profile Details Dialog
+    profileToEdit?.let { prof ->
+        var editPrice by remember { mutableStateOf(prof.price) }
+        var editValidity by remember { mutableStateOf(prof.validity.ifBlank { prof.sessionTimeout }) }
+        var editDataLimit by remember { mutableStateOf(prof.dataLimit) }
+        var editRateLimit by remember { mutableStateOf(prof.rateLimit) }
+
+        AlertDialog(
+            onDismissRequest = { profileToEdit = null },
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Text(text = "تحرير وتعديل تفاصيل باقة: ${prof.name}", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "أي تعديل هنا سيحفظ الإعدادات في الراوتر والتطبيق لتكون افتراضية لهذه الباقة عند توليد الكروت مستقبلاً:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    OutlinedTextField(
+                        value = editPrice,
+                        onValueChange = { editPrice = it },
+                        label = { Text("سعر البيع (مثل: 500 ر.ي)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = editValidity,
+                        onValueChange = { editValidity = it },
+                        label = { Text("مدة الصلاحية / الوقت (مثل: 1d, 6h, غير محدد)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = editDataLimit,
+                        onValueChange = { editDataLimit = it },
+                        label = { Text("حصة البيانات (مثل: 1G, 500M, غير محدد)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = editRateLimit,
+                        onValueChange = { editRateLimit = it },
+                        label = { Text("محدد السرعة (مثل: 2M/2M)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val updated = prof.copy(
+                            price = editPrice,
+                            validity = editValidity,
+                            sessionTimeout = editValidity,
+                            dataLimit = editDataLimit,
+                            rateLimit = editRateLimit
+                        )
+                        onUpdateProfile?.invoke(updated)
+                        // Apply to current dialog inputs
+                        price = editPrice
+                        timeLimit = editValidity
+                        val parsedMb = Regex("""\\d+""").find(editDataLimit)?.value?.toLongOrNull()
+                        if (parsedMb != null && parsedMb > 0) {
+                            dataLimitMBInput = parsedMb.toString()
+                        }
+                        profileToEdit = null
+                    },
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("حفظ وتطبيق")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { profileToEdit = null },
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("إلغاء")
+                }
+            }
+        )
+    }
 }

@@ -2352,18 +2352,17 @@ class MikrotikRepository {
                     refreshCardsFromRouter()
                 }
 
-                if (addedCards.isEmpty() && failureReasons.isNotEmpty()) {
-                    val primaryErr = failureReasons.first()
+                if (addedCards.isEmpty()) {
+                    val primaryErr = failureReasons.firstOrNull() ?: "فشل الاتصال بالراوتر أو رفض السيرفر للإضافة"
                     return@withContext Result.failure(
-                        Exception("فشل إضافة الكروت في راوتر ميكروتك: $primaryErr. يرجى التأكد من باقة الراوتر وصلاحيات المستخدم.")
+                        Exception("فشل إضافة الكروت في راوتر ميكروتك: $primaryErr. تأكد من صحة بيانات الاتصال والباقة.")
                     )
                 }
 
                 val currentList = _cards.value.toMutableList()
-                val newlyAdded = if (addedCards.isNotEmpty()) addedCards else generatedCards
-                currentList.addAll(0, newlyAdded)
+                currentList.addAll(0, addedCards)
                 _cards.value = currentList.distinctBy { it.name }
-                return@withContext Result.success(newlyAdded)
+                return@withContext Result.success(addedCards)
             }
 
             // Demo Mode: Add generated cards locally
