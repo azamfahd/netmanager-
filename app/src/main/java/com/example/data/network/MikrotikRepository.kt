@@ -654,31 +654,27 @@ class MikrotikRepository {
 
                 // 2. If port 80 / 443: Attempt RouterOS v7 REST API first
                 var restConnected = false
-                var is404Response = false
                 val protocol = if (cleanConfig.useHttps) "https" else "http"
                 val baseUrl = "$protocol://${cleanConfig.ipAddress}:${cleanConfig.port}"
                 val credential = Credentials.basic(cleanConfig.username, cleanConfig.password)
 
-                try {
-                    val request = Request.Builder()
-                        .url("$baseUrl/rest/system/resource")
-                        .header("Authorization", credential)
-                        .build()
+                // Caching the successfully detected connection type
+                if (cleanConfig.port != 8728) {
+                    try {
+                        val request = Request.Builder()
+                            .url("$baseUrl/rest/system/resource")
+                            .header("Authorization", credential)
+                            .build()
 
-                    val response = httpClient.newCall(request).execute()
-                    if (response.isSuccessful) {
-                        val body = response.body?.string() ?: ""
-                        parseResource(body)
-                        fetchLiveRouterData(baseUrl, credential)
-                        isApiSocketMode = false
-                        restConnected = true
-                    } else if (response.code == 404) {
-                        is404Response = true
-                    } else if (response.code == 401 || response.code == 403) {
-                        return@withContext Result.failure(Exception("خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة (رمز ${response.code}). يرجى التحقق من كتابة الحساب وكلمة السر بدقة."))
-                    }
-                } catch (_: Exception) {
-                    // HTTP connection failed, fallback to native API socket
+                        val response = httpClient.newCall(request).execute()
+                        if (response.isSuccessful) {
+                            val body = response.body?.string() ?: ""
+                            parseResource(body)
+                            fetchLiveRouterData(baseUrl, credential)
+                            isApiSocketMode = false
+                            restConnected = true
+                        }
+                    } catch (_: Exception) {}
                 }
 
                 if (restConnected) {
@@ -705,10 +701,8 @@ class MikrotikRepository {
                 val socketErr = socketResult.exceptionOrNull()?.message.orEmpty()
                 val errorMsg = if (socketErr.contains("بيانات الدخول") || socketErr.contains("المصادقة") || socketErr.contains("كلمة المرور")) {
                     socketErr
-                } else if (is404Response) {
-                    "استجاب الراوتر على منفذ الويب برمز 404 (RouterOS v6)، كما تعذر الاتصال بمنفذ API (8728). يرجى التأكد من تفعيل خدمة API في الراوتر عبر Winbox من القائمة: IP -> Services -> api"
                 } else {
-                    "تعذر الاتصال بعنوان الراوتر (${config.ipAddress}:${config.port}). يرجى التأكد من أن هاتفك متصل بشبكة الواي فاي التابعة للراوتر، أو مراجعة إعدادات IP والمنفذ."
+                    "تعذر الاتصال بعنوان الراوتر (${config.ipAddress}:${config.port}). يرجى التأكد من تفعيل خدمة API في الراوتر عبر Winbox من القائمة: IP -> Services -> api، وتأكد من أن هاتفك متصل بشبكة الواي فاي التابعة للراوتر."
                 }
 
                 Result.failure(Exception(errorMsg))
