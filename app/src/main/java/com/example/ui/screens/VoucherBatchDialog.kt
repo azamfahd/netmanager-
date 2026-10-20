@@ -161,37 +161,15 @@ val PRESET_CATEGORIES = listOf(
         color = Color(0xFF7B1FA2)
     ),
     VoucherPreset(
-        priceValue = 500,
-        priceLabel = "500 ر.ي",
-        title = "قالب كروت المدارس",
-        timeLimit = "12h",
-        timeDisplay = "12 ساعة",
-        dataLimitMB = 2048L,
-        dataDisplay = "2 GB",
-        rateLimit = "3M/3M",
-        color = Color(0xFF0288D1)
-    ),
-    VoucherPreset(
-        priceValue = 300,
-        priceLabel = "300 ر.ي",
-        title = "قالب الكروت الليلية",
-        timeLimit = "8h",
-        timeDisplay = "8 ساعات ليلية",
-        dataLimitMB = 1536L,
-        dataDisplay = "1.5 GB",
-        rateLimit = "4M/4M",
-        color = Color(0xFF5E35B1)
-    ),
-    VoucherPreset(
-        priceValue = 1500,
-        priceLabel = "1500 ر.ي",
-        title = "قالب كافيه VIP",
-        timeLimit = "5d",
-        timeDisplay = "5 أيام مفتوحة",
-        dataLimitMB = 10240L,
-        dataDisplay = "10 GB",
-        rateLimit = "10M/10M",
-        color = Color(0xFFD81B60)
+        priceValue = 2500,
+        priceLabel = "2500 ر.ي",
+        title = "فئة 2500 (باقة مميزة)",
+        timeLimit = "10d",
+        timeDisplay = "10 أيام",
+        dataLimitMB = 18432L,
+        dataDisplay = "18 GB",
+        rateLimit = "8M/8M",
+        color = Color(0xFFC2185B)
     )
 )
 
@@ -208,8 +186,7 @@ fun VoucherBatchDialog(
     preselectedAgentId: Long = 0L,
     onDismiss: () -> Unit,
     onGenerate: (BatchGenerationConfig) -> Unit,
-    onAddSingleCard: ((HotspotCard, Long, String, Double) -> Unit)? = null,
-    onUpdateProfile: ((HotspotProfile) -> Unit)? = null
+    onAddSingleCard: ((HotspotCard, Long, String, Double) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val settingsManager = remember { VoucherSettingsManager(context) }
@@ -232,7 +209,6 @@ fun VoucherBatchDialog(
         )
     }
     var expandedAgentDropdown by remember { mutableStateOf(false) }
-    var directPrintEnabled by remember { mutableStateOf(false) }
 
     // Pick first non-default real router profile if available, unless savedSettings has one
     val initialProfile = remember(profiles, savedSettings) {
@@ -260,7 +236,7 @@ fun VoucherBatchDialog(
 
     // Single card specific state
     var singleCode by remember { mutableStateOf("849201") }
-    var singlePassword by remember { mutableStateOf("849201") }
+    var singlePassword by remember { mutableStateOf("") }
     var singleComment by remember { mutableStateOf("كرت فردي") }
 
     var expandedDropdown by remember { mutableStateOf(false) }
@@ -318,7 +294,7 @@ fun VoucherBatchDialog(
         val finalCode = if (prefix.isNotBlank()) "$prefix$code" else code
         singleCode = finalCode
         if (isSingleCode) {
-            singlePassword = finalCode
+            singlePassword = ""
         }
     }
 
@@ -674,20 +650,19 @@ fun VoucherBatchDialog(
                     }
                 }
 
-                // 2. Predefined Categories & Multi-Presets Manager
+                // 2. Predefined Categories (فئات الكروت الشائعة: 200, 300, 500, 1000, 2500)
                 Column {
                     Text(
-                        text = "مدير القوالب السريعة والفئات (Multi-Presets Manager):",
+                        text = "اختر فئة الكرت السريعة (الأسعار والصلاحيات):",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(6.dp))
-                    // Row 1: Standard Categories
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        PRESET_CATEGORIES.take(4).forEachIndexed { index, preset ->
+                        PRESET_CATEGORIES.take(3).forEachIndexed { index, preset ->
                             FilterChip(
                                 selected = selectedPresetIndex == index,
                                 onClick = {
@@ -696,13 +671,13 @@ fun VoucherBatchDialog(
                                 },
                                 label = {
                                     Text(
-                                        text = preset.title,
+                                        text = preset.priceLabel,
                                         fontWeight = if (selectedPresetIndex == index) FontWeight.Bold else FontWeight.Normal,
-                                        fontSize = 11.sp
+                                        fontSize = 12.sp
                                     )
                                 },
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = preset.color.copy(alpha = 0.18f),
+                                    selectedContainerColor = preset.color.copy(alpha = 0.15f),
                                     selectedLabelColor = preset.color
                                 ),
                                 modifier = Modifier.weight(1f)
@@ -710,13 +685,12 @@ fun VoucherBatchDialog(
                         }
                     }
                     Spacer(modifier = Modifier.height(4.dp))
-                    // Row 2: Custom Templates (School, Night, VIP Cafe)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        PRESET_CATEGORIES.drop(4).forEachIndexed { idx, preset ->
-                            val actualIndex = idx + 4
+                        PRESET_CATEGORIES.drop(3).forEachIndexed { idx, preset ->
+                            val actualIndex = idx + 3
                             FilterChip(
                                 selected = selectedPresetIndex == actualIndex,
                                 onClick = {
@@ -725,13 +699,13 @@ fun VoucherBatchDialog(
                                 },
                                 label = {
                                     Text(
-                                        text = preset.title,
+                                        text = preset.priceLabel,
                                         fontWeight = if (selectedPresetIndex == actualIndex) FontWeight.Bold else FontWeight.Normal,
-                                        fontSize = 11.sp
+                                        fontSize = 12.sp
                                     )
                                 },
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = preset.color.copy(alpha = 0.18f),
+                                    selectedContainerColor = preset.color.copy(alpha = 0.15f),
                                     selectedLabelColor = preset.color
                                 ),
                                 modifier = Modifier.weight(1f)
@@ -1075,50 +1049,6 @@ fun VoucherBatchDialog(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp)
                     )
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    // Zero-Collision Check & Direct Print Options
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Surface(
-                            color = StatusActiveGreen.copy(alpha = 0.12f),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp), tint = StatusActiveGreen)
-                                Text(
-                                    text = "فحص التكرار التلقائي (Zero-Collision) مفعل",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = StatusActiveGreen
-                                )
-                            }
-                        }
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Checkbox(
-                                checked = directPrintEnabled,
-                                onCheckedChange = { directPrintEnabled = it },
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Text(
-                                text = "تصدير مباشر للطباعة",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
                 } else {
                     // ---- SINGLE CARD MANUAL MODE ----
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1136,7 +1066,7 @@ fun VoucherBatchDialog(
                                 value = singleCode,
                                 onValueChange = {
                                     singleCode = it
-                                    if (isSingleCode) singlePassword = it
+                                    if (isSingleCode) singlePassword = ""
                                 },
                                 label = { Text("كود الكرت / اسم المستخدم") },
                                 placeholder = { Text("أدخل كود مخصص...") },
@@ -1228,7 +1158,7 @@ fun VoucherBatchDialog(
                                 selected = isSingleCode,
                                 onClick = {
                                     isSingleCode = true
-                                    singlePassword = singleCode
+                                    singlePassword = ""
                                 },
                                 shape = RoundedCornerShape(10.dp),
                                 color = if (isSingleCode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
@@ -1260,7 +1190,7 @@ fun VoucherBatchDialog(
                                         )
                                     }
                                     Text(
-                                        text = "الوضع الافتراضي: كود دخول موحد (الاسم = كلمة السر)، الأسهل والأسرع للزبائن",
+                                        text = "الوضع الافتراضي: اسم مستخدم فقط (كلمة المرور فارغة)، الأسهل والأسرع للزبائن",
                                         fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -1478,7 +1408,7 @@ fun VoucherBatchDialog(
                         if (!isProfileValid) return@Button
                         if (singleCode.isNotBlank()) {
                             val selectedAgent = posAgents.find { it.id == selectedAgentId }
-                            val finalPassword = if (isSingleCode || singlePassword.isBlank()) singleCode.trim() else singlePassword.trim()
+                            val finalPassword = if (isSingleCode) "" else singlePassword.trim()
                             val card = HotspotCard(
                                 id = "card_${System.currentTimeMillis()}",
                                 name = singleCode.trim(),

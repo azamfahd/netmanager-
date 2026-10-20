@@ -126,59 +126,6 @@ class MikrotikRepository {
         }
     }
 
-    var onDataRefreshedListener: ((com.example.data.local.RouterSnapshot) -> Unit)? = null
-
-    fun restoreFromSnapshot(snapshot: com.example.data.local.RouterSnapshot) {
-        _resourceState.value = snapshot.resource
-        _routerBoardInfo.value = snapshot.routerBoard
-        if (snapshot.cards.isNotEmpty()) {
-            _cards.value = snapshot.cards
-        }
-        if (snapshot.profiles.isNotEmpty()) {
-            _profiles.value = snapshot.profiles
-        }
-        if (snapshot.activeUsers.isNotEmpty()) {
-            _activeUsers.value = snapshot.activeUsers
-        }
-        if (snapshot.servers.isNotEmpty()) {
-            _hotspotServers.value = snapshot.servers
-        }
-        if (snapshot.nodes.isNotEmpty()) {
-            _networkNodes.value = snapshot.nodes
-        }
-        if (snapshot.logs.isNotEmpty()) {
-            _systemLogs.value = snapshot.logs
-        }
-    }
-
-    fun getCurrentSnapshot(ip: String? = null, name: String? = null): com.example.data.local.RouterSnapshot {
-        val effectiveIp = ip ?: activeConfig?.ipAddress ?: "192.168.88.1"
-        val effectiveName = name ?: activeConfig?.name?.ifBlank { _resourceState.value.boardName } ?: _resourceState.value.boardName
-        return com.example.data.local.RouterSnapshot(
-            ipAddress = effectiveIp,
-            routerName = effectiveName,
-            timestamp = System.currentTimeMillis(),
-            resource = _resourceState.value,
-            routerBoard = _routerBoardInfo.value,
-            cards = _cards.value,
-            profiles = _profiles.value,
-            activeUsers = _activeUsers.value,
-            servers = _hotspotServers.value,
-            nodes = _networkNodes.value,
-            logs = _systemLogs.value
-        )
-    }
-
-    private fun notifyDataRefreshed() {
-        val cfg = activeConfig ?: return
-        if (cfg.isDemoMode) return
-        try {
-            val snapshot = getCurrentSnapshot(cfg.ipAddress, cfg.name)
-            onDataRefreshedListener?.invoke(snapshot)
-        } catch (_: Exception) {}
-    }
-
-
     fun logAdminAction(adminUsername: String, actionType: String, description: String, severity: String = "INFO") {
         val entry = com.example.data.model.AuditLogEntry(
             id = "log_${System.currentTimeMillis()}",
@@ -642,21 +589,18 @@ class MikrotikRepository {
                     return@withContext Result.success(true)
                 }
 
-                // Clear demo data only if previous data was demo mode, preserving cached real router data for instant UI
-                val hasDemoData = _cards.value.any { it.id.startsWith("demo_") }
-                if (hasDemoData) {
-                    _cards.value = emptyList()
-                    _activeUsers.value = emptyList()
-                    _profiles.value = emptyList()
-                    _ipBindings.value = emptyList()
-                    _networkNodes.value = emptyList()
-                    _userSessions.value = emptyList()
-                    _activityEvents.value = emptyList()
-                    _adminUsers.value = emptyList()
-                    _auditLogs.value = emptyList()
-                    _systemLogs.value = emptyList()
-                    _bandwidthHistory.value = emptyList()
-                }
+                // Clear any demo/initial placeholder data when connecting to a real router
+                _cards.value = emptyList()
+                _activeUsers.value = emptyList()
+                _profiles.value = emptyList()
+                _ipBindings.value = emptyList()
+                _networkNodes.value = emptyList()
+                _userSessions.value = emptyList()
+                _activityEvents.value = emptyList()
+                _adminUsers.value = emptyList()
+                _auditLogs.value = emptyList()
+                _systemLogs.value = emptyList()
+                _bandwidthHistory.value = emptyList()
 
                 // 1. If user explicitly specified port 8728, connect directly via native RouterOS API socket
                 if (cleanConfig.port == 8728) {
@@ -875,7 +819,7 @@ class MikrotikRepository {
                 _activeUsers.value = enrichedActive
             }
 
-            // 7. Fetch Hotspot Cards + User-Manager Database with smart delta merge
+            // 7. Fetch Hotspot Cards + User-Manager Database (Complete User Base)
             val hotspotCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
             val umCards = routerOsApiClient.getUserManagerUsers().getOrDefault(emptyList())
             val combinedCards = mutableListOf<HotspotCard>()
@@ -886,21 +830,7 @@ class MikrotikRepository {
                     combinedCards.add(umCard)
                 }
             }
-            if (combinedCards.isNotEmpty()) {
-                val newCardsMap = combinedCards.associateBy { it.name }
-                val current = _cards.value
-                val merged = if (current.isEmpty() || current.any { it.id.startsWith("demo_") }) {
-                    combinedCards.distinctBy { it.name }
-                } else {
-                    val updated = current.map { old -> newCardsMap[old.name] ?: old }.toMutableList()
-                    val updatedNames = updated.map { it.name }.toSet()
-                    combinedCards.forEach { c ->
-                        if (!updatedNames.contains(c.name)) updated.add(c)
-                    }
-                    updated.distinctBy { it.name }
-                }
-                _cards.value = merged
-            }
+            _cards.value = combinedCards.distinctBy { it.name }
 
             // 8. Fetch Profiles & IP Bindings from Router
             val profResult = routerOsApiClient.getHotspotProfiles()
@@ -945,7 +875,6 @@ class MikrotikRepository {
             val neighborsList = routerOsApiClient.getDiscoveredNeighbors().getOrDefault(emptyList())
 
             activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface, wirelessRegs) }
-            notifyDataRefreshed()
         }
     }
 
@@ -1475,7 +1404,6 @@ class MikrotikRepository {
                 } catch (_: Exception) {}
 
                 activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface) }
-                notifyDataRefreshed()
             } catch (_: Exception) {}
         }
     }
@@ -2280,7 +2208,7 @@ class MikrotikRepository {
                 val code = codeBuilder.toString()
                 if (!existingCodes.contains(code)) {
                     existingCodes.add(code)
-                    val password = if (config.isSingleCode) code else {
+                    val password = if (config.isSingleCode) "" else {
                         val passBuilder = StringBuilder()
                         for (i in 0 until 4) {
                             passBuilder.append(random.nextInt(10))
