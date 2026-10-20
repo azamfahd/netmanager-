@@ -2208,7 +2208,7 @@ class MikrotikRepository {
                 val code = codeBuilder.toString()
                 if (!existingCodes.contains(code)) {
                     existingCodes.add(code)
-                    val password = if (config.isSingleCode) "" else {
+                    val password = if (config.isSingleCode) code else {
                         val passBuilder = StringBuilder()
                         for (i in 0 until 4) {
                             passBuilder.append(random.nextInt(10))

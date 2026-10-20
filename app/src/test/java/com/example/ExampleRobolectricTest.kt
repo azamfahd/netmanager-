@@ -49,7 +49,7 @@ class ExampleRobolectricTest {
         generated.forEach { card ->
             assertTrue(card.name.startsWith("VIP-"))
             assertEquals(10, card.name.length) // "VIP-" (4) + 6 digits = 10
-            assertEquals("", card.password) // Single code mode with empty password
+            assertEquals(card.name, card.password) // Single code mode
         }
     }
 

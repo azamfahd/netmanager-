@@ -26,7 +26,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels {
         val database = AppDatabase.getInstance(applicationContext)
         val repository = MikrotikRepository()
-        MainViewModelFactory(repository, database, applicationContext)
+        MainViewModelFactory(repository, database)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

@@ -48,32 +48,8 @@ enum class CardFilter {
 
 class MainViewModel(
     private val repository: MikrotikRepository,
-    private val database: AppDatabase,
-    private val appContext: Context? = null
+    private val database: AppDatabase
 ) : ViewModel() {
-
-    init {
-        repository.onDataRefreshedListener = { snapshot ->
-            val ctx = appContext
-            if (ctx != null) {
-                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    com.example.data.local.RouterCacheManager.saveSnapshot(
-                        context = ctx,
-                        ipAddress = snapshot.ipAddress,
-                        routerName = snapshot.routerName,
-                        resource = snapshot.resource,
-                        routerBoard = snapshot.routerBoard,
-                        cards = snapshot.cards,
-                        profiles = snapshot.profiles,
-                        activeUsers = snapshot.activeUsers,
-                        servers = snapshot.servers,
-                        nodes = snapshot.nodes,
-                        logs = snapshot.logs
-                    )
-                }
-            }
-        }
-    }
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -981,118 +957,45 @@ class MainViewModel(
 
     fun connectToRouter(
         config: RouterConnectionConfig,
-        saveToFavorites: Boolean = true,
-        context: Context? = null
+        saveToFavorites: Boolean = true
     ) {
         viewModelScope.launch {
-            val targetContext = context ?: appContext
             _currentConfig.value = config
+            _connectionState.value = ConnectionState.Verifying("التحقق من الاتصال بالشبكة المحلية...", 0.25f)
+            delay(350)
 
-            var hasLoadedFromCache = false
-            // 1. FAST INSTANT LOGIN FROM CACHE (دخول سريع فوري):
-            if (!config.isDemoMode && targetContext != null) {
-                val cachedSnapshot = com.example.data.local.RouterCacheManager.loadSnapshot(targetContext, config.ipAddress)
-                if (cachedSnapshot != null) {
-                    repository.restoreFromSnapshot(cachedSnapshot)
-                    hasLoadedFromCache = true
-                    val cachedRouterName = cachedSnapshot.routerName.ifBlank { config.name.ifBlank { "راوتر MikroTik" } }
-                    _connectionState.value = ConnectionState.Connected(
-                        routerName = cachedRouterName,
-                        ipAddress = config.ipAddress,
-                        isDemo = false,
-                        isSyncing = true,
-                        isFromCache = true
-                    )
-                    _toastEvent.emit("⚡ تم فتح بيانات الراوتر المخزنة فورياً! جاري مزامنة التحديثات...")
-                }
-            }
+            _connectionState.value = ConnectionState.Verifying("فحص عنوان IP واستجابة الراوتر (${config.ipAddress})...", 0.50f)
+            delay(350)
 
-            if (!hasLoadedFromCache) {
-                _connectionState.value = ConnectionState.Verifying(
-                    "جاري الاتصال والتحقق من راوتر MikroTik (${config.ipAddress})...",
-                    0.5f
-                )
-            }
+            _connectionState.value = ConnectionState.Verifying("التحقق من اسم المستخدم وكلمة المرور...", 0.75f)
 
             val result = repository.verifyAndConnect(config)
             if (result.isSuccess) {
-                val liveBoardName = repository.resourceState.value.boardName
-                val finalRouterName = if (config.name.isNotBlank() && !config.name.startsWith("راوتر 192")) {
-                    config.name
-                } else if (liveBoardName.isNotBlank() && !liveBoardName.contains("MikroTik Router")) {
-                    liveBoardName
-                } else {
-                    config.name.ifBlank { "راوتر MikroTik" }
-                }
-
                 _connectionState.value = ConnectionState.Connected(
-                    routerName = finalRouterName,
+                    routerName = config.name.ifBlank { "راوتر MikroTik" },
                     ipAddress = config.ipAddress,
-                    isDemo = config.isDemoMode,
-                    isSyncing = false,
-                    isFromCache = false
+                    isDemo = config.isDemoMode
                 )
+                _toastEvent.emit(if (config.isDemoMode) "تم الدخول في وضع العرض التفاعلي" else "تم الاتصال بالراوتر بنجاح!")
 
-                if (config.isDemoMode) {
-                    _toastEvent.emit("تم الدخول في وضع العرض التفاعلي")
-                } else if (hasLoadedFromCache) {
-                    _toastEvent.emit("✅ تم مزامنة أحدث بيانات الراوتر بنجاح!")
-                } else {
-                    _toastEvent.emit("تم الاتصال بالراوتر بنجاح!")
-                }
-
-                // Auto-save or update router in saved list
-                if (!config.isDemoMode) {
-                    val existing = database.appDao().getSavedRouterByIp(config.ipAddress)
+                if (saveToFavorites && !config.isDemoMode) {
                     database.appDao().insertSavedRouter(
                         SavedRouterEntity(
-                            id = existing?.id ?: 0,
-                            name = finalRouterName,
+                            name = config.name.ifBlank { "راوتر ${config.ipAddress}" },
                             ipAddress = config.ipAddress,
                             port = config.port,
                             username = config.username,
-                            password = if (config.password.isNotBlank()) config.password else (existing?.password ?: ""),
+                            password = config.password,
                             useHttps = config.useHttps,
                             lastConnectedTime = System.currentTimeMillis()
                         )
                     )
-
-                    // Persist new cache snapshot
-                    if (targetContext != null) {
-                        val snapshot = repository.getCurrentSnapshot(config.ipAddress, finalRouterName)
-                        com.example.data.local.RouterCacheManager.saveSnapshot(
-                            context = targetContext,
-                            ipAddress = config.ipAddress,
-                            routerName = finalRouterName,
-                            resource = snapshot.resource,
-                            routerBoard = snapshot.routerBoard,
-                            cards = snapshot.cards,
-                            profiles = snapshot.profiles,
-                            activeUsers = snapshot.activeUsers,
-                            servers = snapshot.servers,
-                            nodes = snapshot.nodes,
-                            logs = snapshot.logs
-                        )
-                    }
                 }
                 startAutoRefresh()
             } else {
-                if (hasLoadedFromCache) {
-                    val error = result.exceptionOrNull()?.message ?: "تعذر الوصول للراوتر حالياً"
-                    _toastEvent.emit("تنبيه: تعذر الاتصال المباشر ($error). أنت تتصفح البيانات المحفوظة محلياً.")
-                    _connectionState.value = ConnectionState.Connected(
-                        routerName = config.name.ifBlank { "راوتر MikroTik (محفوظ)" },
-                        ipAddress = config.ipAddress,
-                        isDemo = false,
-                        isSyncing = false,
-                        isFromCache = true
-                    )
-                    startAutoRefresh()
-                } else {
-                    val error = result.exceptionOrNull()?.message ?: "فشل الاتصال بالراوتر"
-                    _connectionState.value = ConnectionState.Error(error)
-                    _toastEvent.emit(error)
-                }
+                val error = result.exceptionOrNull()?.message ?: "فشل الاتصال بالراوتر"
+                _connectionState.value = ConnectionState.Error(error)
+                _toastEvent.emit(error)
             }
         }
     }
@@ -1420,13 +1323,12 @@ class MainViewModel(
 
 class MainViewModelFactory(
     private val repository: MikrotikRepository,
-    private val database: AppDatabase,
-    private val appContext: Context? = null
+    private val database: AppDatabase
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
-            return MainViewModel(repository, database, appContext) as T
+            return MainViewModel(repository, database) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

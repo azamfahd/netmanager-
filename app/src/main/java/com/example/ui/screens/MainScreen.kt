@@ -404,7 +404,9 @@ fun MainScreen(
             onAddSingleCard = { card, agentId, agentName, discount ->
                 viewModel.addSingleCard(card, agentId, agentName, discount)
             },
-
+            onUpdateProfile = { profile ->
+                viewModel.updateProfile(profile)
+            }
         )
     }
 

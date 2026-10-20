@@ -14,9 +14,6 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSavedRouter(router: SavedRouterEntity): Long
 
-    @Query("SELECT * FROM saved_routers WHERE ipAddress = :ipAddress LIMIT 1")
-    suspend fun getSavedRouterByIp(ipAddress: String): SavedRouterEntity?
-
     @Query("DELETE FROM saved_routers WHERE id = :id")
     suspend fun deleteSavedRouter(id: Long)
 

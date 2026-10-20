@@ -236,7 +236,7 @@ fun VoucherBatchDialog(
 
     // Single card specific state
     var singleCode by remember { mutableStateOf("849201") }
-    var singlePassword by remember { mutableStateOf("") }
+    var singlePassword by remember { mutableStateOf("849201") }
     var singleComment by remember { mutableStateOf("كرت فردي") }
 
     var expandedDropdown by remember { mutableStateOf(false) }
@@ -294,7 +294,7 @@ fun VoucherBatchDialog(
         val finalCode = if (prefix.isNotBlank()) "$prefix$code" else code
         singleCode = finalCode
         if (isSingleCode) {
-            singlePassword = ""
+            singlePassword = finalCode
         }
     }
 
@@ -1066,7 +1066,7 @@ fun VoucherBatchDialog(
                                 value = singleCode,
                                 onValueChange = {
                                     singleCode = it
-                                    if (isSingleCode) singlePassword = ""
+                                    if (isSingleCode) singlePassword = it
                                 },
                                 label = { Text("كود الكرت / اسم المستخدم") },
                                 placeholder = { Text("أدخل كود مخصص...") },
@@ -1158,7 +1158,7 @@ fun VoucherBatchDialog(
                                 selected = isSingleCode,
                                 onClick = {
                                     isSingleCode = true
-                                    singlePassword = ""
+                                    singlePassword = singleCode
                                 },
                                 shape = RoundedCornerShape(10.dp),
                                 color = if (isSingleCode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
@@ -1190,7 +1190,7 @@ fun VoucherBatchDialog(
                                         )
                                     }
                                     Text(
-                                        text = "الوضع الافتراضي: اسم مستخدم فقط (كلمة المرور فارغة)، الأسهل والأسرع للزبائن",
+                                        text = "الوضع الافتراضي: كود دخول موحد (الاسم = كلمة السر)، الأسهل والأسرع للزبائن",
                                         fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -1408,7 +1408,7 @@ fun VoucherBatchDialog(
                         if (!isProfileValid) return@Button
                         if (singleCode.isNotBlank()) {
                             val selectedAgent = posAgents.find { it.id == selectedAgentId }
-                            val finalPassword = if (isSingleCode) "" else singlePassword.trim()
+                            val finalPassword = if (isSingleCode || singlePassword.isBlank()) singleCode.trim() else singlePassword.trim()
                             val card = HotspotCard(
                                 id = "card_${System.currentTimeMillis()}",
                                 name = singleCode.trim(),
