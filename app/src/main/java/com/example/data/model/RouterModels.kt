@@ -17,7 +17,9 @@ sealed class ConnectionState {
     data class Connected(
         val routerName: String,
         val ipAddress: String,
-        val isDemo: Boolean
+        val isDemo: Boolean,
+        val isSyncing: Boolean = false,
+        val isFromCache: Boolean = false
     ) : ConnectionState()
     data class Error(val message: String) : ConnectionState()
 }
@@ -191,11 +193,13 @@ data class IpBinding(
 
 data class DiscoveredRouter(
     val ip: String = "192.168.88.1",
-    val port: Int = 80,
+    val port: Int = 8728,
     val isReachable: Boolean = true,
     val useHttps: Boolean = false,
     val networkSsid: String = "شبكة Wi-Fi نشطة",
-    val statusMessage: String = "تم اكتشاف راوتر ميكروتك تلقائياً"
+    val statusMessage: String = "تم اكتشاف راوتر ميكروتك تلقائياً",
+    val openPorts: List<Int> = emptyList(),
+    val serviceType: String = "MikroTik API (8728)"
 )
 
 data class NodeConnectedClient(

@@ -226,8 +226,18 @@ fun MainScreen(
                     }
 
                     StatusPill(
-                        text = if (connectedState?.isDemo == true) "تجريبي" else "متصل",
-                        type = if (connectedState?.isDemo == true) StatusType.INFO else StatusType.SUCCESS,
+                        text = when {
+                            connectedState?.isDemo == true -> "تجريبي"
+                            connectedState?.isSyncing == true -> "جاري التحديث ⚡"
+                            connectedState?.isFromCache == true -> "كاش محلي ⚡"
+                            else -> "متصل"
+                        },
+                        type = when {
+                            connectedState?.isDemo == true -> StatusType.INFO
+                            connectedState?.isSyncing == true -> StatusType.WARNING
+                            connectedState?.isFromCache == true -> StatusType.INFO
+                            else -> StatusType.SUCCESS
+                        },
                         modifier = Modifier.padding(end = 12.dp)
                     )
                 },

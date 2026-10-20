@@ -17,30 +17,40 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ConfirmationNumber
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dataset
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Wifi
+import com.example.data.util.SavedVoucherSettings
+import com.example.data.util.VoucherSettingsManager
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -151,15 +161,37 @@ val PRESET_CATEGORIES = listOf(
         color = Color(0xFF7B1FA2)
     ),
     VoucherPreset(
-        priceValue = 2500,
-        priceLabel = "2500 ر.ي",
-        title = "فئة 2500 (باقة مميزة)",
-        timeLimit = "10d",
-        timeDisplay = "10 أيام",
-        dataLimitMB = 18432L,
-        dataDisplay = "18 GB",
-        rateLimit = "8M/8M",
-        color = Color(0xFFC2185B)
+        priceValue = 500,
+        priceLabel = "500 ر.ي",
+        title = "قالب كروت المدارس",
+        timeLimit = "12h",
+        timeDisplay = "12 ساعة",
+        dataLimitMB = 2048L,
+        dataDisplay = "2 GB",
+        rateLimit = "3M/3M",
+        color = Color(0xFF0288D1)
+    ),
+    VoucherPreset(
+        priceValue = 300,
+        priceLabel = "300 ر.ي",
+        title = "قالب الكروت الليلية",
+        timeLimit = "8h",
+        timeDisplay = "8 ساعات ليلية",
+        dataLimitMB = 1536L,
+        dataDisplay = "1.5 GB",
+        rateLimit = "4M/4M",
+        color = Color(0xFF5E35B1)
+    ),
+    VoucherPreset(
+        priceValue = 1500,
+        priceLabel = "1500 ر.ي",
+        title = "قالب كافيه VIP",
+        timeLimit = "5d",
+        timeDisplay = "5 أيام مفتوحة",
+        dataLimitMB = 10240L,
+        dataDisplay = "10 GB",
+        rateLimit = "10M/10M",
+        color = Color(0xFFD81B60)
     )
 )
 
@@ -179,34 +211,52 @@ fun VoucherBatchDialog(
     onAddSingleCard: ((HotspotCard, Long, String, Double) -> Unit)? = null,
     onUpdateProfile: ((HotspotProfile) -> Unit)? = null
 ) {
+    val context = LocalContext.current
+    val settingsManager = remember { VoucherSettingsManager(context) }
+    val savedSettings = remember { settingsManager.loadSettings() }
+
+    var hasSavedDefaults by remember { mutableStateOf(savedSettings.hasCustomDefaults) }
+    var saveStatusBanner by remember { mutableStateOf<String?>(null) }
+
     var selectedTab by remember { mutableStateOf(VoucherDialogTab.BATCH_GENERATE) }
 
     // Selected preset category (default 500)
     var selectedPresetIndex by remember { mutableIntStateOf(2) } // default 500
 
     // POS Agent selection
-    var selectedAgentId by remember { mutableLongStateOf(preselectedAgentId) }
+    var selectedAgentId by remember {
+        mutableLongStateOf(
+            if (preselectedAgentId != 0L) preselectedAgentId
+            else if (savedSettings.hasCustomDefaults && savedSettings.posAgentId != 0L) savedSettings.posAgentId
+            else 0L
+        )
+    }
     var expandedAgentDropdown by remember { mutableStateOf(false) }
+    var directPrintEnabled by remember { mutableStateOf(false) }
 
-    // Pick first non-default real router profile if available
-    val initialProfile = remember(profiles) {
-        profiles.firstOrNull { it.name.contains("500") }?.name
-            ?: profiles.firstOrNull { !it.name.equals("default", ignoreCase = true) }?.name
-            ?: profiles.firstOrNull()?.name
-            ?: "default"
+    // Pick first non-default real router profile if available, unless savedSettings has one
+    val initialProfile = remember(profiles, savedSettings) {
+        if (savedSettings.hasCustomDefaults && savedSettings.profile.isNotBlank() && profiles.any { it.name.trim().equals(savedSettings.profile.trim(), ignoreCase = true) }) {
+            savedSettings.profile.trim()
+        } else {
+            profiles.firstOrNull { it.name.contains("500") }?.name
+                ?: profiles.firstOrNull { !it.name.equals("default", ignoreCase = true) }?.name
+                ?: profiles.firstOrNull()?.name
+                ?: (if (savedSettings.profile.isNotBlank()) savedSettings.profile else "default")
+        }
     }
     var selectedProfile by remember { mutableStateOf(initialProfile) }
-    var price by remember { mutableStateOf(PRESET_CATEGORIES[2].priceLabel) }
-    var timeLimit by remember { mutableStateOf(PRESET_CATEGORIES[2].timeLimit) }
-    var dataLimitMBInput by remember { mutableStateOf(PRESET_CATEGORIES[2].dataLimitMB.toString()) }
-    var isSingleCode by remember { mutableStateOf(true) }
+    var price by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.price else PRESET_CATEGORIES[2].priceLabel) }
+    var timeLimit by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.timeLimit else PRESET_CATEGORIES[2].timeLimit) }
+    var dataLimitMBInput by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.dataLimitMB else PRESET_CATEGORIES[2].dataLimitMB.toString()) }
+    var isSingleCode by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.isSingleCode else true) }
 
     // Batch specific state
-    var batchCountInput by remember { mutableStateOf("20") }
-    var prefix by remember { mutableStateOf("") }
-    var codeLengthInput by remember { mutableStateOf("6") }
-    var charType by remember { mutableStateOf(CodeCharType.NUMBERS_ONLY) }
-    var batchComment by remember { mutableStateOf("دفعة فئة 500 ر.ي") }
+    var batchCountInput by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.batchCount else "20") }
+    var prefix by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.prefix else "") }
+    var codeLengthInput by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.codeLength else "6") }
+    var charType by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.charType else CodeCharType.NUMBERS_ONLY) }
+    var batchComment by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.batchComment else "دفعة كروت هوتسبوت") }
 
     // Single card specific state
     var singleCode by remember { mutableStateOf("849201") }
@@ -214,7 +264,6 @@ fun VoucherBatchDialog(
     var singleComment by remember { mutableStateOf("كرت فردي") }
 
     var expandedDropdown by remember { mutableStateOf(false) }
-    var profileToEdit by remember { mutableStateOf<HotspotProfile?>(null) }
 
     // Helper to apply real router profile settings
     fun applyRouterProfile(profile: HotspotProfile) {
@@ -233,11 +282,13 @@ fun VoucherBatchDialog(
         }
     }
 
-    // Auto-populate router profile settings on dialog launch if router profile is available
+    // Auto-populate router profile settings on dialog launch if router profile is available and user has no custom saved defaults
     androidx.compose.runtime.LaunchedEffect(profiles) {
-        val initialMatch = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
-        if (initialMatch != null) {
-            applyRouterProfile(initialMatch)
+        if (!savedSettings.hasCustomDefaults) {
+            val initialMatch = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+            if (initialMatch != null) {
+                applyRouterProfile(initialMatch)
+            }
         }
     }
 
@@ -314,7 +365,124 @@ fun VoucherBatchDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Top Persistent Settings Bar (Save as Default / Reset)
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (hasSavedDefaults) Icons.Default.Bookmark else Icons.Default.Tune,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp),
+                                tint = if (hasSavedDefaults) StatusActiveGreen else MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = if (hasSavedDefaults) "إعداداتك الافتراضية" else "الإعدادات القياسية",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (hasSavedDefaults) StatusActiveGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Button(
+                                onClick = {
+                                    settingsManager.saveSettings(
+                                        SavedVoucherSettings(
+                                            hasCustomDefaults = true,
+                                            profile = selectedProfile,
+                                            price = price,
+                                            timeLimit = timeLimit,
+                                            dataLimitMB = dataLimitMBInput,
+                                            isSingleCode = isSingleCode,
+                                            batchCount = batchCountInput,
+                                            codeLength = codeLengthInput,
+                                            charType = charType,
+                                            prefix = prefix,
+                                            batchComment = batchComment,
+                                            posAgentId = selectedAgentId
+                                        )
+                                    )
+                                    hasSavedDefaults = true
+                                    saveStatusBanner = "✅ تم حفظ الإعدادات كافتراضية دائمًا بنجاح!"
+                                    Toast.makeText(context, "تم حفظ الإعدادات الافتراضية بنجاح!", Toast.LENGTH_SHORT).show()
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = RouterBlue),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("حفظ كإعداد افتراضي", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            if (hasSavedDefaults) {
+                                OutlinedButton(
+                                    onClick = {
+                                        settingsManager.resetToDefaults()
+                                        hasSavedDefaults = false
+                                        saveStatusBanner = "تمت استعادة الإعدادات الأصلية للراوتر"
+                                        applyPreset(PRESET_CATEGORIES[2])
+                                        Toast.makeText(context, "تمت استعادة الإعدادات الأصلية", Toast.LENGTH_SHORT).show()
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Icon(Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(13.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("استعادة الأصل", fontSize = 10.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (saveStatusBanner != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Surface(
+                        color = StatusActiveGreen.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = saveStatusBanner ?: "",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = StatusActiveGreen
+                            )
+                            IconButton(
+                                onClick = { saveStatusBanner = null },
+                                modifier = Modifier.size(20.dp)
+                            ) {
+                                Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(12.dp), tint = StatusActiveGreen)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // Mode Selector Tabs: Batch vs Single
                 TabRow(
@@ -506,19 +674,20 @@ fun VoucherBatchDialog(
                     }
                 }
 
-                // 2. Predefined Categories (فئات الكروت الشائعة: 200, 300, 500, 1000, 2500)
+                // 2. Predefined Categories & Multi-Presets Manager
                 Column {
                     Text(
-                        text = "اختر فئة الكرت السريعة (الأسعار والصلاحيات):",
+                        text = "مدير القوالب السريعة والفئات (Multi-Presets Manager):",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(6.dp))
+                    // Row 1: Standard Categories
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        PRESET_CATEGORIES.take(3).forEachIndexed { index, preset ->
+                        PRESET_CATEGORIES.take(4).forEachIndexed { index, preset ->
                             FilterChip(
                                 selected = selectedPresetIndex == index,
                                 onClick = {
@@ -527,13 +696,13 @@ fun VoucherBatchDialog(
                                 },
                                 label = {
                                     Text(
-                                        text = preset.priceLabel,
+                                        text = preset.title,
                                         fontWeight = if (selectedPresetIndex == index) FontWeight.Bold else FontWeight.Normal,
-                                        fontSize = 12.sp
+                                        fontSize = 11.sp
                                     )
                                 },
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = preset.color.copy(alpha = 0.15f),
+                                    selectedContainerColor = preset.color.copy(alpha = 0.18f),
                                     selectedLabelColor = preset.color
                                 ),
                                 modifier = Modifier.weight(1f)
@@ -541,12 +710,13 @@ fun VoucherBatchDialog(
                         }
                     }
                     Spacer(modifier = Modifier.height(4.dp))
+                    // Row 2: Custom Templates (School, Night, VIP Cafe)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        PRESET_CATEGORIES.drop(3).forEachIndexed { idx, preset ->
-                            val actualIndex = idx + 3
+                        PRESET_CATEGORIES.drop(4).forEachIndexed { idx, preset ->
+                            val actualIndex = idx + 4
                             FilterChip(
                                 selected = selectedPresetIndex == actualIndex,
                                 onClick = {
@@ -555,13 +725,13 @@ fun VoucherBatchDialog(
                                 },
                                 label = {
                                     Text(
-                                        text = preset.priceLabel,
+                                        text = preset.title,
                                         fontWeight = if (selectedPresetIndex == actualIndex) FontWeight.Bold else FontWeight.Normal,
-                                        fontSize = 12.sp
+                                        fontSize = 11.sp
                                     )
                                 },
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = preset.color.copy(alpha = 0.15f),
+                                    selectedContainerColor = preset.color.copy(alpha = 0.18f),
                                     selectedLabelColor = preset.color
                                 ),
                                 modifier = Modifier.weight(1f)
@@ -657,36 +827,21 @@ fun VoucherBatchDialog(
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Check,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Text(
-                                            text = "إعدادات باقة (${activeProfileObj.name}):",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                    OutlinedButton(
-                                        onClick = { profileToEdit = activeProfileObj },
-                                        shape = RoundedCornerShape(8.dp),
-                                        modifier = Modifier.height(30.dp)
-                                    ) {
-                                        Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(12.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("تحرير الباقة", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "تم جلب وتعيين إعدادات باقة (${activeProfileObj.name}) تلقائياً من الراوتر:",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
                                 }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -877,6 +1032,41 @@ fun VoucherBatchDialog(
                         )
                     }
 
+                    // Quick Prefix Shortcuts
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "بادئة سريعة:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        listOf("VIP-", "77-", "73-", "A-", "B-", "NO-").forEach { tag ->
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (prefix == tag) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.clickable {
+                                    prefix = if (prefix == tag) "" else tag
+                                }
+                            ) {
+                                Text(
+                                    text = tag,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (prefix == tag) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        if (prefix.isNotBlank()) {
+                            IconButton(onClick = { prefix = "" }, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.Default.Clear, contentDescription = "مسح البادئة", modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+
                     OutlinedTextField(
                         value = batchComment,
                         onValueChange = { batchComment = it },
@@ -885,6 +1075,50 @@ fun VoucherBatchDialog(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp)
                     )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Zero-Collision Check & Direct Print Options
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            color = StatusActiveGreen.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp), tint = StatusActiveGreen)
+                                Text(
+                                    text = "فحص التكرار التلقائي (Zero-Collision) مفعل",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = StatusActiveGreen
+                                )
+                            }
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Checkbox(
+                                checked = directPrintEnabled,
+                                onCheckedChange = { directPrintEnabled = it },
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Text(
+                                text = "تصدير مباشر للطباعة",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 } else {
                     // ---- SINGLE CARD MANUAL MODE ----
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -936,7 +1170,8 @@ fun VoucherBatchDialog(
                             OutlinedTextField(
                                 value = singlePassword,
                                 onValueChange = { singlePassword = it },
-                                label = { Text("كلمة مرور الكرت") },
+                                label = { Text("كلمة مرور الكرت (اختيارية - اتركها فارغة لتكون نفس الكود)") },
+                                placeholder = { Text("اتركها فارغة لتكون مطابقة لاسم المستخدم") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(10.dp)
@@ -954,25 +1189,126 @@ fun VoucherBatchDialog(
                     }
                 }
 
-                // Single PIN Toggle
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable {
-                        isSingleCode = !isSingleCode
-                        if (isSingleCode) singlePassword = singleCode
-                    }
+                // Login Code Mode: Single Code / Username Only (Default) vs Separate Password (Optional)
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Checkbox(
-                        checked = isSingleCode,
-                        onCheckedChange = {
-                            isSingleCode = it
-                            if (it) singlePassword = singleCode
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "طريقة تسجيل دخول المشتركين في الراوتر:",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
-                    )
-                    Text(
-                        text = "كود موحد (اسم المستخدم هو نفسه كلمة المرور)",
-                        style = MaterialTheme.typography.bodySmall
-                    )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            // 1. Single Code / Username Only (Default & Recommended)
+                            Surface(
+                                selected = isSingleCode,
+                                onClick = {
+                                    isSingleCode = true
+                                    singlePassword = singleCode
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSingleCode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    if (isSingleCode) 1.5.dp else 0.5.dp,
+                                    if (isSingleCode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Person,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = if (isSingleCode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = "اسم مستخدم فقط (PIN)",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = if (isSingleCode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Text(
+                                        text = "الوضع الافتراضي: كود دخول موحد (الاسم = كلمة السر)، الأسهل والأسرع للزبائن",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            // 2. Separate Password (Optional)
+                            Surface(
+                                selected = !isSingleCode,
+                                onClick = { isSingleCode = false },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (!isSingleCode) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    if (!isSingleCode) 1.5.dp else 0.5.dp,
+                                    if (!isSingleCode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outlineVariant
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Key,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = if (!isSingleCode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = "كلمة مرور منفصلة (اختياري)",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = if (!isSingleCode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Text(
+                                        text = "إدخال اسم مستخدم وكلمة مرور منفصلين للمستخدم",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Time Limit Quick Chips & Field
@@ -1099,6 +1435,23 @@ fun VoucherBatchDialog(
                             posAgentName = selectedAgent?.name.orEmpty(),
                             discountPercent = selectedAgent?.discountPercent ?: 0.0
                         )
+                        // Auto-save the latest configuration for seamless experience
+                        settingsManager.saveSettings(
+                            SavedVoucherSettings(
+                                hasCustomDefaults = true,
+                                profile = selectedProfile,
+                                price = price,
+                                timeLimit = timeLimit,
+                                dataLimitMB = dataLimitMBInput,
+                                isSingleCode = isSingleCode,
+                                batchCount = batchCountInput,
+                                codeLength = codeLengthInput,
+                                charType = charType,
+                                prefix = prefix,
+                                batchComment = batchComment,
+                                posAgentId = selectedAgentId
+                            )
+                        )
                         onGenerate(config)
                         onDismiss()
                     },
@@ -1125,10 +1478,11 @@ fun VoucherBatchDialog(
                         if (!isProfileValid) return@Button
                         if (singleCode.isNotBlank()) {
                             val selectedAgent = posAgents.find { it.id == selectedAgentId }
+                            val finalPassword = if (isSingleCode || singlePassword.isBlank()) singleCode.trim() else singlePassword.trim()
                             val card = HotspotCard(
                                 id = "card_${System.currentTimeMillis()}",
                                 name = singleCode.trim(),
-                                password = if (isSingleCode) singleCode.trim() else singlePassword.trim(),
+                                password = finalPassword,
                                 profile = selectedProfile.trim(),
                                 uptime = "0s",
                                 bytesIn = 0,
@@ -1138,6 +1492,23 @@ fun VoucherBatchDialog(
                                 comment = if (selectedAgent != null) "${singleComment.ifBlank { "كرت فردي" }} (نقطة: ${selectedAgent.name})" else singleComment.ifBlank { "كرت فردي" },
                                 disabled = false,
                                 price = price
+                            )
+                            // Auto-save current settings
+                            settingsManager.saveSettings(
+                                SavedVoucherSettings(
+                                    hasCustomDefaults = true,
+                                    profile = selectedProfile,
+                                    price = price,
+                                    timeLimit = timeLimit,
+                                    dataLimitMB = dataLimitMBInput,
+                                    isSingleCode = isSingleCode,
+                                    batchCount = batchCountInput,
+                                    codeLength = codeLengthInput,
+                                    charType = charType,
+                                    prefix = prefix,
+                                    batchComment = batchComment,
+                                    posAgentId = selectedAgentId
+                                )
                             )
                             onAddSingleCard?.invoke(
                                 card,
@@ -1174,96 +1545,4 @@ fun VoucherBatchDialog(
             }
         }
     )
-
-    // Edit Profile Details Dialog
-    profileToEdit?.let { prof ->
-        var editPrice by remember { mutableStateOf(prof.price) }
-        var editValidity by remember { mutableStateOf(prof.validity.ifBlank { prof.sessionTimeout }) }
-        var editDataLimit by remember { mutableStateOf(prof.dataLimit) }
-        var editRateLimit by remember { mutableStateOf(prof.rateLimit) }
-
-        AlertDialog(
-            onDismissRequest = { profileToEdit = null },
-            shape = RoundedCornerShape(20.dp),
-            title = {
-                Text(text = "تحرير وتعديل تفاصيل باقة: ${prof.name}", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = "أي تعديل هنا سيحفظ الإعدادات في الراوتر والتطبيق لتكون افتراضية لهذه الباقة عند توليد الكروت مستقبلاً:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    OutlinedTextField(
-                        value = editPrice,
-                        onValueChange = { editPrice = it },
-                        label = { Text("سعر البيع (مثل: 500 ر.ي)") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = editValidity,
-                        onValueChange = { editValidity = it },
-                        label = { Text("مدة الصلاحية / الوقت (مثل: 1d, 6h, غير محدد)") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = editDataLimit,
-                        onValueChange = { editDataLimit = it },
-                        label = { Text("حصة البيانات (مثل: 1G, 500M, غير محدد)") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = editRateLimit,
-                        onValueChange = { editRateLimit = it },
-                        label = { Text("محدد السرعة (مثل: 2M/2M)") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val updated = prof.copy(
-                            price = editPrice,
-                            validity = editValidity,
-                            sessionTimeout = editValidity,
-                            dataLimit = editDataLimit,
-                            rateLimit = editRateLimit
-                        )
-                        onUpdateProfile?.invoke(updated)
-                        // Apply to current dialog inputs
-                        price = editPrice
-                        timeLimit = editValidity
-                        val parsedMb = Regex("""\\d+""").find(editDataLimit)?.value?.toLongOrNull()
-                        if (parsedMb != null && parsedMb > 0) {
-                            dataLimitMBInput = parsedMb.toString()
-                        }
-                        profileToEdit = null
-                    },
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("حفظ وتطبيق")
-                }
-            },
-            dismissButton = {
-                OutlinedButton(
-                    onClick = { profileToEdit = null },
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("إلغاء")
-                }
-            }
-        )
-    }
 }
