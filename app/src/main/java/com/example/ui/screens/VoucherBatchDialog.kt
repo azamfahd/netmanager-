@@ -186,7 +186,8 @@ fun VoucherBatchDialog(
     preselectedAgentId: Long = 0L,
     onDismiss: () -> Unit,
     onGenerate: (BatchGenerationConfig) -> Unit,
-    onAddSingleCard: ((HotspotCard, Long, String, Double) -> Unit)? = null
+    onAddSingleCard: ((HotspotCard, Long, String, Double) -> Unit)? = null,
+    onUpdateProfile: ((HotspotProfile) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val settingsManager = remember { VoucherSettingsManager(context) }

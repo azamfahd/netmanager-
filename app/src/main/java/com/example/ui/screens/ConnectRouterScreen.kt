@@ -7,11 +7,13 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,10 +29,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
@@ -343,18 +347,77 @@ fun ConnectRouterScreen(
 
                                 Column(horizontalAlignment = Alignment.End) {
                                     Text(
-                                        text = "المنفذ (Port):",
+                                        text = "المنفذ المكتشف تلقائياً:",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    Text(
-                                        text = "$activePort (${if (activePort == 8728) "API" else "REST"})",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(7.dp)
+                                                .clip(CircleShape)
+                                                .background(StatusActiveGreen)
+                                        )
+                                        Text(
+                                            text = "$activePort (${discoveredRouter?.serviceType ?: if (activePort == 8728) "API" else "REST"})",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = StatusActiveGreen
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Open Ports Quick Chips (التعرف الذكي على جميع المنافذ المفتوحة)
+                        val openPorts = discoveredRouter?.openPorts.orEmpty()
+                        if (openPorts.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "المنافذ المفتوحة:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                openPorts.forEach { p ->
+                                    val isSelected = activePort == p
+                                    val portLabel = when (p) {
+                                        8728 -> "8728 API"
+                                        8729 -> "8729 SSL"
+                                        8291 -> "8291 Winbox"
+                                        80 -> "80 HTTP"
+                                        443 -> "443 HTTPS"
+                                        else -> "$p"
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                                        border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
+                                        onClick = {
+                                            useManualNetworkSettings = true
+                                            manualPort = p
+                                            if (p == 443 || p == 8729) manualUseHttps = true
+                                        }
+                                    ) {
+                                        Text(
+                                            text = portLabel,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -517,7 +580,7 @@ fun ConnectRouterScreen(
                                             useHttps = false,
                                             isDemoMode = false
                                         )
-                                        viewModel.connectToRouter(config, saveToFavorites = rememberCredentials)
+                                        viewModel.connectToRouter(config, saveToFavorites = rememberCredentials, context = context)
                                     },
                                     shape = RoundedCornerShape(8.dp),
                                     modifier = Modifier.fillMaxWidth()
@@ -572,7 +635,215 @@ fun ConnectRouterScreen(
                 }
             }
 
-            // 2. Main Login Form: User only needs to enter Username and Password!
+            // 2. Saved Routers History / Quick Reconnect List (المحفوظات للدخول السريع)
+            if (savedRouters.isNotEmpty()) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Dns,
+                                        contentDescription = null,
+                                        tint = RouterBlue,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "الراوترات السابقة في المحفوظات (${savedRouters.size})",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Text(
+                                    text = "دخول فوري بنقرة واحدة",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+
+                            savedRouters.forEach { router ->
+                                var cacheSummary by remember(router.ipAddress) { mutableStateOf<com.example.data.local.RouterCacheSummary?>(null) }
+                                LaunchedEffect(router.ipAddress) {
+                                    cacheSummary = com.example.data.local.RouterCacheManager.getCacheSummary(context, router.ipAddress)
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                username = router.username
+                                                if (router.password.isNotBlank()) password = router.password
+                                                manualIp = router.ipAddress
+                                                manualPort = router.port
+                                                manualUseHttps = router.useHttps
+                                                useManualNetworkSettings = true
+                                                Toast.makeText(context, "تم تحديد بيانات راوتر ${router.name}", Toast.LENGTH_SHORT).show()
+                                            }
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(38.dp)
+                                                        .clip(CircleShape)
+                                                        .background(RouterBlue.copy(alpha = 0.12f)),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Router,
+                                                        contentDescription = null,
+                                                        tint = RouterBlue,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                                Column {
+                                                    Text(
+                                                        text = router.name,
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                    Text(
+                                                        text = "${router.ipAddress}:${router.port} • المستخدم: ${router.username}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        fontFamily = FontFamily.Monospace
+                                                    )
+                                                }
+                                            }
+
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Button(
+                                                    onClick = {
+                                                        username = router.username
+                                                        if (router.password.isNotBlank()) password = router.password
+                                                        val config = RouterConnectionConfig(
+                                                            id = router.id,
+                                                            name = router.name,
+                                                            ipAddress = router.ipAddress,
+                                                            port = router.port,
+                                                            username = router.username,
+                                                            password = router.password,
+                                                            useHttps = router.useHttps,
+                                                            isDemoMode = false
+                                                        )
+                                                        viewModel.connectToRouter(config, saveToFavorites = true, context = context)
+                                                    },
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = if (cacheSummary != null) StatusActiveGreen else RouterBlue
+                                                    ),
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    modifier = Modifier.height(34.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (cacheSummary != null) Icons.Default.Bolt else Icons.Default.Login,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text(
+                                                        text = if (cacheSummary != null) "⚡ دخول فوري" else "دخول سريع",
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+
+                                                IconButton(
+                                                    onClick = { viewModel.deleteSavedRouter(router.id) },
+                                                    modifier = Modifier.size(32.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Delete,
+                                                        contentDescription = "حذف الراوتر من المحفوظات",
+                                                        tint = MaterialTheme.colorScheme.error,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        // Local cache details banner
+                                        if (cacheSummary != null) {
+                                            Surface(
+                                                color = StatusActiveGreen.copy(alpha = 0.08f),
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = BorderStroke(0.6.dp, StatusActiveGreen.copy(alpha = 0.3f)),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Speed,
+                                                            contentDescription = null,
+                                                            tint = StatusActiveGreen,
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                        Text(
+                                                            text = "كاش محلي: ${cacheSummary?.cardsCount} كرت • ${cacheSummary?.profilesCount} باقات • مزامنة تلقائية",
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            color = StatusActiveGreen
+                                                        )
+                                                    }
+                                                    Text(
+                                                        text = cacheSummary?.formattedTime ?: "",
+                                                        fontSize = 9.sp,
+                                                        color = MaterialTheme.colorScheme.outline
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Main Login Form: User only needs to enter Username and Password!
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -663,7 +934,7 @@ fun ConnectRouterScreen(
                                     useHttps = activeHttps,
                                     isDemoMode = false
                                 )
-                                viewModel.connectToRouter(config, saveToFavorites = rememberCredentials)
+                                viewModel.connectToRouter(config, saveToFavorites = rememberCredentials, context = context)
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1042,7 +1313,7 @@ fun ConnectRouterScreen(
                                 useHttps = router.useHttps,
                                 isDemoMode = false
                             )
-                            viewModel.connectToRouter(config, saveToFavorites = false)
+                            viewModel.connectToRouter(config, saveToFavorites = false, context = context)
                         },
                         onDelete = {
                             viewModel.deleteSavedRouter(router.id)
@@ -1064,6 +1335,12 @@ fun SavedRouterItem(
     onConnect: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val context = LocalContext.current
+    var cacheSummary by remember(router.ipAddress) { mutableStateOf<com.example.data.local.RouterCacheSummary?>(null) }
+    LaunchedEffect(router.ipAddress) {
+        cacheSummary = com.example.data.local.RouterCacheManager.getCacheSummary(context, router.ipAddress)
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -1072,59 +1349,98 @@ fun SavedRouterItem(
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
-                    contentAlignment = Alignment.Center
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Router,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Router,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = router.name,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${router.ipAddress}:${router.port} (${router.username})",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
-                Column {
-                    Text(
-                        text = router.name,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "${router.ipAddress}:${router.port} (${router.username})",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Button(
+                        onClick = onConnect,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (cacheSummary != null) StatusActiveGreen else MaterialTheme.colorScheme.primary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (cacheSummary != null) Icons.Default.Bolt else Icons.Default.Login,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (cacheSummary != null) "⚡ دخول فوري" else "اتصال", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    IconButton(onClick = onDelete) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "حذف الراوتر",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             }
 
-            Row {
-                Button(
-                    onClick = onConnect,
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = ButtonDefaults.ContentPadding
+            if (cacheSummary != null) {
+                Surface(
+                    color = StatusActiveGreen.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(6.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("اتصال")
-                }
-                IconButton(onClick = onDelete) {
-                    Icon(
-                        imageVector = Icons.Default.Delete,
-                        contentDescription = "حذف الراوتر",
-                        tint = MaterialTheme.colorScheme.error
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "⚡ كاش محلي: ${cacheSummary?.cardsCount} كرت • ${cacheSummary?.profilesCount} باقات",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = StatusActiveGreen
+                        )
+                        Text(
+                            text = cacheSummary?.formattedTime ?: "",
+                            fontSize = 9.sp,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
                 }
             }
         }

@@ -8,6 +8,9 @@ import android.net.wifi.WifiManager
 import com.example.data.model.DiscoveredRouter
 import com.example.data.model.LocalNetworkInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -129,24 +132,57 @@ object NetworkUtils {
 
             // Target candidates to probe: detected gateway first, then standard 192.168.88.1 if gateway is different
             val ipCandidates = if (gateway != "192.168.88.1") listOf(gateway, "192.168.88.1") else listOf(gateway)
-            val portsToTest = listOf(8728, 80, 443, 8080)
+            // MikroTik standard service ports to test
+            val portsToTest = listOf(8728, 8729, 8291, 80, 443, 8080)
 
             var resolvedIp = gateway
             var activePort = 8728
             var isHttps = false
             var foundReachable = false
+            var openPortsList = listOf<Int>()
+            var serviceType = "MikroTik API (8728)"
 
             for (targetIp in ipCandidates) {
-                for (port in portsToTest) {
-                    if (testSocketConnection(targetIp, port, timeoutMs = 600)) {
-                        resolvedIp = targetIp
-                        activePort = port
-                        isHttps = (port == 443)
-                        foundReachable = true
-                        break
-                    }
+                // Test all candidate ports in parallel with short timeout for instant response
+                val testedPorts = coroutineScope {
+                    portsToTest.map { port ->
+                        async {
+                            val open = testSocketConnection(targetIp, port, timeoutMs = 450)
+                            port to open
+                        }
+                    }.awaitAll()
                 }
-                if (foundReachable) break
+
+                val reachablePorts = testedPorts.filter { it.second }.map { it.first }
+                if (reachablePorts.isNotEmpty()) {
+                    resolvedIp = targetIp
+                    foundReachable = true
+                    openPortsList = reachablePorts
+
+                    // Intelligently select best port for MikroTik connection:
+                    // 1) 8728 API is premier
+                    // 2) 8729 API-SSL
+                    // 3) 80 HTTP / REST
+                    // 4) 443 HTTPS
+                    // 5) First open port
+                    activePort = when {
+                        reachablePorts.contains(8728) -> 8728
+                        reachablePorts.contains(8729) -> 8729
+                        reachablePorts.contains(80) -> 80
+                        reachablePorts.contains(443) -> 443
+                        else -> reachablePorts.first()
+                    }
+                    isHttps = (activePort == 443 || activePort == 8729)
+                    serviceType = when (activePort) {
+                        8728 -> "منفذ MikroTik API الرسمي (8728)"
+                        8729 -> "منفذ MikroTik API-SSL المشفر (8729)"
+                        8291 -> "منفذ WinBox النشط (8291)"
+                        80 -> "منفذ WebFig / REST (80)"
+                        443 -> "منفذ WebFig HTTPS (443)"
+                        else -> "منفذ مخصص ($activePort)"
+                    }
+                    break
+                }
             }
 
             DiscoveredRouter(
@@ -155,8 +191,10 @@ object NetworkUtils {
                 isReachable = foundReachable,
                 useHttps = isHttps,
                 networkSsid = ssid,
+                openPorts = openPortsList,
+                serviceType = serviceType,
                 statusMessage = if (foundReachable)
-                    "تم اكتشاف راوتر ميكروتك النشط بنجاح على العنوان $resolvedIp:$activePort"
+                    "تم التعرف تلقائياً على الراوتر ($resolvedIp) والمنفذ المفتوح ($activePort - $serviceType)"
                 else
                     "تم التعرف على عنوان بوابة الشبكة ($resolvedIp) تلقائياً من شبكتك المتصلة"
             )
