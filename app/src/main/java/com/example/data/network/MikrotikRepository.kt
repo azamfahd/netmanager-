@@ -32,9 +32,9 @@ import kotlin.random.Random
 class MikrotikRepository {
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .writeTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
         .build()
 
     private val routerOsApiClient = RouterOsApiClient()
@@ -2576,6 +2576,8 @@ class MikrotikRepository {
                     } catch (_: Exception) {}
                     if (cardList.isNotEmpty()) {
                         _cards.value = cardList.distinctBy { it.name }
+                    } else {
+                        _cards.value = emptyList()
                     }
                 }
             }
