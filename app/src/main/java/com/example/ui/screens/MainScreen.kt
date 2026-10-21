@@ -32,10 +32,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -145,8 +149,10 @@ fun MainScreen(
     // If showing detailed user session screen
     selectedSessionForDetailScreen?.let { targetSession ->
         BackHandler { selectedSessionForDetailScreen = null }
+        val sessionHistory by viewModel.getLoginHistoryForUser(targetSession.username).collectAsStateWithLifecycle(emptyList())
         UserSessionDetailScreen(
             session = targetSession,
+            loginHistory = sessionHistory,
             onBackClick = { selectedSessionForDetailScreen = null },
             onKickUser = if (targetSession.isOnline) {
                 {
@@ -225,9 +231,21 @@ fun MainScreen(
                         }
                     }
 
+                    val pillText = when {
+                        connectedState?.isDemo == true -> "تجريبي"
+                        connectedState?.isOffline == true -> "كاش محلي"
+                        connectedState?.isSyncing == true -> "مزامنة..."
+                        else -> "متصل"
+                    }
+                    val pillType = when {
+                        connectedState?.isDemo == true -> StatusType.INFO
+                        connectedState?.isOffline == true -> StatusType.WARNING
+                        connectedState?.isSyncing == true -> StatusType.INFO
+                        else -> StatusType.SUCCESS
+                    }
                     StatusPill(
-                        text = if (connectedState?.isDemo == true) "تجريبي" else "متصل",
-                        type = if (connectedState?.isDemo == true) StatusType.INFO else StatusType.SUCCESS,
+                        text = pillText,
+                        type = pillType,
                         modifier = Modifier.padding(end = 12.dp)
                     )
                 },
@@ -311,80 +329,138 @@ fun MainScreen(
             }
         }
     ) { innerPadding ->
-        when (currentTab) {
-            AppTab.DASHBOARD -> {
-                DashboardScreen(
-                    viewModel = viewModel,
-                    onNavigateToActiveUsers = { currentTab = AppTab.ACTIVE_USERS },
-                    onNavigateToCards = { currentTab = AppTab.CARDS },
-                    onNavigateToProfiles = { currentTab = AppTab.PROFILES },
-                    onOpenBatchGenerator = { showBatchGeneratorDialog = true },
-                    onOpenPrintScreen = {
-                        viewModel.setPrintableCards(viewModel.cards.value)
-                        isShowingPrintScreen = true
-                    },
-                    onNavigateToFinance = { currentTab = AppTab.FINANCE },
-                    modifier = Modifier.padding(innerPadding)
-                )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            // Offline Safe Browsing Banner (تنبيه التصفح المحلي الآمن مع زر المزامنة)
+            if (connectedState?.isOffline == true) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.WifiOff,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "وضع التصفح المحلي (Offline Cache)",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Text(
+                                    text = "انقطع الاتصال بالراوتر مؤقتاً. جميع الكروت والإحصائيات محفوظة ومحمية محلياً دون فقدان.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Button(
+                            onClick = { viewModel.retrySync() },
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(13.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("مزامنة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
-            AppTab.FINANCE -> {
-                FinanceAnalyticsScreen(
-                    viewModel = viewModel,
-                    onNavigateToCards = { currentTab = AppTab.CARDS },
-                    onNavigateToPosAgents = { currentTab = AppTab.POS_AGENTS },
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-            AppTab.ACTIVE_USERS -> {
-                ActiveUsersScreen(
-                    viewModel = viewModel,
-                    onOpenSessionDetail = { session ->
-                        selectedSessionForDetailScreen = session
-                    },
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-            AppTab.NODES -> {
-                NetworkNodesScreen(
-                    viewModel = viewModel,
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-            AppTab.CARDS -> {
-                CardsScreen(
-                    viewModel = viewModel,
-                    onOpenBatchGenerator = {
-                        preselectedAgentIdForBatch = 0L
-                        showBatchGeneratorDialog = true
-                    },
-                    onOpenPrintScreen = { isShowingPrintScreen = true },
-                    onOpenSessionDetail = { session ->
-                        selectedSessionForDetailScreen = session
-                    },
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-            AppTab.POS_AGENTS -> {
-                PosAgentsScreen(
-                    viewModel = viewModel,
-                    onOpenBatchGeneratorForAgent = { agent ->
-                        preselectedAgentIdForBatch = agent.id
-                        showBatchGeneratorDialog = true
-                    },
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-            AppTab.PROFILES -> {
-                ProfilesScreen(
-                    viewModel = viewModel,
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-            AppTab.TOOLS -> {
-                NetworkToolsScreen(
-                    viewModel = viewModel,
-                    modifier = Modifier.padding(innerPadding)
-                )
+
+            Box(modifier = Modifier.weight(1f)) {
+                when (currentTab) {
+                    AppTab.DASHBOARD -> {
+                        DashboardScreen(
+                            viewModel = viewModel,
+                            onNavigateToActiveUsers = { currentTab = AppTab.ACTIVE_USERS },
+                            onNavigateToCards = { currentTab = AppTab.CARDS },
+                            onNavigateToProfiles = { currentTab = AppTab.PROFILES },
+                            onOpenBatchGenerator = { showBatchGeneratorDialog = true },
+                            onOpenPrintScreen = {
+                                viewModel.setPrintableCards(viewModel.cards.value)
+                                isShowingPrintScreen = true
+                            },
+                            onNavigateToFinance = { currentTab = AppTab.FINANCE }
+                        )
+                    }
+                    AppTab.FINANCE -> {
+                        FinanceAnalyticsScreen(
+                            viewModel = viewModel,
+                            onNavigateToCards = { currentTab = AppTab.CARDS },
+                            onNavigateToPosAgents = { currentTab = AppTab.POS_AGENTS }
+                        )
+                    }
+                    AppTab.ACTIVE_USERS -> {
+                        ActiveUsersScreen(
+                            viewModel = viewModel,
+                            onOpenSessionDetail = { session ->
+                                selectedSessionForDetailScreen = session
+                            }
+                        )
+                    }
+                    AppTab.NODES -> {
+                        NetworkNodesScreen(
+                            viewModel = viewModel
+                        )
+                    }
+                    AppTab.CARDS -> {
+                        CardsScreen(
+                            viewModel = viewModel,
+                            onOpenBatchGenerator = {
+                                preselectedAgentIdForBatch = 0L
+                                showBatchGeneratorDialog = true
+                            },
+                            onOpenPrintScreen = { isShowingPrintScreen = true },
+                            onOpenSessionDetail = { session ->
+                                selectedSessionForDetailScreen = session
+                            }
+                        )
+                    }
+                    AppTab.POS_AGENTS -> {
+                        PosAgentsScreen(
+                            viewModel = viewModel,
+                            onOpenBatchGeneratorForAgent = { agent ->
+                                preselectedAgentIdForBatch = agent.id
+                                showBatchGeneratorDialog = true
+                            }
+                        )
+                    }
+                    AppTab.PROFILES -> {
+                        ProfilesScreen(
+                            viewModel = viewModel
+                        )
+                    }
+                    AppTab.TOOLS -> {
+                        NetworkToolsScreen(
+                            viewModel = viewModel
+                        )
+                    }
+                }
             }
         }
     }

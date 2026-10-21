@@ -36,6 +36,24 @@ import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Timer
+import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Payments
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import com.example.ui.components.EmptyStateComponent
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -116,6 +134,12 @@ fun CardsScreen(
     var showPrintSelectionDialog by remember { mutableStateOf(false) }
     var selectedSessionForDetail by remember { mutableStateOf<UserSessionRecord?>(null) }
 
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+    var readySubFilter by remember { mutableStateOf(ReadyCardsSubFilter.ALL) }
+    var readySortOrder by remember { mutableStateOf(ReadyCardsSortOrder.NEWEST_FIRST) }
+    var collapsedBatchKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+
     val activeUsernames = remember(activeUsers) { activeUsers.map { it.user }.toSet() }
     val activeUsersMap = remember(activeUsers) { activeUsers.associateBy { it.user.lowercase() } }
     val userSessionsMap = remember(userSessions) { userSessions.associateBy { it.username.lowercase() } }
@@ -129,6 +153,35 @@ fun CardsScreen(
     }
     val countExpired = remember(distinctCards) {
         distinctCards.count { it.isExpired }
+    }
+
+    val onCardDetailClick: (HotspotCard) -> Unit = { card ->
+        val cardKey = card.name.lowercase()
+        val realSession = userSessionsMap[cardKey]
+        val activeUser = activeUsersMap[cardKey]
+        val session = realSession ?: UserSessionRecord(
+            id = card.id,
+            username = card.name,
+            ipAddress = activeUser?.address?.ifBlank { "غير متصل" } ?: "192.168.88.x",
+            macAddress = activeUser?.macAddress?.ifBlank { "00:00:00:00:00:00" } ?: "غير مسجل",
+            isOnline = activeUser != null || (card.isActive && !card.isExpired),
+            loginTime = if (activeUser != null) "متصل الآن (${activeUser.uptime})" else if (card.uptime != "0s") "جلسة سابقة (${card.uptime})" else "غير متصل",
+            logoutTime = if (activeUser != null) "نشط الآن" else if (card.isExpired) "منتهي الاستهلاك" else "كرت جاهز / توقف",
+            duration = if (activeUser != null) activeUser.uptime else if (card.uptime != "0s") card.uptime else "لم يبدأ",
+            bytesIn = activeUser?.bytesIn ?: card.bytesIn,
+            bytesOut = activeUser?.bytesOut ?: card.bytesOut,
+            totalBytes = (activeUser?.bytesIn ?: card.bytesIn) + (activeUser?.bytesOut ?: card.bytesOut),
+            terminateReason = if (card.isExpired) "انتهاء رصيد الكرت" else if (activeUser != null) "جلسة نشطة حالياً عبر ${activeUser.nodeName}" else if (card.uptime != "0s") "توقف / خروج الجلسة" else "كرت جاهز للبيع",
+            profile = card.profile,
+            price = card.price,
+            deviceInfo = DeviceDetector.detectDevice(activeUser?.macAddress ?: "", card.comment, card.name),
+            comment = card.comment.ifBlank { "كرت شبكة ميكروتك" }
+        )
+        if (onOpenSessionDetail != null) {
+            onOpenSessionDetail(session)
+        } else {
+            selectedSessionForDetail = session
+        }
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -266,52 +319,243 @@ fun CardsScreen(
                         }
                     }
                 }
+            } else if (currentFilter == CardFilter.UNUSED) {
+                // Specialized Ready-to-Sell View: Frame-based organization with Batch & Individual grouping and full tracking
+                val readyCards = remember(distinctCards, activeUsernames, searchQuery) {
+                    distinctCards.filter { card ->
+                        val isUnused = !activeUsernames.contains(card.name) &&
+                                (card.uptime.isBlank() || card.uptime == "0s") &&
+                                card.bytesIn == 0L && card.bytesOut == 0L &&
+                                !card.isExpired
+                        if (!isUnused) return@filter false
+                        if (searchQuery.isBlank()) true
+                        else {
+                            val q = searchQuery.trim().lowercase()
+                            card.name.lowercase().contains(q) ||
+                                    card.profile.lowercase().contains(q) ||
+                                    card.price.lowercase().contains(q) ||
+                                    card.comment.lowercase().contains(q)
+                        }
+                    }
+                }
+
+                val (rawBatchCards, rawIndividualCards) = remember(readyCards) {
+                    readyCards.partition { card ->
+                        val c = card.comment.lowercase()
+                        when {
+                            c.contains("فردي") -> false
+                            c.contains("دفعة") || c.contains("batch") -> true
+                            card.id.startsWith("gen_") -> true
+                            card.comment.isNotBlank() && readyCards.count { it.comment == card.comment } > 1 -> true
+                            else -> false
+                        }
+                    }
+                }
+
+                val batchGroups = remember(rawBatchCards) {
+                    rawBatchCards.groupBy { card ->
+                        when {
+                            card.comment.contains("دفعة") || card.comment.contains("batch") -> card.comment
+                            card.id.startsWith("gen_") -> {
+                                val parts = card.id.split("_")
+                                if (parts.size >= 2) "batch_${parts[1]}_${card.profile}" else card.comment.ifBlank { "دفعة_${card.profile}" }
+                            }
+                            card.comment.isNotBlank() -> card.comment
+                            else -> "batch_${card.profile}_${card.price}"
+                        }
+                    }.map { (key, cardsInBatch) ->
+                        val first = cardsInBatch.first()
+                        val ts = cardsInBatch.maxOfOrNull { extractCardTimestamp(it) } ?: 0L
+                        val formattedDate = if (ts > 0L) NetworkUtils.formatArabicFullDateTime(ts) else "تاريخ محفوظ في الراوتر"
+                        val title = when {
+                            first.comment.isNotBlank() && first.comment != "دفعة كروت" -> first.comment
+                            first.price.isNotBlank() -> "دفعة كروت (${first.profile}) - ${first.price}"
+                            else -> "دفعة كروت (${first.profile})"
+                        }
+                        val totalVal = cardsInBatch.sumOf { parsePriceNumber(it.price) }
+                        CardBatchGroup(
+                            batchKey = key,
+                            title = title,
+                            profile = first.profile,
+                            price = first.price,
+                            timestamp = ts,
+                            formattedDate = formattedDate,
+                            totalValue = totalVal,
+                            cards = cardsInBatch
+                        )
+                    }
+                }
+
+                val sortedBatches = remember(batchGroups, readySortOrder) {
+                    when (readySortOrder) {
+                        ReadyCardsSortOrder.NEWEST_FIRST -> batchGroups.sortedByDescending { it.timestamp }
+                        ReadyCardsSortOrder.OLDEST_FIRST -> batchGroups.sortedBy { it.timestamp }
+                        ReadyCardsSortOrder.BY_PROFILE -> batchGroups.sortedBy { it.profile }
+                        ReadyCardsSortOrder.BY_PRICE -> batchGroups.sortedByDescending { it.totalValue }
+                    }
+                }
+
+                val sortedIndividualCards = remember(rawIndividualCards, readySortOrder) {
+                    when (readySortOrder) {
+                        ReadyCardsSortOrder.NEWEST_FIRST -> rawIndividualCards.sortedByDescending { extractCardTimestamp(it) }
+                        ReadyCardsSortOrder.OLDEST_FIRST -> rawIndividualCards.sortedBy { extractCardTimestamp(it) }
+                        ReadyCardsSortOrder.BY_PROFILE -> rawIndividualCards.sortedBy { it.profile }
+                        ReadyCardsSortOrder.BY_PRICE -> rawIndividualCards.sortedByDescending { parsePriceNumber(it.price) }
+                    }
+                }
+
+                val totalFinancialVal = remember(readyCards) { readyCards.sumOf { parsePriceNumber(it.price) } }
+
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // 1. Analytics & Tracking Header Card
+                    item {
+                        ReadyCardsDashboardCard(
+                            totalReadyCount = readyCards.size,
+                            totalFinancialValue = totalFinancialVal,
+                            batchesCount = batchGroups.size,
+                            batchCardsCount = rawBatchCards.size,
+                            individualCardsCount = rawIndividualCards.size,
+                            currentSubFilter = readySubFilter,
+                            onSubFilterSelected = { readySubFilter = it },
+                            currentSortOrder = readySortOrder,
+                            onSortOrderSelected = { readySortOrder = it }
+                        )
+                    }
+
+                    // 2. Batches Frames Section
+                    if (readySubFilter == ReadyCardsSubFilter.ALL || readySubFilter == ReadyCardsSubFilter.BATCHES) {
+                        if (sortedBatches.isNotEmpty()) {
+                            item {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Group,
+                                        contentDescription = null,
+                                        tint = RouterBlue,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "الدفعات الجماعية المتاحة للبيع (${sortedBatches.size} دفعة - ${rawBatchCards.size} كرت)",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            items(sortedBatches, key = { it.batchKey }) { batch ->
+                                val isExpanded = !collapsedBatchKeys.contains(batch.batchKey)
+                                BatchCardGroupFrame(
+                                    batch = batch,
+                                    isExpanded = isExpanded,
+                                    onToggleExpand = {
+                                        collapsedBatchKeys = if (isExpanded) {
+                                            collapsedBatchKeys + batch.batchKey
+                                        } else {
+                                            collapsedBatchKeys - batch.batchKey
+                                        }
+                                    },
+                                    onPrintBatch = {
+                                        viewModel.setPrintableCards(batch.cards)
+                                        onOpenPrintScreen()
+                                    },
+                                    onCopyBatchCodes = {
+                                        val text = batch.cards.joinToString("\n") { card ->
+                                            if (card.password.isNotBlank() && card.password != card.name) {
+                                                "كود: ${card.name} | كلمة السر: ${card.password} | باقة: ${card.profile} | سعر: ${card.price}"
+                                            } else {
+                                                "كود: ${card.name} | باقة: ${card.profile} | سعر: ${card.price}"
+                                            }
+                                        }
+                                        clipboardManager.setText(AnnotatedString(text))
+                                        Toast.makeText(context, "تم نسخ أكواد ${batch.cards.size} كرت للحافظة بنجاح", Toast.LENGTH_SHORT).show()
+                                    },
+                                    onCardClick = onCardDetailClick,
+                                    onEditCard = { cardToEdit = it },
+                                    onReactivateCard = { cardToReactivate = it },
+                                    onToggleDisabledCard = { viewModel.toggleCardDisabled(it.id, it.disabled) },
+                                    onDeleteCard = { cardToDelete = it }
+                                )
+                            }
+                        } else if (readySubFilter == ReadyCardsSubFilter.BATCHES) {
+                            item {
+                                EmptyStateComponent(
+                                    icon = Icons.Default.Group,
+                                    title = "لا توجد دفعات جماعية جاهزة للبيع",
+                                    description = "يمكنك توليد دفعة كروت جديدة وتحديد عدد الكروت والباقة ليتم تصنيفها وتتبعها هنا تلقائياً.",
+                                    modifier = Modifier.padding(vertical = 24.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // 3. Individual Cards Frame Section
+                    if (readySubFilter == ReadyCardsSubFilter.ALL || readySubFilter == ReadyCardsSubFilter.INDIVIDUAL) {
+                        if (sortedIndividualCards.isNotEmpty()) {
+                            item {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Person,
+                                        contentDescription = null,
+                                        tint = StatusActiveGreen,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "الكروت المولدة فردياً (${sortedIndividualCards.size} كرت)",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            item {
+                                IndividualCardsFrame(
+                                    cards = sortedIndividualCards,
+                                    onPrintAll = {
+                                        viewModel.setPrintableCards(sortedIndividualCards)
+                                        onOpenPrintScreen()
+                                    },
+                                    onCardClick = onCardDetailClick,
+                                    onEditCard = { cardToEdit = it },
+                                    onReactivateCard = { cardToReactivate = it },
+                                    onToggleDisabledCard = { viewModel.toggleCardDisabled(it.id, it.disabled) },
+                                    onDeleteCard = { cardToDelete = it }
+                                )
+                            }
+                        } else if (readySubFilter == ReadyCardsSubFilter.INDIVIDUAL) {
+                            item {
+                                EmptyStateComponent(
+                                    icon = Icons.Default.Person,
+                                    title = "لا توجد كروت فردية جاهزة للبيع",
+                                    description = "يمكنك إنشاء كرت مخصص بشكل فردي من نافذة الإضافة وسيظهر في هذا القسم المخصص.",
+                                    modifier = Modifier.padding(vertical = 24.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    item {
+                        Spacer(modifier = Modifier.height(80.dp)) // padding for FAB
+                    }
+                }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                if (filteredCards.isEmpty()) {
-                    item {
-                        EmptyStateComponent(
-                            icon = Icons.Default.AddCard,
-                            title = if (searchQuery.isNotEmpty()) "لا توجد نتائج بحث مطابقة" else "لا توجد كروت متاحة",
-                            description = if (searchQuery.isNotEmpty()) "يرجى تجربة كلمات بحث أخرى." else "لا توجد كروت هوتسبوت مسجلة في الراوتر حالياً. يمكنك البدء بتوليد كروت جديدة.",
-                            modifier = Modifier.padding(vertical = 32.dp)
-                        )
-                    }
-                } else {
                     items(filteredCards, key = { it.id }) { card ->
                         HotspotCardItem(
                             card = card,
-                            onClick = {
-                                val cardKey = card.name.lowercase()
-                                val realSession = userSessionsMap[cardKey]
-                                val activeUser = activeUsersMap[cardKey]
-                                val session = realSession ?: UserSessionRecord(
-                                    id = card.id,
-                                    username = card.name,
-                                    ipAddress = activeUser?.address?.ifBlank { "غير متصل" } ?: "192.168.88.x",
-                                    macAddress = activeUser?.macAddress?.ifBlank { "00:00:00:00:00:00" } ?: "غير مسجل",
-                                    isOnline = activeUser != null || (card.isActive && !card.isExpired),
-                                    loginTime = if (activeUser != null) "متصل الآن (${activeUser.uptime})" else if (card.uptime != "0s") "جلسة سابقة (${card.uptime})" else "غير متصل",
-                                    logoutTime = if (activeUser != null) "نشط الآن" else if (card.isExpired) "منتهي الاستهلاك" else "كرت جاهز / توقف",
-                                    duration = if (activeUser != null) activeUser.uptime else if (card.uptime != "0s") card.uptime else "لم يبدأ",
-                                    bytesIn = activeUser?.bytesIn ?: card.bytesIn,
-                                    bytesOut = activeUser?.bytesOut ?: card.bytesOut,
-                                    totalBytes = (activeUser?.bytesIn ?: card.bytesIn) + (activeUser?.bytesOut ?: card.bytesOut),
-                                    terminateReason = if (card.isExpired) "انتهاء رصيد الكرت" else if (activeUser != null) "جلسة نشطة حالياً عبر ${activeUser.nodeName}" else if (card.uptime != "0s") "توقف / خروج الجلسة" else "كرت جاهز للبيع",
-                                    profile = card.profile,
-                                    price = card.price,
-                                    deviceInfo = DeviceDetector.detectDevice(activeUser?.macAddress ?: "", card.comment, card.name),
-                                    comment = card.comment.ifBlank { "كرت شبكة ميكروتك" }
-                                )
-                                if (onOpenSessionDetail != null) {
-                                    onOpenSessionDetail(session)
-                                } else {
-                                    selectedSessionForDetail = session
-                                }
-                            },
+                            onClick = { onCardDetailClick(card) },
                             onEdit = { cardToEdit = card },
                             onReactivate = { cardToReactivate = card },
                             onToggleDisabled = {
@@ -320,7 +564,6 @@ fun CardsScreen(
                             onDelete = { cardToDelete = card }
                         )
                     }
-                }
                     item {
                         Spacer(modifier = Modifier.height(80.dp)) // padding for FAB
                     }
@@ -356,8 +599,10 @@ fun CardsScreen(
 
     // User Detail Dialog
     selectedSessionForDetail?.let { session ->
+        val userHistory by viewModel.getLoginHistoryForUser(session.username).collectAsStateWithLifecycle(emptyList())
         UserDetailDialog(
             session = session,
+            loginHistory = userHistory,
             onDismiss = { selectedSessionForDetail = null }
         )
     }
@@ -706,6 +951,909 @@ fun HotspotCardItem(
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Ready-To-Sell Cards Organization, Frames, and Tracking Components
+// ------------------------------------------------------------------------------------------------
+
+enum class ReadyCardsSubFilter(val title: String) {
+    ALL("الكل"),
+    BATCHES("دفعات جماعية"),
+    INDIVIDUAL("كروت فردية")
+}
+
+enum class ReadyCardsSortOrder(val title: String) {
+    NEWEST_FIRST("الأحدث إضافة"),
+    OLDEST_FIRST("الأقدم إضافة"),
+    BY_PROFILE("حسب الباقة"),
+    BY_PRICE("حسب السعر")
+}
+
+data class CardBatchGroup(
+    val batchKey: String,
+    val title: String,
+    val profile: String,
+    val price: String,
+    val timestamp: Long,
+    val formattedDate: String,
+    val totalValue: Double,
+    val cards: List<HotspotCard>
+)
+
+fun extractCardTimestamp(card: HotspotCard): Long {
+    val parts = card.id.split("_")
+    if (parts.size >= 2) {
+        val ts = parts[1].toLongOrNull()
+        if (ts != null && ts > 1000000000L) return ts
+    }
+    return 0L
+}
+
+fun formatCardCreationDate(card: HotspotCard): String {
+    val ts = extractCardTimestamp(card)
+    return if (ts > 0L) {
+        NetworkUtils.formatArabicFullDateTime(ts)
+    } else {
+        "جاهز للبيع - مسجل بالراوتر"
+    }
+}
+
+fun parsePriceNumber(priceStr: String): Double {
+    if (priceStr.isBlank()) return 0.0
+    val cleaned = priceStr.replace(",", "").filter { it.isDigit() || it == '.' }
+    return cleaned.toDoubleOrNull() ?: 0.0
+}
+
+@Composable
+fun ReadyCardsDashboardCard(
+    totalReadyCount: Int,
+    totalFinancialValue: Double,
+    batchesCount: Int,
+    batchCardsCount: Int,
+    individualCardsCount: Int,
+    currentSubFilter: ReadyCardsSubFilter,
+    onSubFilterSelected: (ReadyCardsSubFilter) -> Unit,
+    currentSortOrder: ReadyCardsSortOrder,
+    onSortOrderSelected: (ReadyCardsSortOrder) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("ready_cards_dashboard_card"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Header: Title & Subtitle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(RouterBlue.copy(alpha = 0.12f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = null,
+                            tint = RouterBlue,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "لوحة تتبع ومتابعة الكروت الجاهزة للبيع",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "فرز وتنظيم دقيق للكروت المولدة فردياً والدفعات الجماعية مع تواريخ الإضافة",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+
+            // Summary Metrics Grid (4 items)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Metric 1: Ready Cards Count
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                    border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(text = "جاهزة للبيع", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontSize = 10.sp)
+                        Text(text = "$totalReadyCount كرت", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+
+                // Metric 2: Financial Value
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                    color = CyberGreenPrimary.copy(alpha = 0.12f),
+                    border = BorderStroke(0.6.dp, CyberGreenPrimary.copy(alpha = 0.3f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(text = "القيمة الإجمالية", style = MaterialTheme.typography.labelSmall, color = StatusActiveGreen, fontSize = 10.sp)
+                        Text(text = "${totalFinancialValue.toInt()} ر.ي", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = StatusActiveGreen)
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Metric 3: Batches
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                    color = RouterBlue.copy(alpha = 0.1f),
+                    border = BorderStroke(0.6.dp, RouterBlue.copy(alpha = 0.3f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(text = "الدفعات الجماعية", style = MaterialTheme.typography.labelSmall, color = RouterBlue, fontSize = 10.sp)
+                        Text(text = "$batchesCount دفعة ($batchCardsCount كرت)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = RouterBlue)
+                    }
+                }
+
+                // Metric 4: Individual Cards
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
+                    border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(text = "الكروت الفردية", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, fontSize = 10.sp)
+                        Text(text = "$individualCardsCount كرت مخصص", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // Sub-filter selector chips (All, Batches, Individual)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FilterChip(
+                    selected = currentSubFilter == ReadyCardsSubFilter.ALL,
+                    onClick = { onSubFilterSelected(ReadyCardsSubFilter.ALL) },
+                    label = { Text("عرض الكل ($totalReadyCount)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.height(34.dp)
+                )
+                FilterChip(
+                    selected = currentSubFilter == ReadyCardsSubFilter.BATCHES,
+                    onClick = { onSubFilterSelected(ReadyCardsSubFilter.BATCHES) },
+                    leadingIcon = { Icon(Icons.Default.Group, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                    label = { Text("دفعات جماعية ($batchesCount)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.height(34.dp)
+                )
+                FilterChip(
+                    selected = currentSubFilter == ReadyCardsSubFilter.INDIVIDUAL,
+                    onClick = { onSubFilterSelected(ReadyCardsSubFilter.INDIVIDUAL) },
+                    leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                    label = { Text("كروت فردية ($individualCardsCount)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.height(34.dp)
+                )
+            }
+
+            // Sorting Controls Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(end = 4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Sort,
+                        contentDescription = "ترتيب",
+                        modifier = Modifier.size(15.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "الترتيب:",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                ReadyCardsSortOrder.entries.forEach { option ->
+                    FilterChip(
+                        selected = currentSortOrder == option,
+                        onClick = { onSortOrderSelected(option) },
+                        label = { Text(option.title, fontSize = 11.sp) },
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.height(30.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun BatchCardGroupFrame(
+    batch: CardBatchGroup,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onPrintBatch: () -> Unit,
+    onCopyBatchCodes: () -> Unit,
+    onCardClick: (HotspotCard) -> Unit,
+    onEditCard: (HotspotCard) -> Unit,
+    onReactivateCard: (HotspotCard) -> Unit,
+    onToggleDisabledCard: (HotspotCard) -> Unit,
+    onDeleteCard: (HotspotCard) -> Unit
+) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("batch_group_frame_${batch.batchKey}"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        border = BorderStroke(1.2.dp, RouterBlue.copy(alpha = 0.35f))
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Header: Title, Batch Badge, Creation Date, Expand Toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(onClick = onToggleExpand),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(RouterBlue.copy(alpha = 0.14f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Group,
+                            contentDescription = null,
+                            tint = RouterBlue,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = batch.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = RouterBlue.copy(alpha = 0.12f)
+                            ) {
+                                Text(
+                                    text = "دفعة جماعية",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = RouterBlue,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        // Full Arabic Creation Date
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Schedule,
+                                contentDescription = null,
+                                modifier = Modifier.size(13.dp),
+                                tint = RouterBlue
+                            )
+                            Text(
+                                text = "تاريخ التوليد: ${batch.formattedDate}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+
+                IconButton(
+                    onClick = onToggleExpand,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = if (isExpanded) "طي الدفعة" else "عرض كروت الدفعة",
+                        tint = RouterBlue
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Badges & Value Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer
+                ) {
+                    Text(
+                        text = "الباقة: ${batch.profile}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                if (batch.price.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Text(
+                            text = "سعر الكرت: ${batch.price}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant
+                ) {
+                    Text(
+                        text = "${batch.cards.size} كروت بالدفعة",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (batch.totalValue > 0) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = StatusActiveGreenBg
+                    ) {
+                        Text(
+                            text = "إجمالي القيمة: ${batch.totalValue.toInt()} ر.ي",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = StatusActiveGreen,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Action Toolbar (Print Batch, Copy All Codes, Expand/Collapse)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = onPrintBatch,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberGreenPrimary),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                    modifier = Modifier.height(36.dp)
+                ) {
+                    Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("طباعة الدفعة كاملة", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+
+                OutlinedButton(
+                    onClick = onCopyBatchCodes,
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                    modifier = Modifier.height(36.dp)
+                ) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("نسخ جميع الأكواد", fontSize = 12.sp)
+                }
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier
+                        .clickable(onClick = onToggleExpand)
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (isExpanded) "طي (${batch.cards.size})" else "عرض الكروت (${batch.cards.size})",
+                        fontSize = 11.sp,
+                        color = RouterBlue,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            // Expanded Nested Cards List
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
+                    Text(
+                        text = "كروت هذه الدفعة المتاحة للبيع (${batch.cards.size} كرت):",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    batch.cards.forEach { card ->
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Card code & password
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { onCardClick(card) }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ConfirmationNumber,
+                                        contentDescription = null,
+                                        tint = RouterBlue,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            text = card.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        if (card.password.isNotBlank() && card.password != card.name) {
+                                            Text(
+                                                text = "الرمز: ${card.password}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Quick Actions Row
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    // Copy individual code
+                                    IconButton(
+                                        onClick = {
+                                            clipboardManager.setText(AnnotatedString(card.name))
+                                            Toast.makeText(context, "تم نسخ الكود: ${card.name}", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription = "نسخ",
+                                            modifier = Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+
+                                    // Edit
+                                    IconButton(
+                                        onClick = { onEditCard(card) },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Edit,
+                                            contentDescription = "تعديل",
+                                            modifier = Modifier.size(14.dp),
+                                            tint = RouterBlue
+                                        )
+                                    }
+
+                                    // Delete
+                                    IconButton(
+                                        onClick = { onDeleteCard(card) },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "حذف",
+                                            modifier = Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+
+                                    // Details
+                                    IconButton(
+                                        onClick = { onCardClick(card) },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Info,
+                                            contentDescription = "تفاصيل",
+                                            modifier = Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun IndividualCardsFrame(
+    cards: List<HotspotCard>,
+    onPrintAll: () -> Unit,
+    onCardClick: (HotspotCard) -> Unit,
+    onEditCard: (HotspotCard) -> Unit,
+    onReactivateCard: (HotspotCard) -> Unit,
+    onToggleDisabledCard: (HotspotCard) -> Unit,
+    onDeleteCard: (HotspotCard) -> Unit
+) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("individual_cards_frame"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        border = BorderStroke(1.2.dp, CyberGreenPrimary.copy(alpha = 0.4f))
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(CyberGreenPrimary.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Person,
+                            contentDescription = null,
+                            tint = StatusActiveGreen,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    Column {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "الكروت المولدة فردياً",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = StatusActiveGreenBg
+                            ) {
+                                Text(
+                                    text = "${cards.size} كرت جاهز",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = StatusActiveGreen,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "كروت مخصصة أُنشئت بشكل منفرد للزبائن",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = onPrintAll,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberGreenPrimary),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                    modifier = Modifier.height(34.dp)
+                ) {
+                    Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("طباعة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
+            // List of Individual Cards
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                cards.forEach { card ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                        border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            // Top Row: Code, Password, Copy & Badges
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.clickable { onCardClick(card) }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ConfirmationNumber,
+                                        contentDescription = null,
+                                        tint = StatusActiveGreen,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            text = card.name,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        if (card.password.isNotBlank() && card.password != card.name) {
+                                            Text(
+                                                text = "كلمة السر: ${card.password}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    StatusPill(text = "جاهز للبيع", type = StatusType.INFO)
+
+                                    IconButton(
+                                        onClick = {
+                                            clipboardManager.setText(AnnotatedString(card.name))
+                                            Toast.makeText(context, "تم نسخ الكود: ${card.name}", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription = "نسخ",
+                                            modifier = Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Full Arabic Creation Date
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Schedule,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(12.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "تاريخ الإضافة: ${formatCardCreationDate(card)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 10.sp
+                                )
+                            }
+
+                            // Profile & Price Row
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer
+                                ) {
+                                    Text(
+                                        text = "الباقة: ${card.profile}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+
+                                if (card.price.isNotBlank()) {
+                                    Text(
+                                        text = card.price,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+
+                            // Actions Row
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedButton(
+                                    onClick = { onEditCard(card) },
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(28.dp).weight(1f)
+                                ) {
+                                    Text("تعديل", fontSize = 11.sp)
+                                }
+
+                                OutlinedButton(
+                                    onClick = { onReactivateCard(card) },
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(28.dp).weight(1f)
+                                ) {
+                                    Text("تصفير العداد", fontSize = 11.sp)
+                                }
+
+                                OutlinedButton(
+                                    onClick = { onDeleteCard(card) },
+                                    shape = RoundedCornerShape(6.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(28.dp).weight(1f)
+                                ) {
+                                    Text("حذف", fontSize = 11.sp)
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    modifier = Modifier
+                                        .clickable { onCardClick(card) }
+                                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                                ) {
+                                    Text("تفاصيل", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
                     }
                 }
             }

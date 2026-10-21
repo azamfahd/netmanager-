@@ -32,7 +32,17 @@ data class RouterSnapshot(
 object RouterCacheManager {
     private fun getCacheFile(context: Context, ipAddress: String): File {
         val sanitizedIp = ipAddress.replace(Regex("[^a-zA-Z0-9_]"), "_")
-        return File(context.cacheDir, "router_snapshot_$sanitizedIp.json")
+        // Prefer persistent internal files directory so Android OS never clears it on low memory
+        val persistentFile = File(context.filesDir, "router_snapshot_$sanitizedIp.json")
+        if (persistentFile.exists()) return persistentFile
+        val cacheFile = File(context.cacheDir, "router_snapshot_$sanitizedIp.json")
+        if (cacheFile.exists()) return cacheFile
+        return persistentFile
+    }
+
+    private fun getTargetSaveFile(context: Context, ipAddress: String): File {
+        val sanitizedIp = ipAddress.replace(Regex("[^a-zA-Z0-9_]"), "_")
+        return File(context.filesDir, "router_snapshot_$sanitizedIp.json")
     }
 
     fun saveSnapshot(
@@ -181,8 +191,12 @@ object RouterCacheManager {
                 })
             }
 
-            val file = getCacheFile(context, ipAddress)
-            file.writeText(root.toString())
+            val targetFile = getTargetSaveFile(context, ipAddress)
+            val tempFile = File(context.filesDir, "${targetFile.name}.tmp")
+            tempFile.writeText(root.toString())
+            if (tempFile.exists()) {
+                tempFile.renameTo(targetFile)
+            }
         } catch (_: Exception) {}
     }
 
@@ -368,5 +382,31 @@ object RouterCacheManager {
             profilesCount = snapshot.profiles.size,
             formattedTime = timeStr
         )
+    }
+
+    fun hasCachedSnapshot(context: Context, ipAddress: String): Boolean {
+        val file = getCacheFile(context, ipAddress)
+        return file.exists() && file.length() > 20
+    }
+
+    fun getLastCacheTimestamp(context: Context, ipAddress: String): Long {
+        val snapshot = loadSnapshot(context, ipAddress)
+        return snapshot?.timestamp ?: 0L
+    }
+
+    fun formatCacheAge(timestamp: Long): String {
+        if (timestamp <= 0L) return "غير متوفر"
+        val diffMs = System.currentTimeMillis() - timestamp
+        val diffMin = diffMs / (60 * 1000L)
+        val diffHour = diffMin / 60
+        return when {
+            diffMin < 1 -> "منذ لحظات"
+            diffMin < 60 -> "منذ $diffMin دقيقة"
+            diffHour < 24 -> "منذ $diffHour ساعة"
+            else -> {
+                val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault())
+                sdf.format(Date(timestamp))
+            }
+        }
     }
 }

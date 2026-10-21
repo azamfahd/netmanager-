@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Laptop
 import androidx.compose.material.icons.filled.PersonRemove
@@ -88,6 +89,7 @@ import com.example.ui.theme.StatusErrorRed
 @Composable
 fun UserSessionDetailScreen(
     session: UserSessionRecord,
+    loginHistory: List<com.example.data.local.UserLoginHistoryEntity> = emptyList(),
     onBackClick: () -> Unit,
     onKickUser: (() -> Unit)? = null,
     onRefresh: () -> Unit = {},
@@ -598,76 +600,85 @@ fun UserSessionDetailScreen(
                     )
 
                     val hourlyList = session.hourlyUsageList.ifEmpty {
-                        val totalIn = session.bytesIn
-                        val totalOut = session.bytesOut
-                        listOf(
-                            HourlyUsageItem("الساعة الأولى (البدء)", (usage * 0.35).toLong(), (totalIn * 0.35).toLong(), (totalOut * 0.35).toLong(), "بداية الجلسة وتصفح سريع"),
-                            HourlyUsageItem("الساعة الثانية", (usage * 0.45).toLong(), (totalIn * 0.45).toLong(), (totalOut * 0.45).toLong(), "ذروة التحميل ومشاهدة وسائط"),
-                            HourlyUsageItem("الساعة الثالثة (الختام)", (usage * 0.20).toLong(), (totalIn * 0.20).toLong(), (totalOut * 0.20).toLong(), "استخدام خفيف ونهاية الجلسة")
-                        )
+                        NetworkUtils.generateHourlyUsageBreakdown(session)
                     }
 
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         hourlyList.forEach { item ->
                             Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(
-                                    modifier = Modifier.padding(10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
+                                    // Primary row: Exact time and date in Arabic format
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
                                             Box(
                                                 modifier = Modifier
-                                                    .size(8.dp)
+                                                    .size(24.dp)
                                                     .clip(CircleShape)
-                                                    .background(MaterialTheme.colorScheme.primary)
-                                            )
+                                                    .background(RouterBlue.copy(alpha = 0.12f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Schedule,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(14.dp),
+                                                    tint = RouterBlue
+                                                )
+                                            }
                                             Text(
-                                                text = item.hourLabel,
+                                                text = item.timeAndDateText.ifBlank { item.hourLabel },
                                                 style = MaterialTheme.typography.bodySmall,
                                                 fontWeight = FontWeight.Bold,
                                                 color = MaterialTheme.colorScheme.onSurface
                                             )
                                         }
+
                                         Surface(
                                             shape = RoundedCornerShape(6.dp),
-                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
                                         ) {
                                             Text(
                                                 text = NetworkUtils.formatBytes(item.bytesUsed),
                                                 style = MaterialTheme.typography.labelSmall,
                                                 fontWeight = FontWeight.ExtraBold,
                                                 color = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                             )
                                         }
                                     }
 
+                                    // Secondary row: Hour phase, note, and download/upload breakdown
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            text = "تحميل: ${NetworkUtils.formatBytes(item.downloadBytes)} • رفع: ${NetworkUtils.formatBytes(item.uploadBytes)}",
+                                            text = "${item.hourLabel} • ${item.note}",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
-                                        if (item.note.isNotBlank()) {
-                                            Text(
-                                                text = item.note,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                        }
+                                        Text(
+                                            text = "تحميل: ${NetworkUtils.formatBytes(item.downloadBytes)} | رفع: ${NetworkUtils.formatBytes(item.uploadBytes)}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = RouterBlue
+                                        )
                                     }
                                 }
                             }
@@ -747,8 +758,8 @@ fun UserSessionDetailScreen(
                                     )
                                 }
                                 Text(
-                                    text = session.loginTime,
-                                    style = MaterialTheme.typography.bodyMedium,
+                                    text = NetworkUtils.formatArabicFullDateTimeFromString(session.loginTime),
+                                    style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
@@ -779,8 +790,8 @@ fun UserSessionDetailScreen(
                                     )
                                 }
                                 Text(
-                                    text = session.logoutTime,
-                                    style = MaterialTheme.typography.bodyMedium,
+                                    text = if (session.isOnline) "متصل الآن (جلسة نشطة حالياً)" else NetworkUtils.formatArabicFullDateTimeFromString(session.logoutTime),
+                                    style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.Bold,
                                     color = if (session.isOnline) StatusActiveGreen else MaterialTheme.colorScheme.onSurface
                                 )
@@ -1015,6 +1026,184 @@ fun UserSessionDetailScreen(
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
                         )
+                    }
+                }
+            }
+
+            // 4.5. User Login & Device History Card (سجل تسجيلات الدخول وتاريخ الاستخدام والأجهزة)
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(RouterBlue.copy(alpha = 0.12f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.History,
+                                    contentDescription = null,
+                                    tint = RouterBlue,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Text(
+                                text = "سجل تسجيلات الدخول وتاريخ الاستخدام والأجهزة",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        if (loginHistory.isNotEmpty()) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = RouterBlue.copy(alpha = 0.12f)
+                            ) {
+                                Text(
+                                    text = "${loginHistory.size} تسجيلات محفوظة",
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = RouterBlue
+                                )
+                            }
+                        }
+                    }
+
+                    if (loginHistory.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.outline,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = "يتم تسجيل تاريخ كل جلسة وتفاصيل الأجهزة وأوقات الدخول والخروج تلقائياً في قاعدة البيانات المحلية.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else {
+                        loginHistory.forEach { record ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+                                border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Schedule,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp),
+                                                tint = RouterBlue
+                                            )
+                                            Text(
+                                                text = "الدخول: ${NetworkUtils.formatArabicFullDateTimeFromString(record.loginTime, record.timestamp)}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+
+                                        StatusPill(
+                                            text = if (record.logoutTime == "متصل الآن") "متصل الآن" else "انتهت (${record.duration})",
+                                            type = if (record.logoutTime == "متصل الآن") StatusType.SUCCESS else StatusType.INFO
+                                        )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "الجهاز: ${record.deviceBrand} ${record.deviceModel}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = "الاستهلاك: ${NetworkUtils.formatBytes(record.totalBytes)} (تحميل: ${NetworkUtils.formatBytes(record.bytesOut)} • رفع: ${NetworkUtils.formatBytes(record.bytesIn)})",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = if (record.logoutTime == "متصل الآن") "الخروج: متصل الآن (جلسة نشطة)" else "الخروج: ${NetworkUtils.formatArabicFullDateTimeFromString(record.logoutTime, record.timestamp)}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.outline
+                                        )
+                                        Text(
+                                            text = "السبب: ${record.terminateReason}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.outline
+                                        )
+                                    }
+
+                                    if (record.nodeName.isNotBlank() || record.macAddress.isNotBlank()) {
+                                        Text(
+                                            text = "نقطة الاتصال: ${record.nodeName.ifBlank { "الراوتر الرئيسي" }} • MAC: ${record.macAddress} • IP: ${record.ipAddress}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

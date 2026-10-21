@@ -390,8 +390,10 @@ fun ActiveUsersScreen(
 
     // User Detail Dialog
     selectedSessionForDetail?.let { targetSession ->
+        val userHistory by viewModel.getLoginHistoryForUser(targetSession.username).collectAsStateWithLifecycle(emptyList())
         UserDetailDialog(
             session = targetSession,
+            loginHistory = userHistory,
             onDismiss = { selectedSessionForDetail = null },
             onKickUser = if (targetSession.isOnline) {
                 { userToKick = targetSession }
@@ -689,16 +691,25 @@ fun UserSessionCardItem(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Login / Logout Timing
-                Column {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Schedule, contentDescription = null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(modifier = Modifier.width(3.dp))
-                        Text(text = "دخول: ${session.loginTime}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Icon(Icons.Default.Schedule, contentDescription = null, modifier = Modifier.size(12.dp), tint = StatusActiveGreen)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "وقت بدء الجلسة: ${NetworkUtils.formatArabicFullDateTimeFromString(session.loginTime)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    if (!session.isOnline) {
-                        Text(text = "خروج: ${session.logoutTime}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } else {
-                        Text(text = "المدة: ${session.duration}", style = MaterialTheme.typography.labelSmall, color = StatusActiveGreen, fontWeight = FontWeight.Bold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Timer, contentDescription = null, modifier = Modifier.size(12.dp), tint = if (session.isOnline) StatusActiveGreen else MaterialTheme.colorScheme.error)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (session.isOnline) "وقت انتهاء الجلسة: متصل الآن (المدة: ${session.duration})" else "وقت انتهاء الجلسة: ${NetworkUtils.formatArabicFullDateTimeFromString(session.logoutTime)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (session.isOnline) StatusActiveGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = if (session.isOnline) FontWeight.Bold else FontWeight.Normal
+                        )
                     }
                 }
 

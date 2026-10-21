@@ -139,4 +139,28 @@ interface AppDao {
 
     @Query("DELETE FROM router_error_logs")
     suspend fun clearErrorLogs()
+
+    // ==========================================
+    // User Login & Device History per Subscriber
+    // ==========================================
+    @Query("SELECT * FROM user_login_history WHERE username = :username ORDER BY timestamp DESC")
+    fun getLoginHistoryForUser(username: String): Flow<List<UserLoginHistoryEntity>>
+
+    @Query("SELECT * FROM user_login_history ORDER BY timestamp DESC LIMIT 100")
+    fun getAllLoginHistory(): Flow<List<UserLoginHistoryEntity>>
+
+    @Query("SELECT * FROM user_login_history WHERE username = :username AND logoutTime = 'متصل الآن' ORDER BY timestamp DESC LIMIT 1")
+    suspend fun getActiveLoginForUser(username: String): UserLoginHistoryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertLoginHistory(entry: UserLoginHistoryEntity): Long
+
+    @Query("UPDATE user_login_history SET bytesIn = :bytesIn, bytesOut = :bytesOut, totalBytes = :totalBytes, duration = :duration WHERE username = :username AND logoutTime = 'متصل الآن'")
+    suspend fun updateActiveLoginStats(username: String, bytesIn: Long, bytesOut: Long, totalBytes: Long, duration: String)
+
+    @Query("UPDATE user_login_history SET logoutTime = :logoutTime, duration = :duration, bytesIn = :bytesIn, bytesOut = :bytesOut, totalBytes = :totalBytes, terminateReason = :reason WHERE username = :username AND logoutTime = 'متصل الآن'")
+    suspend fun finalizeUserLogin(username: String, logoutTime: String, duration: String, bytesIn: Long, bytesOut: Long, totalBytes: Long, reason: String)
+
+    @Query("DELETE FROM user_login_history WHERE username = :username")
+    suspend fun clearLoginHistoryForUser(username: String)
 }

@@ -19,7 +19,10 @@ sealed class ConnectionState {
         val ipAddress: String,
         val isDemo: Boolean,
         val isSyncing: Boolean = false,
-        val isFromCache: Boolean = false
+        val isFromCache: Boolean = false,
+        val isOffline: Boolean = false,
+        val lastSyncTime: Long = System.currentTimeMillis(),
+        val offlineReason: String = ""
     ) : ConnectionState()
     data class Error(val message: String) : ConnectionState()
 }
@@ -296,7 +299,8 @@ data class HourlyUsageItem(
     val bytesUsed: Long,
     val downloadBytes: Long,
     val uploadBytes: Long,
-    val note: String = ""
+    val note: String = "",
+    val timeAndDateText: String = ""
 )
 
 data class UserSessionRecord(

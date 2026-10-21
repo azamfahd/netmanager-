@@ -119,6 +119,31 @@ class MainViewModel(
     private val _selectedTimeFilter = MutableStateFlow(com.example.data.model.TimeFilterRange.ALL)
     val selectedTimeFilter: StateFlow<com.example.data.model.TimeFilterRange> = _selectedTimeFilter.asStateFlow()
 
+    val allLoginHistory: StateFlow<List<com.example.data.local.UserLoginHistoryEntity>> = database.appDao().getAllLoginHistory()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val recentErrorLogs: StateFlow<List<com.example.data.local.RouterErrorLogEntity>> = database.appDao().getAllErrorLogs()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun getLoginHistoryForUser(username: String): kotlinx.coroutines.flow.Flow<List<com.example.data.local.UserLoginHistoryEntity>> {
+        return database.appDao().getLoginHistoryForUser(username)
+    }
+
+    fun logApplicationError(operation: String, errorMessage: String, details: String = "") {
+        viewModelScope.launch {
+            try {
+                database.appDao().insertErrorLog(
+                    com.example.data.local.RouterErrorLogEntity(
+                        operation = operation,
+                        errorMessage = errorMessage,
+                        details = details,
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+            } catch (_: Exception) {}
+        }
+    }
+
     fun setTimeFilter(filter: com.example.data.model.TimeFilterRange) {
         _selectedTimeFilter.value = filter
     }
@@ -514,9 +539,53 @@ class MainViewModel(
         viewModelScope.launch {
             activeUsers.collectLatest { activeList ->
                 val now = System.currentTimeMillis()
+                val nowFormatted = com.example.data.network.NetworkUtils.formatArabicFullDateTime(now)
+                val currentCards = cards.value
+
                 if (activeList.isNotEmpty()) {
                     activeList.forEach { user ->
                         database.appDao().markCardAsSold(user.user, now)
+
+                        // Persistent subscriber login tracking (تاريخ تسجيل الدخول والأجهزة والأوقات)
+                        try {
+                            val activeLogin = database.appDao().getActiveLoginForUser(user.user)
+                            val card = currentCards.firstOrNull { it.name == user.user }
+                            val cardProf = card?.profile?.ifBlank { "افتراضي" } ?: "افتراضي"
+                            val cardPrice = card?.price?.ifBlank { "غير محدد" } ?: "غير محدد"
+                            val detectedDevice = com.example.data.util.DeviceDetector.detectDevice(user.macAddress, user.hostName, user.user)
+
+                            if (activeLogin == null) {
+                                database.appDao().insertLoginHistory(
+                                    com.example.data.local.UserLoginHistoryEntity(
+                                        username = user.user,
+                                        loginTime = nowFormatted,
+                                        logoutTime = "متصل الآن",
+                                        duration = user.uptime.ifBlank { "0s" },
+                                        bytesIn = user.bytesIn,
+                                        bytesOut = user.bytesOut,
+                                        totalBytes = user.bytesIn + user.bytesOut,
+                                        ipAddress = user.address,
+                                        macAddress = user.macAddress,
+                                        deviceModel = detectedDevice.modelName,
+                                        deviceBrand = detectedDevice.brand,
+                                        deviceCategory = detectedDevice.category.name,
+                                        nodeName = user.nodeName,
+                                        profile = cardProf,
+                                        price = cardPrice,
+                                        terminateReason = "جلسة نشطة حالياً",
+                                        timestamp = now
+                                    )
+                                )
+                            } else {
+                                database.appDao().updateActiveLoginStats(
+                                    username = user.user,
+                                    bytesIn = user.bytesIn,
+                                    bytesOut = user.bytesOut,
+                                    totalBytes = user.bytesIn + user.bytesOut,
+                                    duration = user.uptime.ifBlank { "0s" }
+                                )
+                            }
+                        } catch (_: Exception) {}
                     }
                 }
 
@@ -525,8 +594,7 @@ class MainViewModel(
                 if (previousActiveUsernames.isNotEmpty()) {
                     val disconnectedNames = previousActiveUsernames - currentNames
                     if (disconnectedNames.isNotEmpty()) {
-                        val nowFormatted = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm", java.util.Locale("ar", "SA")).format(java.util.Date(now))
-                        val currentCards = cards.value
+                        val logoutTimeFormatted = com.example.data.network.NetworkUtils.formatArabicFullDateTime(System.currentTimeMillis())
                         disconnectedNames.forEach { discoName ->
                             val matchingCard = currentCards.firstOrNull { it.name == discoName }
                             val isQuotaOver = matchingCard != null && matchingCard.limitBytesTotal > 0L && (matchingCard.bytesIn + matchingCard.bytesOut) >= matchingCard.limitBytesTotal
@@ -539,7 +607,20 @@ class MainViewModel(
                             }
                             try {
                                 val targetSessionId = "sess_active_$discoName"
-                                database.appDao().markSessionOffline(targetSessionId, nowFormatted, reason, isQuotaOver)
+                                database.appDao().markSessionOffline(targetSessionId, logoutTimeFormatted, reason, isQuotaOver)
+
+                                val bytesIn = matchingCard?.bytesIn ?: 0L
+                                val bytesOut = matchingCard?.bytesOut ?: 0L
+                                val duration = matchingCard?.uptime ?: "0s"
+                                database.appDao().finalizeUserLogin(
+                                    username = discoName,
+                                    logoutTime = logoutTimeFormatted,
+                                    duration = duration,
+                                    bytesIn = bytesIn,
+                                    bytesOut = bytesOut,
+                                    totalBytes = bytesIn + bytesOut,
+                                    reason = reason
+                                )
                             } catch (_: Exception) {}
                         }
                     }
@@ -989,19 +1070,23 @@ class MainViewModel(
             _currentConfig.value = config
 
             var hasLoadedFromCache = false
-            // 1. FAST INSTANT LOGIN FROM CACHE (دخول سريع فوري):
+            var cachedSnapshotTimestamp = 0L
+            // 1. FAST INSTANT LOGIN FROM CACHE (دخول سريع فوري من الكاش):
             if (!config.isDemoMode && targetContext != null) {
                 val cachedSnapshot = com.example.data.local.RouterCacheManager.loadSnapshot(targetContext, config.ipAddress)
                 if (cachedSnapshot != null) {
                     repository.restoreFromSnapshot(cachedSnapshot)
                     hasLoadedFromCache = true
+                    cachedSnapshotTimestamp = cachedSnapshot.timestamp
                     val cachedRouterName = cachedSnapshot.routerName.ifBlank { config.name.ifBlank { "راوتر MikroTik" } }
                     _connectionState.value = ConnectionState.Connected(
                         routerName = cachedRouterName,
                         ipAddress = config.ipAddress,
                         isDemo = false,
                         isSyncing = true,
-                        isFromCache = true
+                        isFromCache = true,
+                        isOffline = false,
+                        lastSyncTime = cachedSnapshotTimestamp
                     )
                     _toastEvent.emit("⚡ تم فتح بيانات الراوتر المخزنة فورياً! جاري مزامنة التحديثات...")
                 }
@@ -1030,7 +1115,9 @@ class MainViewModel(
                     ipAddress = config.ipAddress,
                     isDemo = config.isDemoMode,
                     isSyncing = false,
-                    isFromCache = false
+                    isFromCache = false,
+                    isOffline = false,
+                    lastSyncTime = System.currentTimeMillis()
                 )
 
                 if (config.isDemoMode) {
@@ -1077,19 +1164,22 @@ class MainViewModel(
                 }
                 startAutoRefresh()
             } else {
+                val error = result.exceptionOrNull()?.message ?: "فشل الاتصال بالراوتر"
+                logApplicationError("CONNECT", error, "IP: ${config.ipAddress}")
                 if (hasLoadedFromCache) {
-                    val error = result.exceptionOrNull()?.message ?: "تعذر الوصول للراوتر حالياً"
-                    _toastEvent.emit("تنبيه: تعذر الاتصال المباشر ($error). أنت تتصفح البيانات المحفوظة محلياً.")
+                    _toastEvent.emit("تنبيه: تعذر الاتصال المباشر ($error). أنت تتصفح البيانات المحفوظة محلياً بأمان.")
                     _connectionState.value = ConnectionState.Connected(
                         routerName = config.name.ifBlank { "راوتر MikroTik (محفوظ)" },
                         ipAddress = config.ipAddress,
                         isDemo = false,
                         isSyncing = false,
-                        isFromCache = true
+                        isFromCache = true,
+                        isOffline = true,
+                        lastSyncTime = cachedSnapshotTimestamp,
+                        offlineReason = "تعذر الاتصال المباشر: $error"
                     )
                     startAutoRefresh()
                 } else {
-                    val error = result.exceptionOrNull()?.message ?: "فشل الاتصال بالراوتر"
                     _connectionState.value = ConnectionState.Error(error)
                     _toastEvent.emit(error)
                 }
@@ -1109,13 +1199,65 @@ class MainViewModel(
         }
     }
 
+    fun retrySync() {
+        viewModelScope.launch {
+            val currentConn = _connectionState.value
+            if (currentConn is ConnectionState.Connected) {
+                _connectionState.value = currentConn.copy(isSyncing = true)
+                _toastEvent.emit("جاري محاولة الاتصال بالراوتر ومزامنة البيانات...")
+                val res = repository.refreshData()
+                if (res.isSuccess) {
+                    _connectionState.value = currentConn.copy(
+                        isSyncing = false,
+                        isOffline = false,
+                        offlineReason = "",
+                        lastSyncTime = System.currentTimeMillis()
+                    )
+                    _toastEvent.emit("✅ تم الاتصال بالراوتر بنجاح وتحديث كافة البيانات!")
+                } else {
+                    val err = res.exceptionOrNull()?.message ?: "الراوتر غير متاح حالياً"
+                    logApplicationError("SYNC_RETRY", err, "IP: ${currentConn.ipAddress}")
+                    _connectionState.value = currentConn.copy(
+                        isSyncing = false,
+                        isOffline = true,
+                        offlineReason = err
+                    )
+                    _toastEvent.emit("⚠️ تعذر الوصول للراوتر ($err) - البيانات المحفوظة محلياً متاحة ومحفوظة.")
+                }
+            }
+        }
+    }
+
     private fun startAutoRefresh() {
         stopAutoRefresh()
         refreshJob = viewModelScope.launch {
             while (isActive && _autoRefresh.value) {
                 delay(4000)
-                if (_connectionState.value is ConnectionState.Connected) {
-                    repository.refreshData()
+                val currentConn = _connectionState.value
+                if (currentConn is ConnectionState.Connected) {
+                    if (currentConn.isDemo) {
+                        repository.refreshData()
+                    } else {
+                        val res = repository.refreshData()
+                        if (res.isSuccess) {
+                            if (currentConn.isOffline) {
+                                _connectionState.value = currentConn.copy(
+                                    isOffline = false,
+                                    offlineReason = "",
+                                    lastSyncTime = System.currentTimeMillis()
+                                )
+                                _toastEvent.emit("✅ تم استعادة الاتصال بالراوتر وتحديث البيانات بنجاح!")
+                            }
+                        } else {
+                            if (!currentConn.isOffline) {
+                                val err = res.exceptionOrNull()?.message ?: "انقطاع مؤقت في الاتصال بالراوتر"
+                                _connectionState.value = currentConn.copy(
+                                    isOffline = true,
+                                    offlineReason = err
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

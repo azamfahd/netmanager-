@@ -847,26 +847,39 @@ class MikrotikRepository {
             }
 
             // 7. Fetch Hotspot Cards + User-Manager Database (Complete User Base)
-            val hotspotCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
-            val umCards = routerOsApiClient.getUserManagerUsers().getOrDefault(emptyList())
-            val combinedCards = mutableListOf<HotspotCard>()
-            combinedCards.addAll(hotspotCards)
-            val existingCardNames = hotspotCards.map { it.name }.toSet()
-            umCards.forEach { umCard ->
-                if (!existingCardNames.contains(umCard.name)) {
-                    combinedCards.add(umCard)
+            val hotspotCardsRes = routerOsApiClient.getHotspotUsers()
+            val umCardsRes = routerOsApiClient.getUserManagerUsers()
+            val hotspotCards = hotspotCardsRes.getOrNull()
+            val umCards = umCardsRes.getOrNull()
+            if (hotspotCards != null || umCards != null) {
+                val combinedCards = mutableListOf<HotspotCard>()
+                hotspotCards?.let { combinedCards.addAll(it) }
+                val existingCardNames = combinedCards.map { it.name }.toSet()
+                umCards?.forEach { umCard ->
+                    if (!existingCardNames.contains(umCard.name)) {
+                        combinedCards.add(umCard)
+                    }
+                }
+                val distinctCards = combinedCards.distinctBy { it.name }
+                if (distinctCards.isNotEmpty() || _cards.value.isEmpty()) {
+                    _cards.value = distinctCards
                 }
             }
-            _cards.value = combinedCards.distinctBy { it.name }
 
             // 8. Fetch Profiles & IP Bindings from Router
             val profResult = routerOsApiClient.getHotspotProfiles()
             if (profResult.isSuccess) {
-                _profiles.value = profResult.getOrThrow()
+                val liveProfiles = profResult.getOrThrow()
+                if (liveProfiles.isNotEmpty() || _profiles.value.isEmpty()) {
+                    _profiles.value = liveProfiles
+                }
             }
             val bindResult = routerOsApiClient.getIpBindings()
             if (bindResult.isSuccess) {
-                _ipBindings.value = bindResult.getOrThrow()
+                val liveBindings = bindResult.getOrThrow()
+                if (liveBindings.isNotEmpty() || _ipBindings.value.isEmpty()) {
+                    _ipBindings.value = liveBindings
+                }
             }
 
             // 9. Fetch Interfaces & Neighbors for Per-Node Distribution
@@ -902,6 +915,7 @@ class MikrotikRepository {
             val neighborsList = routerOsApiClient.getDiscoveredNeighbors().getOrDefault(emptyList())
 
             activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface, wirelessRegs) }
+            notifyDataRefreshed()
         }
     }
 
@@ -1251,8 +1265,9 @@ class MikrotikRepository {
                         }
                     }
                 } catch (_: Exception) {}
-
-                _cards.value = cardList.distinctBy { it.name }
+                if (cardList.isNotEmpty() || _cards.value.isEmpty()) {
+                    _cards.value = cardList.distinctBy { it.name }
+                }
 
                 // Fetch hotspot profiles
                 val profRequest = Request.Builder()
@@ -1833,8 +1848,7 @@ class MikrotikRepository {
 
             val upSec = parseUptimeToSeconds(active.uptime)
             val loginTs = if (upSec > 0) System.currentTimeMillis() - (upSec * 1000L) else System.currentTimeMillis()
-            val loginTimeStr = java.text.SimpleDateFormat("hh:mm a", java.util.Locale("ar")).format(java.util.Date(loginTs))
-            val loginDisplay = "بدأ الساعة $loginTimeStr (متصل منذ ${active.uptime})"
+            val loginDisplay = NetworkUtils.formatArabicFullDateTime(loginTs)
 
             val packageLimit = matchingCard?.limitBytesTotal ?: 0L
             val isQuotaOver = packageLimit > 0L && (active.bytesIn + active.bytesOut) >= packageLimit
@@ -1974,8 +1988,11 @@ class MikrotikRepository {
         }
     }
 
-    suspend fun refreshData() {
-        val config = activeConfig ?: return
+    private val _lastSyncError = MutableStateFlow<String?>(null)
+    val lastSyncError: StateFlow<String?> = _lastSyncError.asStateFlow()
+
+    suspend fun refreshData(): Result<Unit> {
+        val config = activeConfig ?: return Result.failure(Exception("لم يتم ضبط إعدادات الاتصال"))
         if (config.isDemoMode) {
             val current = _resourceState.value
             val newRx = (current.rxSpeedKbps + Random.nextDouble(-400.0, 500.0)).coerceAtLeast(400.0)
@@ -1986,26 +2003,36 @@ class MikrotikRepository {
                 txSpeedKbps = newTx
             )
             recordBandwidthPoint(newRx, newTx)
-            return
+            _lastSyncError.value = null
+            return Result.success(Unit)
         }
 
-        if (isApiSocketMode) {
-            fetchLiveRouterDataFromSocket()
-            return
-        }
-
-        withContext(Dispatchers.IO) {
-            val protocol = if (config.useHttps) "https" else "http"
-            val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-            val credential = Credentials.basic(config.username, config.password)
-            try {
-                val resReq = Request.Builder().url("$baseUrl/rest/system/resource").header("Authorization", credential).build()
-                val resResp = httpClient.newCall(resReq).execute()
-                if (resResp.isSuccessful) {
-                    parseResource(resResp.body?.string() ?: "")
+        return try {
+            if (isApiSocketMode) {
+                fetchLiveRouterDataFromSocket()
+                _lastSyncError.value = null
+                Result.success(Unit)
+            } else {
+                withContext(Dispatchers.IO) {
+                    val protocol = if (config.useHttps) "https" else "http"
+                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                    val credential = Credentials.basic(config.username, config.password)
+                    try {
+                        val resReq = Request.Builder().url("$baseUrl/rest/system/resource").header("Authorization", credential).build()
+                        val resResp = httpClient.newCall(resReq).execute()
+                        if (resResp.isSuccessful) {
+                            parseResource(resResp.body?.string() ?: "")
+                        }
+                    } catch (_: Exception) {}
+                    fetchLiveRouterData(baseUrl, credential)
+                    _lastSyncError.value = null
+                    Result.success(Unit)
                 }
-                fetchLiveRouterData(baseUrl, credential)
-            } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            val errMsg = "تعذر تحديث البيانات من الراوتر: ${e.localizedMessage ?: e.message}"
+            _lastSyncError.value = errMsg
+            Result.failure(e)
         }
     }
 
