@@ -53,11 +53,13 @@ import com.example.ui.components.AppUpdateDialog
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -92,6 +94,7 @@ fun NetworkToolsScreen(
     val updateCheckState by viewModel.updateCheckState.collectAsStateWithLifecycle()
     val updateDownloadState by viewModel.updateDownloadState.collectAsStateWithLifecycle()
     var showUpdateDialog by remember { mutableStateOf(false) }
+    var manualCheckTriggered by remember { mutableStateOf(false) }
 
     var pingHost by remember { mutableStateOf(currentConfig.ipAddress) }
     var isPinging by remember { mutableStateOf(false) }
@@ -548,17 +551,46 @@ fun NetworkToolsScreen(
 
                         OutlinedButton(
                             onClick = {
-                                val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(AppUpdateManager.GITHUB_RELEASES_WEB_URL))
-                                browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                context.startActivity(browserIntent)
+                                manualCheckTriggered = true
+                                viewModel.checkForUpdates(isManual = true)
                             },
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.height(46.dp)
                         ) {
-                            Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("صفحة الإصدارات")
+                            if (updateCheckState is UpdateCheckState.Checking && manualCheckTriggered) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("جاري الفحص...")
+                            } else {
+                                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("تحميل آخر إصدار")
+                            }
                         }
+                    }
+                    
+                    // Trigger dialog immediately if manual check finds an update
+                    LaunchedEffect(updateCheckState) {
+                        if (manualCheckTriggered && updateCheckState is UpdateCheckState.UpdateAvailable) {
+                            showUpdateDialog = true
+                            manualCheckTriggered = false
+                        }
+                    }
+                    
+                    // Show dialog if update check state is UpdateAvailable
+                    if (showUpdateDialog && updateCheckState is UpdateCheckState.UpdateAvailable) {
+                         AppUpdateDialog(
+                            release = (updateCheckState as UpdateCheckState.UpdateAvailable).release,
+                            currentVersion = viewModel.currentAppVersion,
+                            downloadState = updateDownloadState,
+                            onDownloadAndInstall = { url -> viewModel.downloadAndInstallUpdate(context, url) },
+                            onInstallDownloaded = { file -> AppUpdateManager.installApk(context, file) },
+                            onDismiss = { showUpdateDialog = false }
+                        )
                     }
                 }
             }
@@ -681,37 +713,30 @@ fun NetworkToolsScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Surface(
+                        color = StatusActiveGreen.copy(alpha = 0.08f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Button(
-                            onClick = { viewModel.forceSaveCurrentLocalSnapshot(context) },
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(46.dp)
-                                .testTag("btn_force_save_cache"),
-                            colors = ButtonDefaults.buttonColors(containerColor = StatusActiveGreen)
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("حفظ محلي الآن", fontWeight = FontWeight.Bold)
-                        }
-
-                        OutlinedButton(
-                            onClick = { viewModel.retrySync() },
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(46.dp)
-                                .testTag("btn_force_sync_cache")
-                        ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("مزامنة مع الراوتر", fontWeight = FontWeight.Bold)
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                tint = StatusActiveGreen,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "يتم الحفظ والمزامنة والتحديثات تلقائياً وبشكل فوري ومتزامن في الخلفية.",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = StatusActiveGreen
+                            )
                         }
                     }
                 }
