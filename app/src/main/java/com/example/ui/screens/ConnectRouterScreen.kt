@@ -50,6 +50,12 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Close
+import com.example.data.model.UpdateCheckState
+import com.example.ui.components.AppUpdateDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -118,6 +124,11 @@ fun ConnectRouterScreen(
     val isDiscovering by viewModel.isDiscovering.collectAsStateWithLifecycle()
     val savedRouters by viewModel.savedRouters.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val updateCheckState by viewModel.updateCheckState.collectAsStateWithLifecycle()
+    val updateDownloadState by viewModel.updateDownloadState.collectAsStateWithLifecycle()
+    val showUpdateBanner by viewModel.showUpdateBanner.collectAsStateWithLifecycle()
+    var showUpdateDialog by remember { mutableStateOf(false) }
+    val latestSnapshot by viewModel.latestCachedSnapshot.collectAsStateWithLifecycle()
 
     // User credentials - only username and password required!
     var username by remember { mutableStateOf("admin") }
@@ -141,9 +152,10 @@ fun ConnectRouterScreen(
         }
     }
 
-    // Auto-detect network on launch
+    // Auto-detect network and cached snapshots on launch
     LaunchedEffect(Unit) {
         viewModel.checkLocalNetwork(context)
+        viewModel.refreshCachedSnapshot(context)
     }
 
     // Default auto-detected values from current network
@@ -216,6 +228,25 @@ fun ConnectRouterScreen(
                             )
                         }
                     }
+
+                    if (updateCheckState is UpdateCheckState.UpdateAvailable) {
+                        IconButton(
+                            onClick = { showUpdateDialog = true },
+                            modifier = Modifier.testTag("btn_connect_screen_update_badge")
+                        ) {
+                            BadgedBox(badge = {
+                                Badge(containerColor = MaterialTheme.colorScheme.error) {
+                                    Text("تحديث", fontSize = 9.sp)
+                                }
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Default.SystemUpdate,
+                                    contentDescription = "تحديث جديد متاح",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
@@ -231,6 +262,193 @@ fun ConnectRouterScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item { Spacer(modifier = Modifier.height(4.dp)) }
+
+            // Update Notification Banner (إذا كان هناك إصدار جديد على GitHub)
+            if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
+                val updateState = updateCheckState as UpdateCheckState.UpdateAvailable
+                item {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showUpdateDialog = true }
+                            .testTag("connect_screen_update_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.SystemUpdate,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Column {
+                                    Text(
+                                        text = "يوجد إصدار جديد للتطبيق (${updateState.release.tagName})",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                    Text(
+                                        text = "اضغط لتحديث البرنامج مباشرة وحفظ كل بياناتك",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                                    )
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Button(
+                                    onClick = { showUpdateDialog = true },
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Text("تحديث الآن", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                                IconButton(
+                                    onClick = { viewModel.dismissUpdateBanner() },
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "إغلاق التنبيه",
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Offline Mode Card (الدخول المباشر للبيانات المحفوظة محلياً والعمل بدون إنترنت)
+            latestSnapshot?.let { snapshot ->
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("offline_mode_entry_card"),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        ),
+                        border = BorderStroke(1.dp, StatusActiveGreen.copy(alpha = 0.4f)),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .clip(CircleShape)
+                                            .background(StatusActiveGreen.copy(alpha = 0.12f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Bolt,
+                                            contentDescription = null,
+                                            tint = StatusActiveGreen,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    Column {
+                                        Text(
+                                            text = "وضع العمل والتصفح المحلي (Offline)",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "يعمل بدون إنترنت أو اتصال بالراوتر",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+
+                                StatusPill(text = "كاش محلي جاهز", type = StatusType.SUCCESS)
+                            }
+
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = snapshot.routerName.ifBlank { "راوتر MikroTik (${snapshot.ipAddress})" },
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                        Text(
+                                            text = "الكروت: ${snapshot.cards.size} • الباقات: ${snapshot.profiles.size} • المتصلين: ${snapshot.activeUsers.size}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Text(
+                                        text = com.example.data.local.RouterCacheManager.formatCacheAge(snapshot.timestamp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = StatusActiveGreen,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+
+                            Button(
+                                onClick = { viewModel.enterOfflineMode(snapshot.ipAddress, context) },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = StatusActiveGreen),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(46.dp)
+                                    .testTag("btn_enter_offline_mode")
+                            ) {
+                                Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("⚡ الدخول المباشر للبيانات المحلية فوراً", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
 
             // 1. Hero Router & Network Detection Card (Compact & Elegant)
             item {
@@ -1325,6 +1543,24 @@ fun ConnectRouterScreen(
             item {
                 Spacer(modifier = Modifier.height(24.dp))
             }
+        }
+    }
+
+    if (showUpdateDialog) {
+        val checkState = updateCheckState
+        if (checkState is UpdateCheckState.UpdateAvailable) {
+            AppUpdateDialog(
+                release = checkState.release,
+                currentVersion = viewModel.currentAppVersion,
+                downloadState = updateDownloadState,
+                onDownloadAndInstall = { url ->
+                    viewModel.downloadAndInstallUpdate(context, url)
+                },
+                onInstallDownloaded = { file ->
+                    viewModel.installDownloadedApk(context, file)
+                },
+                onDismiss = { showUpdateDialog = false }
+            )
         }
     }
 }

@@ -268,6 +268,20 @@ object NetworkUtils {
         return total
     }
 
+    fun formatSecondsToHumanReadable(seconds: Long): String {
+        if (seconds <= 0L) return "0 ثانية"
+        val days = seconds / 86400L
+        val hours = (seconds % 86400L) / 3600L
+        val minutes = (seconds % 3600L) / 60L
+        val secs = seconds % 60L
+        val parts = mutableListOf<String>()
+        if (days > 0) parts.add("$days يوم")
+        if (hours > 0) parts.add("$hours ساعة")
+        if (minutes > 0) parts.add("$minutes دقيقة")
+        if (secs > 0 && days == 0L && hours == 0L) parts.add("$secs ثانية")
+        return if (parts.isEmpty()) "أقل من دقيقة" else parts.joinToString(" و ")
+    }
+
     fun formatArabicFullDateTime(timestamp: Long): String {
         val safeTs = if (timestamp <= 0L) System.currentTimeMillis() else timestamp
         val date = java.util.Date(safeTs)

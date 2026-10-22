@@ -15,13 +15,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material.icons.filled.CloseFullscreen
-import androidx.compose.material.icons.filled.OpenInFull
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -31,21 +24,21 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.DataObject
-import androidx.compose.material.icons.filled.DevicesOther
+import androidx.compose.material.icons.filled.DataUsage
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Laptop
-import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PhoneIphone
@@ -53,14 +46,16 @@ import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tv
-import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -70,25 +65,29 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
+import com.example.data.local.UserLoginHistoryEntity
+import com.example.data.local.toUserSessionRecord
 import com.example.data.model.DeviceCategory
-import com.example.data.model.DeviceIdentification
+import com.example.data.model.SubscriberFullProfile
 import com.example.data.model.UserSessionRecord
 import com.example.data.network.NetworkUtils
-import com.example.ui.theme.NetworkCyan
 import com.example.ui.theme.RouterBlue
-import com.example.ui.theme.RouterBlueDark
 import com.example.ui.theme.StatusActiveGreen
 import com.example.ui.theme.StatusActiveGreenBg
 import com.example.ui.theme.StatusErrorRed
@@ -97,7 +96,8 @@ import com.example.ui.theme.StatusErrorRedBg
 @Composable
 fun UserDetailDialog(
     session: UserSessionRecord,
-    loginHistory: List<com.example.data.local.UserLoginHistoryEntity> = emptyList(),
+    subscriberProfile: SubscriberFullProfile? = null,
+    loginHistory: List<UserLoginHistoryEntity> = emptyList(),
     onDismiss: () -> Unit,
     onKickUser: (() -> Unit)? = null
 ) {
@@ -129,6 +129,13 @@ fun UserDetailDialog(
     }
 
     var isMaximized by remember { mutableStateOf(false) }
+    var selectedTab by remember { mutableIntStateOf(0) } // 0 = الاستهلاك الكلي, 1 = الباقات, 2 = الجلسات والأجهزة
+
+    val lifetimeTotalBytes = subscriberProfile?.lifetimeTotalBytes ?: session.totalBytes
+    val lifetimeDownloadBytes = subscriberProfile?.lifetimeBytesOut ?: session.bytesOut
+    val lifetimeUploadBytes = subscriberProfile?.lifetimeBytesIn ?: session.bytesIn
+    val lifetimeUptimeStr = subscriberProfile?.lifetimeUptimeFormatted?.ifBlank { session.duration } ?: session.duration
+    val totalSessionsCount = subscriberProfile?.totalSessionsCount ?: maxOf(1, loginHistory.size)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -192,7 +199,7 @@ fun UserDetailDialog(
                                 }
                             }
                             Text(
-                                text = "${session.deviceInfo.modelName} • ${session.deviceInfo.osName}",
+                                text = "${session.deviceInfo.brand} ${session.deviceInfo.modelName}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -234,359 +241,289 @@ fun UserDetailDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // 1. Device & Network Details Card
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                    ),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                // Quick Sub-tabs
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "معلومات الجهاز والشبكة",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = RouterBlue
-                        )
-
-                        // Device Type & Brand
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(text = "نوع الجهاز والماركة:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = brandBadgeColor.copy(alpha = 0.12f)
-                            ) {
-                                Text(
-                                    text = "${session.deviceInfo.brand} (${session.deviceInfo.category.title})",
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = brandBadgeColor
-                                )
-                            }
-                        }
-
-                        // Vendor
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(text = "الشركة المصنعة:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(text = session.deviceInfo.macVendor, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
-                        }
-
-                        // IP Address with copy
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { copyToClipboard("عنوان IP", session.ipAddress) },
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(text = "عنوان IP:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(text = session.ipAddress, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-
-                        // MAC Address with copy
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { copyToClipboard("عنوان MAC", session.macAddress) },
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(text = "عنوان MAC:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(text = session.macAddress, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-
-                        // Profile & Price
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(text = "الباقة المفعلة:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(text = "${session.profile} (${session.price})", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = RouterBlue)
-                        }
-
-                        // Connected Node / Tower
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(text = "نقطة / برج الاتصال:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Icon(Icons.Default.CellTower, contentDescription = null, modifier = Modifier.size(14.dp), tint = RouterBlue)
-                                Text(
-                                    text = session.nodeName.ifBlank { "الراوتر الرئيسي" },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = RouterBlue
-                                )
-                            }
-                        }
-                    }
+                    FilterChip(
+                        selected = selectedTab == 0,
+                        onClick = { selectedTab = 0 },
+                        label = { Text("الاستهلاك الكلي", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = selectedTab == 1,
+                        onClick = { selectedTab = 1 },
+                        label = { Text("الباقات المفعلة", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = selectedTab == 2,
+                        onClick = { selectedTab = 2 },
+                        label = { Text("الأجهزة والسجل", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                        modifier = Modifier.weight(1f)
+                    )
                 }
 
-                // 2. Data Consumption & Uptime Metrics
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                    ),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                // TAB 0: الاستهلاك التراكمي الشامل لكل الأوقات والرصيد
+                if (selectedTab == 0) {
+                    // Cumulative Lifetime Card
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     ) {
-                        Text(
-                            text = "استهلاك البيانات وتوقيت الجلسة",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = RouterBlue
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.ArrowDownward, contentDescription = null, modifier = Modifier.size(14.dp), tint = StatusActiveGreen)
-                                    Spacer(modifier = Modifier.width(2.dp))
-                                    Text(text = "التحميل (Download):", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                                Text(text = NetworkUtils.formatBytes(session.bytesOut), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                            }
-
-                            Column {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.ArrowUpward, contentDescription = null, modifier = Modifier.size(14.dp), tint = RouterBlue)
-                                    Spacer(modifier = Modifier.width(2.dp))
-                                    Text(text = "الرفع (Upload):", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                                Text(text = NetworkUtils.formatBytes(session.bytesIn), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                            }
-
-                            Column {
-                                Text(text = "إجمالي الاستهلاك:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(text = NetworkUtils.formatBytes(session.totalBytes), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                            }
-                        }
-
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), thickness = 0.5.dp)
-
-                        // Timings: Login, Logout, Duration
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(text = "وقت بدء الجلسة (الدخول):", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(text = NetworkUtils.formatArabicFullDateTimeFromString(session.loginTime), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(text = "وقت انتهاء الجلسة (الخروج):", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(text = if (session.isOnline) "متصل الآن (جلسة نشطة)" else NetworkUtils.formatArabicFullDateTimeFromString(session.logoutTime), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = if (session.isOnline) StatusActiveGreen else MaterialTheme.colorScheme.onSurface)
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(text = "مدة الاتصال (Uptime):", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(text = session.duration, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(text = "سبب الإغلاق / الملاحظة:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(text = session.terminateReason, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                }
-
-                // 3. User Login & Device History Card (سجل تسجيلات الدخول وتاريخ الاستخدام والأجهزة)
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                    ),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.History,
-                                    contentDescription = null,
-                                    tint = RouterBlue,
-                                    modifier = Modifier.size(16.dp)
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Icon(Icons.Default.DataUsage, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                    Text(
+                                        text = "الاستهلاك التراكمي لكل الأوقات:",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                                 Text(
-                                    text = "سجل تسجيلات الدخول والنشاط السابقة",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = RouterBlue
+                                    text = NetworkUtils.formatBytes(lifetimeTotalBytes),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.primary
                                 )
                             }
-                            if (loginHistory.isNotEmpty()) {
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = RouterBlue.copy(alpha = 0.12f)
-                                ) {
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column {
+                                    Text(text = "التحميل الكلي:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(text = NetworkUtils.formatBytes(lifetimeDownloadBytes), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
+                                }
+                                Column {
+                                    Text(text = "الرفع الكلي:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(text = NetworkUtils.formatBytes(lifetimeUploadBytes), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = RouterBlue)
+                                }
+                                Column {
+                                    Text(text = "الوقت الكلي:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(text = lifetimeUptimeStr, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            HorizontalDivider(thickness = 0.5.dp)
+
+                            // Current vs Lifetime
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = "استهلاك الجلسة الحالية:", style = MaterialTheme.typography.bodySmall)
+                                Text(text = NetworkUtils.formatBytes(session.totalBytes), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = "مدة الجلسة الحالية:", style = MaterialTheme.typography.bodySmall)
+                                Text(text = session.duration, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = "عدد الجلسات المسجلة:", style = MaterialTheme.typography.bodySmall)
+                                Text(text = "$totalSessionsCount جلسات", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = RouterBlue)
+                            }
+                        }
+                    }
+
+                    // Balance & Quota Card
+                    val quotaLimit = subscriberProfile?.quotaLimitBytes ?: session.packageLimitBytes
+                    val isExhausted = subscriberProfile?.isQuotaExhausted ?: session.isQuotaExhausted || (quotaLimit > 0L && lifetimeTotalBytes >= quotaLimit)
+                    val remainingBytes = if (quotaLimit > 0L) (quotaLimit - lifetimeTotalBytes).coerceAtLeast(0L) else 0L
+                    val quotaPercent = if (quotaLimit > 0L) (lifetimeTotalBytes.toFloat() / quotaLimit.toFloat()).coerceIn(0f, 1f) else 0f
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isExhausted) StatusErrorRedBg else StatusActiveGreenBg,
+                        border = BorderStroke(1.dp, if (isExhausted) StatusErrorRed.copy(alpha = 0.5f) else StatusActiveGreen.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (isExhausted) "⚠️ تم استنفاد الرصيد بالكامل" else "✅ الكرت نشط ويوجد رصيد متبقي",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isExhausted) StatusErrorRed else StatusActiveGreen
+                                )
+                                if (quotaLimit > 0L) {
                                     Text(
-                                        text = "${loginHistory.size} تسجيلات",
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = RouterBlue
+                                        text = "${(quotaPercent * 100).toInt()}%",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (isExhausted) StatusErrorRed else StatusActiveGreen
                                     )
                                 }
                             }
+                            if (quotaLimit > 0L) {
+                                LinearProgressIndicator(
+                                    progress = { quotaPercent },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(6.dp)
+                                        .clip(RoundedCornerShape(3.dp)),
+                                    color = if (isExhausted) StatusErrorRed else StatusActiveGreen
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(text = "المتبقي: ${NetworkUtils.formatBytes(remainingBytes)}", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    Text(text = "من إجمالي: ${NetworkUtils.formatBytes(quotaLimit)}", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                            if (subscriberProfile?.timeRemainingFormatted?.isNotBlank() == true) {
+                                Text(text = "الوقت المتبقي: ${subscriberProfile.timeRemainingFormatted}", style = MaterialTheme.typography.labelSmall)
+                            }
                         }
+                    }
+                }
 
-                        if (loginHistory.isEmpty()) {
+                // TAB 1: الباقات المفعلة والتجديدات
+                if (selectedTab == 1) {
+                    val packages = subscriberProfile?.activatedPackages.orEmpty()
+                    if (packages.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(text = "الباقة المفعلة: ${session.profile}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                Text(text = "السعر: ${session.price}", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    } else {
+                        packages.forEach { pkg ->
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (pkg.isCurrent) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                border = BorderStroke(0.8.dp, if (pkg.isCurrent) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(text = pkg.profileName, fontWeight = FontWeight.Bold, color = if (pkg.isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                        StatusPill(text = if (pkg.isCurrent) "الباقة الحالية" else "باقة سابقة", type = if (pkg.isCurrent) StatusType.SUCCESS else StatusType.INFO)
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(text = "السعر: ${pkg.price}", style = MaterialTheme.typography.labelSmall)
+                                        Text(text = "السرعة: ${pkg.rateLimit}", style = MaterialTheme.typography.labelSmall, color = RouterBlue, fontWeight = FontWeight.Bold)
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(text = "الاستهلاك: ${NetworkUtils.formatBytes(pkg.totalBytesUsedOnPackage)}", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                        Text(text = "${pkg.sessionsCountOnPackage} جلسات", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // TAB 2: الأجهزة وعناوين الاتصال وسجل الجلسات
+                if (selectedTab == 2) {
+                    // Network Details
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { copyToClipboard("عنوان IP", session.ipAddress) },
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = "عنوان IP:", style = MaterialTheme.typography.bodySmall)
+                                Text(text = session.ipAddress, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { copyToClipboard("عنوان MAC", session.macAddress) },
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = "عنوان MAC:", style = MaterialTheme.typography.bodySmall)
+                                Text(text = session.macAddress, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = "نقطة / برج الاتصال:", style = MaterialTheme.typography.bodySmall)
+                                Text(text = session.nodeName.ifBlank { "الراوتر الرئيسي" }, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = RouterBlue)
+                            }
+                        }
+                    }
+
+                    // Sessions List
+                    val sessions = subscriberProfile?.sessionHistory.orEmpty().ifEmpty {
+                        loginHistory.map { it.toUserSessionRecord() }
+                    }
+                    if (sessions.isEmpty()) {
+                        Text(text = "لا توجد جلسات سابقة مسجلة", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                    } else {
+                        sessions.take(6).forEach { rec ->
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
                                 color = MaterialTheme.colorScheme.surface,
                                 border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Info,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.outline,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = "يتم تسجيل تاريخ كل جلسة وتفاصيل الأجهزة وأوقات الدخول والخروج تلقائياً.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        } else {
-                            loginHistory.take(5).forEach { record ->
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = MaterialTheme.colorScheme.surface,
-                                    border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(10.dp),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Schedule,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(13.dp),
-                                                    tint = RouterBlue
-                                                )
-                                                Text(
-                                                    text = NetworkUtils.formatArabicFullDateTimeFromString(record.loginTime, record.timestamp),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                            }
-
-                                            StatusPill(
-                                                text = if (record.logoutTime == "متصل الآن") "متصل الآن" else "انتهت (${record.duration})",
-                                                type = if (record.logoutTime == "متصل الآن") StatusType.SUCCESS else StatusType.INFO
-                                            )
-                                        }
-
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
-                                            Text(
-                                                text = "الجهاز: ${record.deviceBrand} ${record.deviceModel}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                            Text(
-                                                text = "الاستهلاك: ${NetworkUtils.formatBytes(record.totalBytes)}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                        }
-
-                                        if (record.logoutTime != "متصل الآن") {
-                                            Text(
-                                                text = "الخروج: ${NetworkUtils.formatArabicFullDateTimeFromString(record.logoutTime, record.timestamp)}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontSize = 10.sp,
-                                                color = MaterialTheme.colorScheme.outline
-                                            )
-                                        }
-
-                                        if (record.nodeName.isNotBlank()) {
-                                            Text(
-                                                text = "البرج / النقطة: ${record.nodeName} • IP: ${record.ipAddress}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontSize = 10.sp,
-                                                color = MaterialTheme.colorScheme.outline
-                                            )
-                                        }
+                                        Text(text = "الدخول: ${rec.loginTime}", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                        StatusPill(text = if (rec.isOnline) "متصل الآن" else "انتهت (${rec.duration})", type = if (rec.isOnline) StatusType.SUCCESS else StatusType.INFO)
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(text = "${rec.deviceInfo.brand} ${rec.deviceInfo.modelName}", style = MaterialTheme.typography.labelSmall)
+                                        Text(text = NetworkUtils.formatBytes(rec.totalBytes), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                                     }
                                 }
                             }
@@ -606,9 +543,7 @@ fun UserDetailDialog(
                             onKickUser()
                             onDismiss()
                         },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error
-                        ),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.weight(1f)
                     ) {
@@ -621,29 +556,27 @@ fun UserDetailDialog(
                 Button(
                     onClick = {
                         val reportText = buildString {
-                            appendLine("=== تقرير نشاط مستخدم الهوتسبوت ===")
+                            appendLine("=== التقرير الشامل للمشترك واستخدامه لكل الأوقات ===")
                             appendLine("رقم الكرت: ${session.username}")
-                            appendLine("نوع الجهاز: ${session.deviceInfo.brand} - ${session.deviceInfo.modelName}")
-                            appendLine("نظام التشغيل: ${session.deviceInfo.osName}")
+                            appendLine("الاستهلاك التراكمي الشامل: ${NetworkUtils.formatBytes(lifetimeTotalBytes)}")
+                            appendLine("التحميل الكلي: ${NetworkUtils.formatBytes(lifetimeDownloadBytes)}")
+                            appendLine("الرفع الكلي: ${NetworkUtils.formatBytes(lifetimeUploadBytes)}")
+                            appendLine("الوقت التراكمي: $lifetimeUptimeStr")
+                            appendLine("عدد الجلسات: $totalSessionsCount")
+                            appendLine("الجلسة الحالية: ${NetworkUtils.formatBytes(session.totalBytes)} (${session.duration})")
+                            appendLine("الجهاز: ${session.deviceInfo.brand} - ${session.deviceInfo.modelName}")
                             appendLine("عنوان IP: ${session.ipAddress}")
                             appendLine("عنوان MAC: ${session.macAddress}")
-                            appendLine("الباقة: ${session.profile} (${session.price})")
-                            appendLine("الحالة: ${if (session.isOnline) "متصل الآن" else "غير متصل"}")
-                            appendLine("وقت الدخول: ${session.loginTime}")
-                            appendLine("وقت الخروج: ${session.logoutTime}")
-                            appendLine("الاستهلاك: ${NetworkUtils.formatBytes(session.totalBytes)}")
-                            appendLine("المدة: ${session.duration}")
+                            appendLine("الباقة الحالية: ${session.profile} (${session.price})")
                         }
                         val intent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_TEXT, reportText)
                         }
-                        context.startActivity(Intent.createChooser(intent, "مشاركة تقرير المستخدم"))
+                        context.startActivity(Intent.createChooser(intent, "مشاركة تقرير المشترك"))
                     },
                     shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = RouterBlue
-                    ),
+                    colors = ButtonDefaults.buttonColors(containerColor = RouterBlue),
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))

@@ -21,6 +21,11 @@ import com.example.data.model.IpBinding
 import com.example.data.model.LocalNetworkInfo
 import com.example.data.model.RouterConnectionConfig
 import com.example.data.model.RouterResource
+import com.example.BuildConfig
+import com.example.data.model.GitHubReleaseInfo
+import com.example.data.model.UpdateCheckState
+import com.example.data.model.UpdateDownloadState
+import com.example.data.util.AppUpdateManager
 import com.example.data.network.MikrotikRepository
 import com.example.data.network.NetworkUtils
 import kotlinx.coroutines.Job
@@ -68,12 +73,29 @@ class MainViewModel(
                         activeUsers = snapshot.activeUsers,
                         servers = snapshot.servers,
                         nodes = snapshot.nodes,
-                        logs = snapshot.logs
+                        logs = snapshot.logs,
+                        ipBindings = snapshot.ipBindings
                     )
                 }
             }
         }
+
+        viewModelScope.launch {
+            delay(2500)
+            checkForUpdates(isManual = false)
+        }
     }
+
+    private val _updateCheckState = MutableStateFlow<UpdateCheckState>(UpdateCheckState.Idle)
+    val updateCheckState: StateFlow<UpdateCheckState> = _updateCheckState.asStateFlow()
+
+    private val _updateDownloadState = MutableStateFlow<UpdateDownloadState>(UpdateDownloadState.Idle)
+    val updateDownloadState: StateFlow<UpdateDownloadState> = _updateDownloadState.asStateFlow()
+
+    private val _showUpdateBanner = MutableStateFlow(false)
+    val showUpdateBanner: StateFlow<Boolean> = _showUpdateBanner.asStateFlow()
+
+    val currentAppVersion: String = BuildConfig.VERSION_NAME
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -128,6 +150,221 @@ class MainViewModel(
     fun getLoginHistoryForUser(username: String): kotlinx.coroutines.flow.Flow<List<com.example.data.local.UserLoginHistoryEntity>> {
         return database.appDao().getLoginHistoryForUser(username)
     }
+
+    fun getArchivedSessionsForUser(username: String): kotlinx.coroutines.flow.Flow<List<com.example.data.local.SessionArchiveEntity>> {
+        return database.appDao().getArchivedSessionsForUser(username)
+    }
+
+    fun getSubscriberProfileFlow(username: String): kotlinx.coroutines.flow.Flow<com.example.data.model.SubscriberFullProfile> {
+        return kotlinx.coroutines.flow.combine(
+            cards,
+            profiles,
+            posAssignments,
+            getLoginHistoryForUser(username),
+            getArchivedSessionsForUser(username)
+        ) { cardList, profileList, assignmentList, loginHist, archivedList ->
+            buildSubscriberFullProfile(
+                username = username,
+                cardList = cardList,
+                profileList = profileList,
+                assignmentList = assignmentList,
+                loginHist = loginHist,
+                archivedList = archivedList
+            )
+        }
+    }
+
+    private fun buildSubscriberFullProfile(
+        username: String,
+        cardList: List<HotspotCard>,
+        profileList: List<HotspotProfile>,
+        assignmentList: List<PosCardAssignmentEntity>,
+        loginHist: List<com.example.data.local.UserLoginHistoryEntity>,
+        archivedList: List<com.example.data.local.SessionArchiveEntity>
+    ): com.example.data.model.SubscriberFullProfile {
+        val currentCard = cardList.firstOrNull { it.name == username }
+        val currentProfile = profileList.firstOrNull { it.name == currentCard?.profile }
+            ?: profileList.firstOrNull { it.name == "default" }
+        val assignedAgentName = assignmentList.firstOrNull { it.cardName == username }?.agentName
+            ?: currentCard?.posAgent.orEmpty()
+
+        val activeNow = activeUsers.value.firstOrNull { it.user == username }
+        val isOnline = activeNow != null || loginHist.any { it.logoutTime == "متصل الآن" } || archivedList.any { it.isOnline }
+
+        // Cumulative Lifetime Usage (إجمالي الاستهلاك لكل الأوقات)
+        val cardBytesIn = currentCard?.bytesIn ?: 0L
+        val cardBytesOut = currentCard?.bytesOut ?: 0L
+        val histBytesIn = loginHist.sumOf { it.bytesIn }
+        val histBytesOut = loginHist.sumOf { it.bytesOut }
+        val archBytesIn = archivedList.sumOf { it.bytesIn }
+        val archBytesOut = archivedList.sumOf { it.bytesOut }
+
+        val lifetimeIn = maxOf(cardBytesIn, histBytesIn, archBytesIn)
+        val lifetimeOut = maxOf(cardBytesOut, histBytesOut, archBytesOut)
+        val lifetimeTotal = maxOf(cardBytesIn + cardBytesOut, histBytesIn + histBytesOut, archBytesIn + archBytesOut)
+
+        val cardUptimeSec = NetworkUtils.parseUptimeToSeconds(currentCard?.uptime ?: "")
+        val histUptimeSec = loginHist.sumOf { NetworkUtils.parseUptimeToSeconds(it.duration) }
+        val archUptimeSec = archivedList.sumOf { NetworkUtils.parseUptimeToSeconds(it.duration) }
+        val lifetimeUptimeSeconds = maxOf(cardUptimeSec, histUptimeSec, archUptimeSec)
+        val lifetimeUptimeFormatted = NetworkUtils.formatSecondsToHumanReadable(lifetimeUptimeSeconds)
+
+        // Total sessions count
+        val totalSessionsCount = maxOf(1, loginHist.size, archivedList.size).let {
+            if (currentCard != null && (currentCard.bytesIn > 0L || currentCard.bytesOut > 0L)) it else loginHist.size
+        }
+
+        // First seen & Last seen
+        val allTimestamps = (loginHist.map { it.timestamp } + archivedList.map { it.timestamp }).filter { it > 0L }
+        val firstSeenDate = if (allTimestamps.isNotEmpty()) {
+            NetworkUtils.formatArabicFullDateTime(allTimestamps.minOrNull() ?: System.currentTimeMillis())
+        } else {
+            "مسجل في الراوتر"
+        }
+
+        val lastSeenDate = if (isOnline) {
+            "متصل الآن (جلسة نشطة حالياً)"
+        } else if (allTimestamps.isNotEmpty()) {
+            NetworkUtils.formatArabicFullDateTime(allTimestamps.maxOrNull() ?: System.currentTimeMillis())
+        } else {
+            "غير متصل"
+        }
+
+        // Active session comparison
+        val activeSessionBytesIn = activeNow?.bytesIn ?: 0L
+        val activeSessionBytesOut = activeNow?.bytesOut ?: 0L
+        val activeSessionTotalBytes = activeSessionBytesIn + activeSessionBytesOut
+        val activeSessionDuration = activeNow?.uptime ?: if (isOnline) "نشط" else "غير متصل"
+
+        // Quota & Limits
+        val quotaLimitBytes = if ((currentCard?.limitBytesTotal ?: 0L) > 0L) {
+            currentCard!!.limitBytesTotal
+        } else {
+            0L
+        }
+
+        val quotaRemainingBytes = if (quotaLimitBytes > 0L) {
+            (quotaLimitBytes - lifetimeTotal).coerceAtLeast(0L)
+        } else 0L
+
+        val quotaUsagePercent = if (quotaLimitBytes > 0L) {
+            (lifetimeTotal.toFloat() / quotaLimitBytes.toFloat()).coerceIn(0f, 1f)
+        } else 0f
+
+        val isQuotaExhausted = (quotaLimitBytes > 0L && lifetimeTotal >= quotaLimitBytes) ||
+                currentCard?.isExpired == true ||
+                archivedList.any { it.isQuotaExhausted }
+
+        val timeLimitFormatted = currentCard?.limitUptime?.ifBlank { currentProfile?.validity ?: "" } ?: ""
+        val timeRemainingFormatted = if (currentCard?.limitUptime?.isNotBlank() == true) {
+            val limitSec = NetworkUtils.parseUptimeToSeconds(currentCard.limitUptime)
+            val remSec = (limitSec - cardUptimeSec).coerceAtLeast(0L)
+            NetworkUtils.formatSecondsToHumanReadable(remSec)
+        } else {
+            "غير محدد / مفتوح"
+        }
+
+        val isTimeExhausted = currentCard?.limitUptime?.isNotBlank() == true &&
+                cardUptimeSec >= NetworkUtils.parseUptimeToSeconds(currentCard.limitUptime)
+
+        // All Activated Packages (الحالية والسابقة)
+        val allPackageNames = mutableSetOf<String>()
+        val currentProfName = currentCard?.profile?.ifBlank { "default" } ?: "default"
+        allPackageNames.add(currentProfName)
+        loginHist.map { it.profile }.filter { it.isNotBlank() }.forEach { allPackageNames.add(it) }
+        archivedList.map { it.profile }.filter { it.isNotBlank() }.forEach { allPackageNames.add(it) }
+        assignmentList.filter { it.cardName == username }.map { it.profileName }.filter { it.isNotBlank() }.forEach { allPackageNames.add(it) }
+
+        val activatedPackages = allPackageNames.map { profName ->
+            val matchingProf = profileList.firstOrNull { it.name == profName }
+            val isCurrent = profName == currentProfName
+            val sessionsOnPackage = loginHist.count { it.profile == profName } + archivedList.count { it.profile == profName }
+            val bytesOnPackage = loginHist.filter { it.profile == profName }.sumOf { it.totalBytes } +
+                    archivedList.filter { it.profile == profName }.sumOf { it.totalBytes }
+            val finalBytes = if (isCurrent && bytesOnPackage == 0L) lifetimeTotal else bytesOnPackage
+
+            com.example.data.model.ActivatedPackageInfo(
+                profileName = profName,
+                price = matchingProf?.price ?: currentCard?.price.orEmpty().ifBlank { "500 ر.ي" },
+                rateLimit = matchingProf?.rateLimit.orEmpty().ifBlank { "2M/2M (تلقائي)" },
+                quotaLimit = matchingProf?.dataLimit.orEmpty().ifBlank { if (quotaLimitBytes > 0L) NetworkUtils.formatBytes(quotaLimitBytes) else "مفتوح" },
+                validity = matchingProf?.validity.orEmpty().ifBlank { timeLimitFormatted.ifBlank { "1d" } },
+                sharedUsers = matchingProf?.sharedUsers ?: 1,
+                source = matchingProf?.source ?: "الراوتر",
+                activationDate = if (isCurrent) "الباقة الحالية النشطة" else "باقة سابقة مسجلة",
+                isCurrent = isCurrent,
+                totalBytesUsedOnPackage = finalBytes,
+                sessionsCountOnPackage = maxOf(sessionsOnPackage, if (isCurrent) 1 else 0)
+            )
+        }.sortedByDescending { it.isCurrent }
+
+        // Used Devices, MACs, IPs, Nodes
+        val usedDevices = (loginHist.map {
+            com.example.data.model.DeviceIdentification(
+                brand = it.deviceBrand.ifBlank { "غير محدد" },
+                modelName = it.deviceModel.ifBlank { "جهاز مستخدم" },
+                category = try { com.example.data.model.DeviceCategory.valueOf(it.deviceCategory) } catch (_: Exception) { com.example.data.model.DeviceCategory.SMART_DEVICE }
+            )
+        } + archivedList.map {
+            com.example.data.model.DeviceIdentification(
+                brand = it.deviceBrand.ifBlank { "غير محدد" },
+                modelName = it.deviceModel.ifBlank { "جهاز مستخدم" },
+                category = try { com.example.data.model.DeviceCategory.valueOf(it.deviceCategory) } catch (_: Exception) { com.example.data.model.DeviceCategory.SMART_DEVICE }
+            )
+        }).distinctBy { "${it.brand}_${it.modelName}" }
+
+        val usedMacAddresses = (loginHist.map { it.macAddress } + archivedList.map { it.macAddress })
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        val usedIpAddresses = (loginHist.map { it.ipAddress } + archivedList.map { it.ipAddress })
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        val usedNodes = (loginHist.map { it.nodeName } + archivedList.map { it.nodeName })
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        // Complete Session History
+        val sessionHistory = (archivedList.map { it.toUserSessionRecord() } +
+                loginHist.map { it.toUserSessionRecord() })
+            .distinctBy { "${it.loginTime}_${it.logoutTime}_${it.macAddress}" }
+            .sortedByDescending { it.isOnline }
+
+        return com.example.data.model.SubscriberFullProfile(
+            username = username,
+            isOnline = isOnline,
+            currentCard = currentCard,
+            currentProfile = currentProfile,
+            assignedAgentName = assignedAgentName,
+            lifetimeBytesIn = lifetimeIn,
+            lifetimeBytesOut = lifetimeOut,
+            lifetimeTotalBytes = lifetimeTotal,
+            lifetimeUptimeSeconds = lifetimeUptimeSeconds,
+            lifetimeUptimeFormatted = lifetimeUptimeFormatted,
+            totalSessionsCount = totalSessionsCount,
+            firstSeenDate = firstSeenDate,
+            lastSeenDate = lastSeenDate,
+            activeSessionBytesIn = activeSessionBytesIn,
+            activeSessionBytesOut = activeSessionBytesOut,
+            activeSessionTotalBytes = activeSessionTotalBytes,
+            activeSessionDuration = activeSessionDuration,
+            quotaLimitBytes = quotaLimitBytes,
+            quotaRemainingBytes = quotaRemainingBytes,
+            quotaUsagePercent = quotaUsagePercent,
+            isQuotaExhausted = isQuotaExhausted,
+            timeLimitFormatted = timeLimitFormatted,
+            timeRemainingFormatted = timeRemainingFormatted,
+            isTimeExhausted = isTimeExhausted,
+            activatedPackages = activatedPackages,
+            usedDevices = usedDevices,
+            usedMacAddresses = usedMacAddresses,
+            usedIpAddresses = usedIpAddresses,
+            usedNodes = usedNodes,
+            sessionHistory = sessionHistory
+        )
+    }
+
 
     fun logApplicationError(operation: String, errorMessage: String, details: String = "") {
         viewModelScope.launch {
@@ -1060,6 +1297,84 @@ class MainViewModel(
         }
     }
 
+    private val _latestCachedSnapshot = MutableStateFlow<com.example.data.local.RouterSnapshot?>(null)
+    val latestCachedSnapshot: StateFlow<com.example.data.local.RouterSnapshot?> = _latestCachedSnapshot.asStateFlow()
+
+    fun refreshCachedSnapshot(context: Context) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val snapshot = com.example.data.local.RouterCacheManager.getLatestSnapshot(context)
+            _latestCachedSnapshot.value = snapshot
+        }
+    }
+
+    fun enterOfflineMode(targetIp: String? = null, context: Context? = null) {
+        viewModelScope.launch {
+            val ctx = context ?: appContext
+            if (ctx == null) {
+                _toastEvent.emit("تعذر الدخول: سياق التطبيق غير متاح")
+                return@launch
+            }
+
+            val snapshot = if (!targetIp.isNullOrBlank()) {
+                com.example.data.local.RouterCacheManager.loadSnapshot(ctx, targetIp)
+            } else {
+                com.example.data.local.RouterCacheManager.getLatestSnapshot(ctx)
+            }
+
+            if (snapshot == null) {
+                _toastEvent.emit("لا توجد بيانات راوتر محفوظة محلياً بعد. يرجى الاتصال بالراوتر أولاً لحفظ البيانات.")
+                return@launch
+            }
+
+            repository.restoreFromSnapshot(snapshot)
+            _currentConfig.value = RouterConnectionConfig(
+                ipAddress = snapshot.ipAddress,
+                name = snapshot.routerName
+            )
+
+            val displayRouterName = snapshot.routerName.ifBlank { "راوتر MikroTik (${snapshot.ipAddress})" }
+            _connectionState.value = ConnectionState.Connected(
+                routerName = displayRouterName,
+                ipAddress = snapshot.ipAddress,
+                isDemo = false,
+                isSyncing = false,
+                isFromCache = true,
+                isOffline = true,
+                lastSyncTime = snapshot.timestamp,
+                offlineReason = "وضع التصفح والعمل المحلي (بدون إنترنت)"
+            )
+            _toastEvent.emit("⚡ تم الدخول للبيانات المحلية بنجاح! الكروت (${snapshot.cards.size}) والباقات متاحة للعمل.")
+            startAutoRefresh()
+        }
+    }
+
+    fun forceSaveCurrentLocalSnapshot(context: Context) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val currentConn = _connectionState.value
+            if (currentConn is ConnectionState.Connected) {
+                val snapshot = repository.getCurrentSnapshot(currentConn.ipAddress, currentConn.routerName)
+                com.example.data.local.RouterCacheManager.saveSnapshot(
+                    context = context,
+                    ipAddress = currentConn.ipAddress,
+                    routerName = currentConn.routerName,
+                    resource = snapshot.resource,
+                    routerBoard = snapshot.routerBoard,
+                    cards = snapshot.cards,
+                    profiles = snapshot.profiles,
+                    activeUsers = snapshot.activeUsers,
+                    servers = snapshot.servers,
+                    nodes = snapshot.nodes,
+                    logs = snapshot.logs,
+                    ipBindings = snapshot.ipBindings
+                )
+                refreshCachedSnapshot(context)
+                _toastEvent.emit("✓ تم حفظ وتحديث قاعدة البيانات المحلية للراوتر بنجاح!")
+            } else {
+                _toastEvent.emit("لا توجد بيانات راوتر نشطة لحفظها حالياً")
+            }
+        }
+    }
+
     fun connectToRouter(
         config: RouterConnectionConfig,
         saveToFavorites: Boolean = true,
@@ -1158,7 +1473,8 @@ class MainViewModel(
                             activeUsers = snapshot.activeUsers,
                             servers = snapshot.servers,
                             nodes = snapshot.nodes,
-                            logs = snapshot.logs
+                            logs = snapshot.logs,
+                            ipBindings = snapshot.ipBindings
                         )
                     }
                 }
@@ -1551,6 +1867,76 @@ class MainViewModel(
     fun deleteBatchHistory(batchId: String) {
         viewModelScope.launch {
             database.appDao().deleteBatch(batchId)
+        }
+    }
+
+    fun dismissUpdateBanner() {
+        _showUpdateBanner.value = false
+    }
+
+    fun checkForUpdates(isManual: Boolean = false) {
+        viewModelScope.launch {
+            _updateCheckState.value = UpdateCheckState.Checking
+            val result = AppUpdateManager.checkLatestRelease(BuildConfig.VERSION_NAME)
+            result.onSuccess { (releaseInfo, isNewer) ->
+                if (isNewer) {
+                    _updateCheckState.value = UpdateCheckState.UpdateAvailable(
+                        release = releaseInfo,
+                        currentVersion = BuildConfig.VERSION_NAME,
+                        isNewer = true
+                    )
+                    _showUpdateBanner.value = true
+                    if (isManual) {
+                        _toastEvent.emit("يوجد تحديث جديد متاح: ${releaseInfo.tagName}")
+                    }
+                } else {
+                    _updateCheckState.value = UpdateCheckState.UpToDate(
+                        currentVersion = BuildConfig.VERSION_NAME,
+                        latestTag = releaseInfo.tagName
+                    )
+                    if (isManual) {
+                        _toastEvent.emit("البرنامج محدث لأحدث إصدار (${BuildConfig.VERSION_NAME})")
+                    }
+                }
+            }.onFailure { error ->
+                _updateCheckState.value = UpdateCheckState.Error(error.localizedMessage ?: "فشل التحقق من التحديثات")
+                if (isManual) {
+                    _toastEvent.emit(error.localizedMessage ?: "فشل التحقق من التحديثات")
+                }
+            }
+        }
+    }
+
+    fun downloadAndInstallUpdate(context: Context, downloadUrl: String) {
+        viewModelScope.launch {
+            _updateDownloadState.value = UpdateDownloadState.Downloading(0, 0, 0)
+            val result = AppUpdateManager.downloadApk(
+                context = context,
+                downloadUrl = downloadUrl,
+                onProgress = { percent, downloaded, total ->
+                    _updateDownloadState.value = UpdateDownloadState.Downloading(percent, downloaded, total)
+                }
+            )
+            result.onSuccess { apkFile ->
+                _updateDownloadState.value = UpdateDownloadState.Completed(apkFile)
+                _toastEvent.emit("تم اكتمال تنزيل التحديث! جاري فتح مثبت الحزم...")
+                val installResult = AppUpdateManager.installApk(context, apkFile)
+                installResult.onFailure { err ->
+                    _toastEvent.emit(err.localizedMessage ?: "حدث خطأ أثناء بدء التثبيت")
+                }
+            }.onFailure { err ->
+                _updateDownloadState.value = UpdateDownloadState.Error(err.localizedMessage ?: "فشل تنزيل ملف التحديث")
+                _toastEvent.emit("خطأ في التنزيل: ${err.localizedMessage ?: err.message}")
+            }
+        }
+    }
+
+    fun installDownloadedApk(context: Context, apkFile: java.io.File) {
+        val result = AppUpdateManager.installApk(context, apkFile)
+        result.onFailure { err ->
+            viewModelScope.launch {
+                _toastEvent.emit(err.localizedMessage ?: "تعذر فتح ملف التثبيت")
+            }
         }
     }
 

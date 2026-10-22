@@ -33,6 +33,10 @@ import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.SystemUpdate
+import com.example.data.model.UpdateCheckState
+import com.example.ui.components.AppUpdateDialog
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.AlertDialog
@@ -112,7 +116,11 @@ fun MainScreen(
     var isShowingAdminAuditScreen by remember { mutableStateOf(false) }
     var selectedSessionForDetailScreen by remember { mutableStateOf<com.example.data.model.UserSessionRecord?>(null) }
     var showWelcomeDialog by remember { mutableStateOf(true) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
     val allCards by viewModel.cards.collectAsStateWithLifecycle()
+    val updateCheckState by viewModel.updateCheckState.collectAsStateWithLifecycle()
+    val updateDownloadState by viewModel.updateDownloadState.collectAsStateWithLifecycle()
+    val showUpdateBanner by viewModel.showUpdateBanner.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -150,8 +158,10 @@ fun MainScreen(
     selectedSessionForDetailScreen?.let { targetSession ->
         BackHandler { selectedSessionForDetailScreen = null }
         val sessionHistory by viewModel.getLoginHistoryForUser(targetSession.username).collectAsStateWithLifecycle(emptyList())
+        val subscriberProfile by viewModel.getSubscriberProfileFlow(targetSession.username).collectAsStateWithLifecycle(null)
         UserSessionDetailScreen(
             session = targetSession,
+            subscriberProfile = subscriberProfile,
             loginHistory = sessionHistory,
             onBackClick = { selectedSessionForDetailScreen = null },
             onKickUser = if (targetSession.isOnline) {
@@ -226,6 +236,27 @@ fun MainScreen(
                                         .clip(CircleShape)
                                         .background(MaterialTheme.colorScheme.error)
                                         .align(Alignment.TopEnd)
+                                )
+                            }
+                        }
+                    }
+
+                    if (updateCheckState is UpdateCheckState.UpdateAvailable) {
+                        IconButton(
+                            onClick = { showUpdateDialog = true },
+                            modifier = Modifier
+                                .padding(end = 4.dp)
+                                .testTag("btn_topbar_update_badge")
+                        ) {
+                            BadgedBox(badge = {
+                                Badge(containerColor = MaterialTheme.colorScheme.error) {
+                                    Text("تحديث", fontSize = 9.sp)
+                                }
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Default.SystemUpdate,
+                                    contentDescription = "تحديث جديد متاح",
+                                    tint = MaterialTheme.colorScheme.primary
                                 )
                             }
                         }
@@ -334,6 +365,86 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            // App Update Notification Banner (إشعار التحديث الجديد المباشر من GitHub Releases)
+            if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
+                val updateState = updateCheckState as UpdateCheckState.UpdateAvailable
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag("app_update_notification_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { showUpdateDialog = true }
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SystemUpdate,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "يوجد تحديث جديد للبرنامج (${updateState.release.tagName})",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                Text(
+                                    text = "اضغط للتنزيل والتثبيت مباشرة بدون فقد البيانات",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                                )
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Button(
+                                onClick = { showUpdateDialog = true },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Text("تحديث", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            IconButton(
+                                onClick = { viewModel.dismissUpdateBanner() },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "إغلاق التنبيه",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Offline Safe Browsing Banner (تنبيه التصفح المحلي الآمن مع زر المزامنة)
             if (connectedState?.isOffline == true) {
                 Surface(
@@ -587,5 +698,24 @@ fun MainScreen(
                 }
             }
         )
+    }
+
+    if (showUpdateDialog) {
+        val checkState = updateCheckState
+        if (checkState is UpdateCheckState.UpdateAvailable) {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            AppUpdateDialog(
+                release = checkState.release,
+                currentVersion = viewModel.currentAppVersion,
+                downloadState = updateDownloadState,
+                onDownloadAndInstall = { url ->
+                    viewModel.downloadAndInstallUpdate(context, url)
+                },
+                onInstallDownloaded = { file ->
+                    viewModel.installDownloadedApk(context, file)
+                },
+                onDismiss = { showUpdateDialog = false }
+            )
+        }
     }
 }

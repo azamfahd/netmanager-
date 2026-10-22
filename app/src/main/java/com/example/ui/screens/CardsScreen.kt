@@ -133,6 +133,7 @@ fun CardsScreen(
     var cardToReactivate by remember { mutableStateOf<HotspotCard?>(null) }
     var showPrintSelectionDialog by remember { mutableStateOf(false) }
     var selectedSessionForDetail by remember { mutableStateOf<UserSessionRecord?>(null) }
+    var showReadyCardsDetailDialog by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
@@ -421,7 +422,8 @@ fun CardsScreen(
                             currentSubFilter = readySubFilter,
                             onSubFilterSelected = { readySubFilter = it },
                             currentSortOrder = readySortOrder,
-                            onSortOrderSelected = { readySortOrder = it }
+                            onSortOrderSelected = { readySortOrder = it },
+                            onReadyCardsClick = { showReadyCardsDetailDialog = true }
                         )
                     }
 
@@ -630,8 +632,10 @@ fun CardsScreen(
     // User Detail Dialog
     selectedSessionForDetail?.let { session ->
         val userHistory by viewModel.getLoginHistoryForUser(session.username).collectAsStateWithLifecycle(emptyList())
+        val subscriberProfile by viewModel.getSubscriberProfileFlow(session.username).collectAsStateWithLifecycle(null)
         UserDetailDialog(
             session = session,
+            subscriberProfile = subscriberProfile,
             loginHistory = userHistory,
             onDismiss = { selectedSessionForDetail = null }
         )
@@ -688,6 +692,27 @@ fun CardsScreen(
             onConfirmSelection = { selectedCards ->
                 viewModel.setPrintableCards(selectedCards)
                 showPrintSelectionDialog = false
+                onOpenPrintScreen()
+            }
+        )
+    }
+
+    // Ready Cards Detailed Package Breakdown Dialog
+    if (showReadyCardsDetailDialog) {
+        val readyCards = remember(distinctCards, activeUsernames) {
+            distinctCards.filter { card ->
+                !activeUsernames.contains(card.name) &&
+                (card.uptime.isBlank() || card.uptime == "0s") &&
+                card.bytesIn == 0L && card.bytesOut == 0L &&
+                !card.isExpired
+            }
+        }
+        ReadyCardsDetailDialog(
+            readyCards = readyCards,
+            onDismiss = { showReadyCardsDetailDialog = false },
+            onPrintCards = { cards ->
+                viewModel.setPrintableCards(cards)
+                showReadyCardsDetailDialog = false
                 onOpenPrintScreen()
             }
         )
@@ -1050,7 +1075,8 @@ fun ReadyCardsDashboardCard(
     currentSubFilter: ReadyCardsSubFilter,
     onSubFilterSelected: (ReadyCardsSubFilter) -> Unit,
     currentSortOrder: ReadyCardsSortOrder,
-    onSortOrderSelected: (ReadyCardsSortOrder) -> Unit
+    onSortOrderSelected: (ReadyCardsSortOrder) -> Unit,
+    onReadyCardsClick: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -1112,9 +1138,11 @@ fun ReadyCardsDashboardCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Metric 1: Ready Cards Count
+                // Metric 1: Ready Cards Count (Clickable to open detailed package breakdown)
                 Surface(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(onClick = onReadyCardsClick),
                     shape = RoundedCornerShape(10.dp),
                     color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
                     border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
@@ -1123,7 +1151,14 @@ fun ReadyCardsDashboardCard(
                         modifier = Modifier.padding(8.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        Text(text = "جاهزة للبيع", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontSize = 10.sp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(text = "جاهزة للبيع (تفاصيل)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontSize = 10.sp)
+                            Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
+                        }
                         Text(text = "$totalReadyCount كرت", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
                     }
                 }
@@ -1480,4 +1515,141 @@ fun BatchGroupHeaderCard(
             }
         }
     }
+}
+
+@Composable
+fun ReadyCardsDetailDialog(
+    readyCards: List<HotspotCard>,
+    onDismiss: () -> Unit,
+    onPrintCards: (List<HotspotCard>) -> Unit
+) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+    val profileGroups = remember(readyCards) { readyCards.groupBy { it.profile.ifBlank { "عام" } } }
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Default.ConfirmationNumber, contentDescription = null, tint = RouterBlue)
+                Text("تفاصيل الكروت الجاهزة للبيع حسب الباقات", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(420.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "إجمالي الكروت الجاهزة: ${readyCards.size} كرت | القيمة الإجمالية: ${readyCards.sumOf { parsePriceNumber(it.price) }.toInt()} ر.ي",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    profileGroups.forEach { (profileName, cardsInProfile) ->
+                        val profileTotalVal = cardsInProfile.sumOf { parsePriceNumber(it.price) }
+                        item(key = "dialog_profile_$profileName") {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                                border = BorderStroke(0.8.dp, RouterBlue.copy(alpha = 0.3f))
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(28.dp)
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(RouterBlue.copy(alpha = 0.15f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(Icons.Default.Tune, contentDescription = null, tint = RouterBlue, modifier = Modifier.size(14.dp))
+                                            }
+                                            Text(
+                                                text = "باقة: $profileName",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = StatusActiveGreenBg
+                                        ) {
+                                            Text(
+                                                text = "${cardsInProfile.size} كرت (${profileTotalVal.toInt()} ر.ي)",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = StatusActiveGreen,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                onPrintCards(cardsInProfile)
+                                            },
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.height(30.dp).weight(1f)
+                                        ) {
+                                            Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(12.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("طباعة كروت الباقة", fontSize = 11.sp)
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = {
+                                                val txt = cardsInProfile.joinToString("\n") { "${it.name} | ${it.password}" }
+                                                clipboardManager.setText(AnnotatedString(txt))
+                                                Toast.makeText(context, "تم نسخ ${cardsInProfile.size} كرت لباقة $profileName", Toast.LENGTH_SHORT).show()
+                                            },
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.height(30.dp).weight(1f)
+                                        ) {
+                                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(12.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("نسخ الأكواد", fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss, shape = RoundedCornerShape(10.dp)) {
+                Text("إغلاق")
+            }
+        }
+    )
 }

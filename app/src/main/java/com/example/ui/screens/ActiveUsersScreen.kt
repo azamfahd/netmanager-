@@ -391,8 +391,10 @@ fun ActiveUsersScreen(
     // User Detail Dialog
     selectedSessionForDetail?.let { targetSession ->
         val userHistory by viewModel.getLoginHistoryForUser(targetSession.username).collectAsStateWithLifecycle(emptyList())
+        val subscriberProfile by viewModel.getSubscriberProfileFlow(targetSession.username).collectAsStateWithLifecycle(null)
         UserDetailDialog(
             session = targetSession,
+            subscriberProfile = subscriberProfile,
             loginHistory = userHistory,
             onDismiss = { selectedSessionForDetail = null },
             onKickUser = if (targetSession.isOnline) {

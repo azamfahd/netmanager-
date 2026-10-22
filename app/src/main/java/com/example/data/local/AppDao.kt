@@ -116,6 +116,9 @@ interface AppDao {
     @Query("SELECT * FROM session_archive WHERE isQuotaExhausted = 1 ORDER BY timestamp DESC")
     fun getQuotaExhaustedSessions(): Flow<List<SessionArchiveEntity>>
 
+    @Query("SELECT * FROM session_archive WHERE username = :username ORDER BY timestamp DESC")
+    fun getArchivedSessionsForUser(username: String): Flow<List<SessionArchiveEntity>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateSession(session: SessionArchiveEntity): Long
 

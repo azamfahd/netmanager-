@@ -54,6 +54,9 @@ class MikrotikRepository {
         _hotspotServers.value = snapshot.servers
         _networkNodes.value = snapshot.nodes
         _systemLogs.value = snapshot.logs
+        if (snapshot.ipBindings.isNotEmpty()) {
+            _ipBindings.value = snapshot.ipBindings
+        }
     }
 
     fun getCurrentSnapshot(ipAddress: String, routerName: String): com.example.data.local.RouterSnapshot {
@@ -67,7 +70,8 @@ class MikrotikRepository {
             activeUsers = _activeUsers.value,
             servers = _hotspotServers.value,
             nodes = _networkNodes.value,
-            logs = _systemLogs.value
+            logs = _systemLogs.value,
+            ipBindings = _ipBindings.value
         )
     }
 

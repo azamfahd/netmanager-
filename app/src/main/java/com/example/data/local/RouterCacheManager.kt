@@ -26,6 +26,7 @@ data class RouterSnapshot(
     val servers: List<HotspotServerInfo>,
     val nodes: List<NetworkNode>,
     val logs: List<SystemLogEntry>,
+    val ipBindings: List<IpBinding> = emptyList(),
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -56,7 +57,8 @@ object RouterCacheManager {
         activeUsers: List<HotspotActiveUser>,
         servers: List<HotspotServerInfo>,
         nodes: List<NetworkNode>,
-        logs: List<SystemLogEntry>
+        logs: List<SystemLogEntry>,
+        ipBindings: List<IpBinding> = emptyList()
     ) {
         try {
             val root = JSONObject().apply {
@@ -189,6 +191,18 @@ object RouterCacheManager {
                         })
                     }
                 })
+
+                put("ipBindings", JSONArray().apply {
+                    ipBindings.forEach { b ->
+                        put(JSONObject().apply {
+                            put("id", b.id)
+                            put("macAddress", b.macAddress)
+                            put("address", b.address)
+                            put("type", b.type)
+                            put("comment", b.comment)
+                        })
+                    }
+                })
             }
 
             val targetFile = getTargetSaveFile(context, ipAddress)
@@ -197,7 +211,7 @@ object RouterCacheManager {
             if (tempFile.exists()) {
                 tempFile.renameTo(targetFile)
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
     }
 
     fun loadSnapshot(context: Context, ipAddress: String): RouterSnapshot? {
@@ -356,6 +370,21 @@ object RouterCacheManager {
                 )
             }
 
+            val bindingsList = mutableListOf<IpBinding>()
+            val bArr = root.optJSONArray("ipBindings") ?: JSONArray()
+            for (i in 0 until bArr.length()) {
+                val o = bArr.getJSONObject(i)
+                bindingsList.add(
+                    IpBinding(
+                        id = o.optString("id", ""),
+                        macAddress = o.optString("macAddress", ""),
+                        address = o.optString("address", ""),
+                        type = o.optString("type", "bypassed"),
+                        comment = o.optString("comment", "")
+                    )
+                )
+            }
+
             return RouterSnapshot(
                 ipAddress = ip,
                 routerName = rName,
@@ -367,9 +396,10 @@ object RouterCacheManager {
                 servers = serversList,
                 nodes = nodesList,
                 logs = logsList,
+                ipBindings = bindingsList,
                 timestamp = time
             )
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
         return null
     }
 
@@ -407,6 +437,66 @@ object RouterCacheManager {
                 val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault())
                 sdf.format(Date(timestamp))
             }
+        }
+    }
+
+    fun getLatestSnapshot(context: Context): RouterSnapshot? {
+        val files = mutableListOf<File>()
+        context.filesDir.listFiles { _, name -> name.startsWith("router_snapshot_") && name.endsWith(".json") }?.let {
+            files.addAll(it)
+        }
+        context.cacheDir.listFiles { _, name -> name.startsWith("router_snapshot_") && name.endsWith(".json") }?.let {
+            files.addAll(it)
+        }
+        if (files.isEmpty()) return null
+
+        var latestSnapshot: RouterSnapshot? = null
+        for (f in files) {
+            try {
+                val root = JSONObject(f.readText())
+                val ip = root.optString("ipAddress", "")
+                if (ip.isNotBlank()) {
+                    val snapshot = loadSnapshot(context, ip)
+                    if (snapshot != null) {
+                        if (latestSnapshot == null || snapshot.timestamp > latestSnapshot.timestamp) {
+                            latestSnapshot = snapshot
+                        }
+                    }
+                }
+            } catch (e: Exception) {}
+        }
+        return latestSnapshot
+    }
+
+    fun getAllCachedSnapshots(context: Context): List<RouterSnapshot> {
+        val files = mutableListOf<File>()
+        context.filesDir.listFiles { _, name -> name.startsWith("router_snapshot_") && name.endsWith(".json") }?.let {
+            files.addAll(it)
+        }
+        val result = mutableListOf<RouterSnapshot>()
+        val seenIps = mutableSetOf<String>()
+        for (f in files) {
+            try {
+                val root = JSONObject(f.readText())
+                val ip = root.optString("ipAddress", "")
+                if (ip.isNotBlank() && seenIps.add(ip)) {
+                    loadSnapshot(context, ip)?.let { result.add(it) }
+                }
+            } catch (e: Exception) {}
+        }
+        return result.sortedByDescending { it.timestamp }
+    }
+
+    fun clearCacheForRouter(context: Context, ipAddress: String): Boolean {
+        return try {
+            val sanitized = ipAddress.replace(Regex("[^a-zA-Z0-9_]"), "_")
+            val f1 = File(context.filesDir, "router_snapshot_$sanitized.json")
+            val f2 = File(context.cacheDir, "router_snapshot_$sanitized.json")
+            val d1 = if (f1.exists()) f1.delete() else false
+            val d2 = if (f2.exists()) f2.delete() else false
+            d1 || d2
+        } catch (e: Exception) {
+            false
         }
     }
 }

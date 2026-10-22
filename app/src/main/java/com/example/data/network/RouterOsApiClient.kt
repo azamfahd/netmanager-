@@ -165,6 +165,7 @@ class RouterOsApiClient {
     suspend fun getActiveHotspotUsers(): Result<List<HotspotActiveUser>> {
         return withContext(Dispatchers.IO) {
             try {
+                ensureConnected()
                 writeSentence(listOf("/ip/hotspot/active/print"))
                 val sentences = readAllSentencesUntilDone()
                 val list = mutableListOf<HotspotActiveUser>()
@@ -197,6 +198,7 @@ class RouterOsApiClient {
     suspend fun getHotspotUsers(): Result<List<HotspotCard>> {
         return withContext(Dispatchers.IO) {
             try {
+                ensureConnected()
                 writeSentence(listOf("/ip/hotspot/user/print"))
                 val sentences = readAllSentencesUntilDone()
                 val list = mutableListOf<HotspotCard>()
@@ -235,6 +237,7 @@ class RouterOsApiClient {
     suspend fun getHotspotProfiles(): Result<List<HotspotProfile>> {
         return withContext(Dispatchers.IO) {
             try {
+                ensureConnected()
                 val list = mutableListOf<HotspotProfile>()
 
                 // 1. Fetch Hotspot User Profiles (/ip/hotspot/user/profile)
@@ -1242,7 +1245,7 @@ class RouterOsApiClient {
     }
 
     @Synchronized
-    private fun writeSentence(words: List<String>) {
+    private fun writeSentenceWithoutRetry(words: List<String>) {
         val out = outStream ?: throw IllegalStateException("Socket is not connected")
         for (word in words) {
             writeWord(out, word)
@@ -1252,7 +1255,7 @@ class RouterOsApiClient {
     }
 
     @Synchronized
-    private fun readSentence(): List<String> {
+    private fun readSentenceWithoutRetry(): List<String> {
         val inS = inStream ?: throw IllegalStateException("Socket is not connected")
         val words = mutableListOf<String>()
         while (true) {
@@ -1261,6 +1264,55 @@ class RouterOsApiClient {
             words.add(word)
         }
         return words
+    }
+
+    @Synchronized
+    private fun writeSentence(words: List<String>) {
+        try {
+            writeSentenceWithoutRetry(words)
+        } catch (e: Exception) {
+            try {
+                if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
+                    close()
+                    val sock = Socket()
+                    sock.connect(InetSocketAddress(lastHost, lastPort), 5000)
+                    sock.soTimeout = 8000
+                    socket = sock
+                    inStream = sock.getInputStream()
+                    outStream = sock.getOutputStream()
+                    writeSentenceWithoutRetry(listOf("/login", "=name=$lastUsername", "=password=$lastPassword"))
+                    readSentenceWithoutRetry()
+
+                    writeSentenceWithoutRetry(words)
+                    return
+                }
+            } catch (_: Exception) {}
+            throw e
+        }
+    }
+
+    @Synchronized
+    private fun readSentence(): List<String> {
+        try {
+            return readSentenceWithoutRetry()
+        } catch (e: Exception) {
+            try {
+                if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
+                    close()
+                    val sock = Socket()
+                    sock.connect(InetSocketAddress(lastHost, lastPort), 5000)
+                    sock.soTimeout = 8000
+                    socket = sock
+                    inStream = sock.getInputStream()
+                    outStream = sock.getOutputStream()
+                    writeSentenceWithoutRetry(listOf("/login", "=name=$lastUsername", "=password=$lastPassword"))
+                    readSentenceWithoutRetry()
+
+                    return readSentenceWithoutRetry()
+                }
+            } catch (_: Exception) {}
+            throw e
+        }
     }
 
     @Synchronized
