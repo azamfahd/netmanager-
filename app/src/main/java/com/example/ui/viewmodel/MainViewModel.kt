@@ -1996,10 +1996,18 @@ class MainViewModel(
                 if (!apkUrl.isNullOrBlank()) {
                     downloadAndInstallUpdate(context, apkUrl)
                 } else {
-                    _toastEvent.emit("لم يتم العثور على ملف APK جاهز للتنزيل في هذا الإصدار.")
+                    val browserIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(releaseInfo.htmlUrl)).apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(browserIntent)
+                    _toastEvent.emit("تم فتح صفحة التحديث لتنزيل حزمة APK وتثبيتها مباشرة")
                 }
             }.onFailure { err ->
-                _toastEvent.emit("تعذر جلب التحديث: ${err.message}")
+                _toastEvent.emit("تعذر جلب التحديث: ${err.message}، جاري فتح المستودع...")
+                val browserIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(AppUpdateManager.GITHUB_RELEASES_WEB_URL)).apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(browserIntent)
             }
         }
     }
