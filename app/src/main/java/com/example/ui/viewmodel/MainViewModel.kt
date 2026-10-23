@@ -920,6 +920,7 @@ class MainViewModel(
                                 val bytesIn = matchingCard?.bytesIn ?: 0L
                                 val bytesOut = matchingCard?.bytesOut ?: 0L
                                 val duration = matchingCard?.uptime ?: "0s"
+                                val telemetry = repository.getLastKnownTelemetryForUser(discoName)
                                 database.appDao().finalizeUserLogin(
                                     username = discoName,
                                     logoutTime = logoutTimeFormatted,
@@ -927,7 +928,13 @@ class MainViewModel(
                                     bytesIn = bytesIn,
                                     bytesOut = bytesOut,
                                     totalBytes = bytesIn + bytesOut,
-                                    reason = reason
+                                    reason = reason,
+                                    ipAddress = telemetry?.ipAddress ?: "",
+                                    macAddress = telemetry?.macAddress ?: "",
+                                    deviceModel = telemetry?.deviceInfo?.modelName ?: "",
+                                    deviceBrand = telemetry?.deviceInfo?.brand ?: "",
+                                    deviceCategory = telemetry?.deviceInfo?.category?.name ?: "",
+                                    nodeName = telemetry?.nodeName ?: ""
                                 )
                             } catch (_: Exception) {}
                         }
@@ -1996,18 +2003,10 @@ class MainViewModel(
                 if (!apkUrl.isNullOrBlank()) {
                     downloadAndInstallUpdate(context, apkUrl)
                 } else {
-                    val browserIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(releaseInfo.htmlUrl)).apply {
-                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    context.startActivity(browserIntent)
-                    _toastEvent.emit("تم فتح صفحة التحديث لتنزيل حزمة APK وتثبيتها مباشرة")
+                    _toastEvent.emit("لم يتم العثور على ملف APK جاهز للتنزيل في هذا الإصدار.")
                 }
             }.onFailure { err ->
-                _toastEvent.emit("تعذر جلب التحديث: ${err.message}، جاري فتح المستودع...")
-                val browserIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(AppUpdateManager.GITHUB_RELEASES_WEB_URL)).apply {
-                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(browserIntent)
+                _toastEvent.emit("تعذر جلب التحديث: ${err.message}")
             }
         }
     }

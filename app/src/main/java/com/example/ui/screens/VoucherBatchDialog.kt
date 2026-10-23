@@ -1280,62 +1280,42 @@ fun VoucherBatchDialog(
                     }
                 }
 
-                // Time Limit & Price Customization Fields
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedTextField(
-                        value = timeLimit,
-                        onValueChange = { timeLimit = it },
-                        label = { Text("صلاحية الوقت (Limit)") },
-                        placeholder = { Text("1d أو 2h") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-
-                    OutlinedTextField(
-                        value = price,
-                        onValueChange = { price = it },
-                        label = { Text("سعر البيع") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-                }
-
-                // Data Quota Quick Chips & Field
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("حد وحصة البيانات:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                    Row(
+                // Display selected profile details as read-only info
+                val activeProfileObj = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+                if (activeProfileObj != null) {
+                    Card(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
                     ) {
-                        listOf(0L to "مفتوح", 500L to "500M", 1024L to "1GB", 2560L to "2.5G", 5120L to "5GB", 10240L to "10G").forEach { (mbVal, mbLabel) ->
-                            FilterChip(
-                                selected = dataLimitMBInput == mbVal.toString(),
-                                onClick = { dataLimitMBInput = mbVal.toString() },
-                                label = { Text(mbLabel, fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.weight(1f)
-                            )
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("تفاصيل الباقة المعتمدة من الراوتر:", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("السعر:", style = MaterialTheme.typography.bodyMedium)
+                                Text(activeProfileObj.price, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                            }
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("الصلاحية (الوقت):", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    text = if (activeProfileObj.validity.isNotBlank() && activeProfileObj.validity != "غير محدد") activeProfileObj.validity
+                                           else if (activeProfileObj.sessionTimeout.isNotBlank() && activeProfileObj.sessionTimeout != "غير محدد") activeProfileObj.sessionTimeout
+                                           else "غير محدد",
+                                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("حصة البيانات:", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    text = if (activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد") activeProfileObj.dataLimit
+                                           else "مفتوح",
+                                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
+                } else {
+                    Text("يرجى اختيار باقة صالحة من القائمة أعلاه لعرض تفاصيلها.", color = MaterialTheme.colorScheme.error)
                 }
-
-                OutlinedTextField(
-                    value = dataLimitMBInput,
-                    onValueChange = { input ->
-                        dataLimitMBInput = input.filter { ch -> ch.isDigit() }.take(8)
-                    },
-                    label = { Text("حد البيانات بالميجابايت (0 = غير محدود)") },
-                    placeholder = { Text("2560") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
-                )
 
                 if (!isProfileValid) {
                     Surface(
@@ -1363,12 +1343,12 @@ fun VoucherBatchDialog(
         confirmButton = {
             val parsedCount = batchCountInput.toIntOrNull()?.coerceIn(1, 5000) ?: 20
             val parsedCodeLength = codeLengthInput.toIntOrNull()?.coerceIn(3, 16) ?: 6
-            val parsedDataLimitMB = dataLimitMBInput.toLongOrNull() ?: 0L
+            val activeProfileObj = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
 
             if (selectedTab == VoucherDialogTab.BATCH_GENERATE) {
                 Button(
                     onClick = {
-                        if (!isProfileValid) return@Button
+                        if (!isProfileValid || activeProfileObj == null) return@Button
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
                         val config = BatchGenerationConfig(
                             count = parsedCount,
@@ -1377,35 +1357,18 @@ fun VoucherBatchDialog(
                             codeLength = parsedCodeLength,
                             characterSet = charType,
                             isSingleCode = isSingleCode,
-                            timeLimit = timeLimit,
-                            dataLimitMB = parsedDataLimitMB,
-                            price = price,
+                            timeLimit = activeProfileObj.validity.takeIf { it.isNotBlank() && it != "غير محدد" } ?: activeProfileObj.sessionTimeout.takeIf { it.isNotBlank() && it != "غير محدد" } ?: "0s",
+                            dataLimitMB = Regex("""\d+""").find(activeProfileObj.dataLimit)?.value?.toLongOrNull() ?: 0L,
+                            price = activeProfileObj.price,
                             batchComment = if (selectedAgent != null) "${batchComment} (نقطة: ${selectedAgent.name})" else batchComment,
                             posAgentId = selectedAgent?.id ?: 0L,
                             posAgentName = selectedAgent?.name.orEmpty(),
                             discountPercent = selectedAgent?.discountPercent ?: 0.0
                         )
-                        // Auto-save the latest configuration for seamless experience
-                        settingsManager.saveSettings(
-                            SavedVoucherSettings(
-                                hasCustomDefaults = true,
-                                profile = selectedProfile,
-                                price = price,
-                                timeLimit = timeLimit,
-                                dataLimitMB = dataLimitMBInput,
-                                isSingleCode = isSingleCode,
-                                batchCount = batchCountInput,
-                                codeLength = codeLengthInput,
-                                charType = charType,
-                                prefix = prefix,
-                                batchComment = batchComment,
-                                posAgentId = selectedAgentId
-                            )
-                        )
                         onGenerate(config)
                         onDismiss()
                     },
-                    enabled = isProfileValid,
+                    enabled = isProfileValid && activeProfileObj != null,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (isProfileValid) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
@@ -1425,7 +1388,7 @@ fun VoucherBatchDialog(
             } else {
                 Button(
                     onClick = {
-                        if (!isProfileValid) return@Button
+                        if (!isProfileValid || activeProfileObj == null) return@Button
                         if (singleCode.isNotBlank()) {
                             val selectedAgent = posAgents.find { it.id == selectedAgentId }
                             val finalPassword = if (isSingleCode) "" else singlePassword.trim()
@@ -1437,28 +1400,11 @@ fun VoucherBatchDialog(
                                 uptime = "0s",
                                 bytesIn = 0,
                                 bytesOut = 0,
-                                limitUptime = timeLimit,
-                                limitBytesTotal = if (parsedDataLimitMB > 0) parsedDataLimitMB * 1024 * 1024L else 0L,
+                                limitUptime = activeProfileObj.validity.takeIf { it.isNotBlank() && it != "غير محدد" } ?: activeProfileObj.sessionTimeout.takeIf { it.isNotBlank() && it != "غير محدد" } ?: "0s",
+                                limitBytesTotal = Regex("""\d+""").find(activeProfileObj.dataLimit)?.value?.toLongOrNull()?.let { it * 1024 * 1024L } ?: 0L,
                                 comment = if (selectedAgent != null) "${singleComment.ifBlank { "كرت فردي" }} (نقطة: ${selectedAgent.name})" else singleComment.ifBlank { "كرت فردي" },
                                 disabled = false,
-                                price = price
-                            )
-                            // Auto-save current settings
-                            settingsManager.saveSettings(
-                                SavedVoucherSettings(
-                                    hasCustomDefaults = true,
-                                    profile = selectedProfile,
-                                    price = price,
-                                    timeLimit = timeLimit,
-                                    dataLimitMB = dataLimitMBInput,
-                                    isSingleCode = isSingleCode,
-                                    batchCount = batchCountInput,
-                                    codeLength = codeLengthInput,
-                                    charType = charType,
-                                    prefix = prefix,
-                                    batchComment = batchComment,
-                                    posAgentId = selectedAgentId
-                                )
+                                price = activeProfileObj.price
                             )
                             onAddSingleCard?.invoke(
                                 card,
@@ -1469,7 +1415,7 @@ fun VoucherBatchDialog(
                             onDismiss()
                         }
                     },
-                    enabled = isProfileValid && singleCode.isNotBlank(),
+                    enabled = isProfileValid && activeProfileObj != null && singleCode.isNotBlank(),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()

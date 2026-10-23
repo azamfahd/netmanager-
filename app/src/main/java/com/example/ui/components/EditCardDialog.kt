@@ -65,6 +65,10 @@ fun EditCardDialog(
     var comment by remember { mutableStateOf(card.comment) }
     var expandedProfileDropdown by remember { mutableStateOf(false) }
 
+    val isProfileValid = remember(selectedProfile, profiles) {
+        profiles.any { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(22.dp),
@@ -87,9 +91,9 @@ fun EditCardDialog(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "تحديث باقة وسعر وصلاحيات الكرت في الراوتر",
+                        text = if (isProfileValid) "لا يمكن تعديل تفاصيل باقة الراوتر المعتمدة" else "تحديث باقة وسعر وصلاحيات الكرت في الراوتر",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = if (isProfileValid) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -194,6 +198,7 @@ fun EditCardDialog(
                 OutlinedTextField(
                     value = price,
                     onValueChange = { price = it },
+                    readOnly = isProfileValid,
                     label = { Text("سعر البيع (مثال: 500 ر.ي)") },
                     leadingIcon = { Icon(Icons.Default.PriceChange, contentDescription = null) },
                     modifier = Modifier.fillMaxWidth(),
@@ -205,6 +210,7 @@ fun EditCardDialog(
                 OutlinedTextField(
                     value = timeLimit,
                     onValueChange = { timeLimit = it },
+                    readOnly = isProfileValid,
                     label = { Text("حد الوقت (مثال: 1d أو 2h)") },
                     leadingIcon = { Icon(Icons.Default.Timer, contentDescription = null) },
                     modifier = Modifier.fillMaxWidth(),

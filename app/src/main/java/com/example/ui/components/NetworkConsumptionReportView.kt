@@ -23,8 +23,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Devices
@@ -38,7 +36,6 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -60,11 +57,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -187,80 +184,36 @@ fun NetworkConsumptionReportView(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     // Total Network Consumption Card
-                    Card(
+                    DetailedMetricCard(
+                        title = "إجمالي الاستهلاك",
+                        icon = Icons.Default.Speed,
+                        iconTint = RouterBlue,
+                        value = NetworkUtils.formatBytes(report.totalBytes),
+                        valueColor = RouterBlue,
                         modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(30.dp)
-                                        .clip(CircleShape)
-                                        .background(RouterBlue.copy(alpha = 0.15f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(Icons.Default.Speed, contentDescription = null, tint = RouterBlue, modifier = Modifier.size(16.dp))
-                                }
-                                Text("إجمالي الاستهلاك", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = NetworkUtils.formatBytes(report.totalBytes),
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = RouterBlue
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
+                        subDetails = {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text("⬇️ ${NetworkUtils.formatBytes(report.totalDownloadBytes)}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Text("⬆️ ${NetworkUtils.formatBytes(report.totalUploadBytes)}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
-                    }
+                    )
 
                     // Expired Cards Tracker Card
-                    Card(
+                    DetailedMetricCard(
+                        title = "كروت منتهية الصلاحية",
+                        icon = Icons.Default.Warning,
+                        iconTint = StatusErrorRed,
+                        value = "${report.expiredCardsCount} كرت",
+                        valueColor = StatusErrorRed,
                         modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(30.dp)
-                                        .clip(CircleShape)
-                                        .background(StatusErrorRed.copy(alpha = 0.15f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(Icons.Default.Warning, contentDescription = null, tint = StatusErrorRed, modifier = Modifier.size(16.dp))
-                                }
-                                Text("كروت منتهية الصلاحية", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "${report.expiredCardsCount} كرت",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = StatusErrorRed
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
+                        subDetails = {
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text("⚠️ بالرصيد: ${report.quotaExhaustedCount}", fontSize = 10.sp, color = StatusErrorRed)
                                 Text("⏱️ بالوقت: ${report.timeExpiredCount}", fontSize = 10.sp, color = StatusWarningAmber)
                             }
                         }
-                    }
+                    )
                 }
 
                 Row(
@@ -268,74 +221,30 @@ fun NetworkConsumptionReportView(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     // Archived Sessions Count Card
-                    Card(
+                    DetailedMetricCard(
+                        title = "الجلسات المؤرشفة",
+                        icon = Icons.Default.History,
+                        iconTint = StatusActiveGreen,
+                        value = "${report.totalSessionsCount} جلسة",
+                        valueColor = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(30.dp)
-                                        .clip(CircleShape)
-                                        .background(StatusActiveGreen.copy(alpha = 0.15f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(Icons.Default.History, contentDescription = null, tint = StatusActiveGreen, modifier = Modifier.size(16.dp))
-                                }
-                                Text("الجلسات المؤرشفة", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "${report.totalSessionsCount} جلسة",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
+                        subDetails = {
                             Text("${report.activeSessionsCount} نشطة • ${report.offlineSessionsCount} مكتملة", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                    }
+                    )
 
                     // Average Usage Per User Card
-                    Card(
+                    DetailedMetricCard(
+                        title = "معدل استهلاك الكرت",
+                        icon = Icons.Default.PieChart,
+                        iconTint = MaterialTheme.colorScheme.primary,
+                        value = NetworkUtils.formatBytes(report.averageBytesPerUser),
+                        valueColor = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(30.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primaryContainer),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(Icons.Default.PieChart, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                }
-                                Text("معدل استهلاك الكرت", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = NetworkUtils.formatBytes(report.averageBytesPerUser),
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
+                        subDetails = {
                             Text("متوسط البيانات لكل مستخدم", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                    }
+                    )
                 }
             }
         }
@@ -593,7 +502,10 @@ fun ExpiredCardItemRow(
                         text = card.cardName,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                     val (badgeText, badgeColor) = when {
                         card.isQuotaExhausted -> "انتهى الرصيد (بيانات)" to StatusErrorRed

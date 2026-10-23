@@ -268,7 +268,7 @@ class RouterOsApiClient {
                                     uploadLimit = up,
                                     downloadLimit = down,
                                     validity = sessionTimeout,
-                                    dataLimit = extractDataLimitFromText(comment),
+                                    dataLimit = extractDataLimitFromText(name, comment),
                                     source = "hotspot",
                                     comment = comment,
                                     priceNumber = priceNum
@@ -496,10 +496,20 @@ class RouterOsApiClient {
         return "غير محدد"
     }
 
-    private fun extractDataLimitFromText(comment: String): String {
-        if (comment.isBlank()) return ""
-        val match = Regex("""(?i)(\d+(?:\.\d+)?)\s*(GB|MB|GI|MI|G|M)""").find(comment)
-        return match?.value?.uppercase() ?: ""
+    private fun extractDataLimitFromText(name: String, comment: String): String {
+        val combined = "$name $comment"
+        if (combined.isBlank()) return "غير محدد"
+        val match = Regex("""(?i)(\d+(?:\.\d+)?)\s*(GB|MB|GI|MI|G|M|جيجا|ميجا)""").find(combined)
+        if (match != null && match.groupValues.size > 1) {
+            val num = match.groupValues[1]
+            val unit = match.groupValues[2].uppercase()
+            val normalizedUnit = when {
+                unit.startsWith("G") || unit.contains("جيجا") -> "GB"
+                else -> "MB"
+            }
+            return "$num $normalizedUnit"
+        }
+        return "غير محدد"
     }
 
     private fun parseRateLimitSpeeds(rateLimit: String): Pair<String, String> {
@@ -560,23 +570,35 @@ class RouterOsApiClient {
         return withContext(Dispatchers.IO) {
             try {
                 ensureConnected()
+                
+                // Helper to execute removal and check for trap
+                fun executeRemoval(words: List<String>): Result<Boolean> {
+                    writeSentence(words)
+                    val sentences = readAllSentencesUntilDone()
+                    val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                    if (trap != null) {
+                        val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل حذف الكرت"
+                        return Result.failure(Exception(msg))
+                    }
+                    if (sentences.any { it.firstOrNull() == "!done" }) return Result.success(true)
+                    return Result.failure(Exception("لم يؤكد الراوتر حذف الكرت"))
+                }
+
                 // 1. Try Hotspot removal
-                writeSentence(listOf("/ip/hotspot/user/remove", "=.id=$cardId"))
-                val sentences = readAllSentencesUntilDone()
-                if (sentences.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+                val hsRes = executeRemoval(listOf("/ip/hotspot/user/remove", "=.id=$cardId"))
+                if (hsRes.isSuccess) return@withContext hsRes
 
                 // 2. Try User Manager v7
-                writeSentence(listOf("/user-manager/user/remove", "=.id=$cardId"))
-                val um7Sentences = readAllSentencesUntilDone()
-                if (um7Sentences.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+                val um7Res = executeRemoval(listOf("/user-manager/user/remove", "=.id=$cardId"))
+                if (um7Res.isSuccess) return@withContext um7Res
 
                 // 3. Try User Manager v6
                 val targetName = cardName.ifBlank { cardId }
-                writeSentence(listOf("/tool/user-manager/user/remove", "=numbers=$targetName"))
-                val um6Sentences = readAllSentencesUntilDone()
-                if (um6Sentences.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+                val um6Res = executeRemoval(listOf("/tool/user-manager/user/remove", "=numbers=$targetName"))
+                if (um6Res.isSuccess) return@withContext um6Res
 
-                Result.success(true)
+                // If all failed, return failure
+                Result.failure(Exception("فشل حذف الكرت من كافة المسارات: ${hsRes.exceptionOrNull()?.message}"))
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -914,13 +936,21 @@ class RouterOsApiClient {
         return withContext(Dispatchers.IO) {
             try {
                 ensureConnected()
-                val words = mutableListOf("/ip/hotspot/user/profile/add", "=name=${profile.name}")
-                if (profile.rateLimit.isNotBlank() && profile.rateLimit != "غير محدد") {
-                    words.add("=rate-limit=${profile.rateLimit}")
+                val cleanName = profile.name.trim()
+                if (cleanName.isBlank()) return@withContext Result.failure(Exception("اسم الباقة فارغ"))
+
+                val words = mutableListOf("/ip/hotspot/user/profile/add", "=name=$cleanName")
+                val cleanRateLimit = profile.rateLimit.trim()
+                if (cleanRateLimit.isNotBlank() && cleanRateLimit != "غير محدد" && cleanRateLimit != "مفتوح") {
+                    words.add("=rate-limit=$cleanRateLimit")
                 }
-                words.add("=shared-users=${profile.sharedUsers}")
-                if (profile.sessionTimeout.isNotBlank() && profile.sessionTimeout != "غير محدد") {
-                    words.add("=session-timeout=${profile.sessionTimeout}")
+                words.add("=shared-users=${if (profile.sharedUsers > 0) profile.sharedUsers else 1}")
+                val cleanTimeout = profile.sessionTimeout.trim()
+                if (cleanTimeout.isNotBlank() && cleanTimeout != "غير محدد") {
+                    val formattedTimeout = formatRouterOsTime(cleanTimeout)
+                    if (!formattedTimeout.isNullOrBlank()) {
+                        words.add("=session-timeout=$formattedTimeout")
+                    }
                 }
 
                 writeSentence(words)
@@ -929,6 +959,9 @@ class RouterOsApiClient {
                 if (trapSentence != null) {
                     val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                         ?: "رفض راوتر ميكروتك إنشاء الباقة"
+                    if (trapMsg.contains("already exists", ignoreCase = true)) {
+                        return@withContext Result.success(true)
+                    }
                     return@withContext Result.failure(Exception(trapMsg))
                 }
                 val isDone = sentences.any { it.firstOrNull() == "!done" }

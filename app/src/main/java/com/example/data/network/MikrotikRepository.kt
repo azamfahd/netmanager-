@@ -191,6 +191,10 @@ class MikrotikRepository {
         _auditLogs.value = updated
     }
 
+    fun getLastKnownTelemetryForUser(username: String): UserKnownTelemetry? {
+        return lastKnownUserTelemetry.values.firstOrNull { it.deviceInfo.modelName.contains(username, ignoreCase = true) || it.hostName == username }
+    }
+
 
     fun addAdminUser(admin: com.example.data.model.AdminUser) {
         val updated = mutableListOf(admin)

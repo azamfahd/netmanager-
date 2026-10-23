@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -149,6 +150,53 @@ fun MetricCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+    }
+}
+
+@Composable
+fun DetailedMetricCard(
+    title: String,
+    icon: ImageVector,
+    iconTint: Color,
+    value: String,
+    valueColor: Color,
+    modifier: Modifier = Modifier,
+    border: BorderStroke? = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+    subDetails: @Composable () -> Unit
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        border = border
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(iconTint.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(imageVector = icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(16.dp))
+                }
+                Text(title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = value,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = valueColor
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            subDetails()
         }
     }
 }

@@ -164,8 +164,8 @@ interface AppDao {
     @Query("UPDATE user_login_history SET bytesIn = :bytesIn, bytesOut = :bytesOut, totalBytes = :totalBytes, duration = :duration, ipAddress = :ipAddress, macAddress = :macAddress, deviceModel = :deviceModel, deviceBrand = :deviceBrand, nodeName = :nodeName WHERE username = :username AND logoutTime = 'متصل الآن'")
     suspend fun updateActiveLoginFullStats(username: String, bytesIn: Long, bytesOut: Long, totalBytes: Long, duration: String, ipAddress: String, macAddress: String, deviceModel: String, deviceBrand: String, nodeName: String)
 
-    @Query("UPDATE user_login_history SET logoutTime = :logoutTime, duration = :duration, bytesIn = :bytesIn, bytesOut = :bytesOut, totalBytes = :totalBytes, terminateReason = :reason WHERE username = :username AND logoutTime = 'متصل الآن'")
-    suspend fun finalizeUserLogin(username: String, logoutTime: String, duration: String, bytesIn: Long, bytesOut: Long, totalBytes: Long, reason: String)
+    @Query("UPDATE user_login_history SET logoutTime = :logoutTime, duration = :duration, bytesIn = :bytesIn, bytesOut = :bytesOut, totalBytes = :totalBytes, terminateReason = :reason, ipAddress = :ipAddress, macAddress = :macAddress, deviceModel = :deviceModel, deviceBrand = :deviceBrand, deviceCategory = :deviceCategory, nodeName = :nodeName WHERE username = :username AND logoutTime = 'متصل الآن'")
+    suspend fun finalizeUserLogin(username: String, logoutTime: String, duration: String, bytesIn: Long, bytesOut: Long, totalBytes: Long, reason: String, ipAddress: String, macAddress: String, deviceModel: String, deviceBrand: String, deviceCategory: String, nodeName: String)
 
     @Query("DELETE FROM user_login_history WHERE username = :username")
     suspend fun clearLoginHistoryForUser(username: String)
