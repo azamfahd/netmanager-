@@ -302,7 +302,7 @@ fun AppUpdateDialog(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "ℹ️ ملاحظة: التحديث يتم فوق النسخة الحالية بدون مسح أي بيانات أو كروت أو إعدادات مسجلة.",
+                        text = "ℹ️ تحديث مباشر وآمن: يتم التثبيت فوق النسخة الحالية دون الحاجة لحذفها، مع الحفاظ الكامل على كل البيانات والكروت وسجلات الجلسات.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(8.dp)
@@ -320,10 +320,12 @@ fun AppUpdateDialog(
                 ) {
                     Icon(Icons.Default.SystemUpdate, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("تثبيت التحديث الآن", fontWeight = FontWeight.Bold)
+                    Text("تثبيت النسخة الآن فوق الحالية", fontWeight = FontWeight.Bold)
                 }
             } else {
                 val apkUrl = release.apkAsset?.downloadUrl ?: release.htmlUrl
+                val isSameVersion = release.tagName.trim().removePrefix("v").removePrefix("V") == currentVersion.trim().removePrefix("v").removePrefix("V")
+                val buttonText = if (isSameVersion) "تثبيت آخر نسخة على أي حال" else "تحديث وتثبيت الآن"
                 Button(
                     onClick = { onDownloadAndInstall(apkUrl) },
                     enabled = !isDownloading,
@@ -341,7 +343,7 @@ fun AppUpdateDialog(
                     } else {
                         Icon(Icons.Default.Download, contentDescription = null)
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("تحديث وتثبيت الآن", fontWeight = FontWeight.Bold)
+                        Text(buttonText, fontWeight = FontWeight.Bold)
                     }
                 }
             }

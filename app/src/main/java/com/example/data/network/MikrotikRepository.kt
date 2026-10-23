@@ -12,6 +12,8 @@ import com.example.data.model.RouterConnectionConfig
 import com.example.data.model.RouterResource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,7 +31,18 @@ import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
+data class UserKnownTelemetry(
+    val macAddress: String,
+    val ipAddress: String,
+    val hostName: String,
+    val nodeName: String,
+    val deviceInfo: com.example.data.model.DeviceIdentification,
+    val lastSeenTimestamp: Long = System.currentTimeMillis()
+)
+
 class MikrotikRepository {
+
+    private val lastKnownUserTelemetry = java.util.concurrent.ConcurrentHashMap<String, UserKnownTelemetry>()
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -246,16 +259,18 @@ class MikrotikRepository {
             IpBinding("b2", "40:B0:76:44:55:66", "192.168.88.251", "bypassed", "سيرفر المحاسبة")
         )
 
-        // Initialize realistic Network Nodes & Access Points with rich telemetry & connected active clients
+        // Initialize realistic Network Nodes & Access Points with towers, distribution nodes, and clustered home nodes
         _networkNodes.value = listOf(
             com.example.data.model.NetworkNode(
                 id = "node_ap_main",
-                name = "أكسس بوينت البرج 1 (الرئيسي)",
+                name = "برج الإرسال المركزي 1 (الرئيسي)",
                 ipAddress = "192.168.88.2",
                 macAddress = "D4:CA:6D:AA:11:01",
                 interfaceName = "ether2",
                 model = "MikroTik NetMetal 5 / Omni",
                 role = "برج إرسال رئيسي (Omni)",
+                nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
+                status = com.example.data.model.NodeStatus.ACTIVE,
                 isOnline = true,
                 pingMs = 2L,
                 connectedUsers = 18,
@@ -300,7 +315,11 @@ class MikrotikRepository {
                 macAddress = "D4:CA:6D:BB:22:02",
                 interfaceName = "ether3",
                 model = "MikroTik cAP ac",
-                role = "أكسس بوينت بث (AP)",
+                role = "نقطة توزيع بث (AP)",
+                nodeType = com.example.data.model.NetworkNodeType.DISTRIBUTION,
+                status = com.example.data.model.NodeStatus.ACTIVE,
+                parentTowerId = "node_ap_main",
+                parentTowerName = "برج الإرسال المركزي 1",
                 isOnline = true,
                 pingMs = 3L,
                 connectedUsers = 11,
@@ -327,13 +346,105 @@ class MikrotikRepository {
                 )
             ),
             com.example.data.model.NetworkNode(
+                id = "node_home_1",
+                name = "نقطة منزل الشيخ عبد الله",
+                ipAddress = "192.168.88.21",
+                macAddress = "D4:CA:6D:AA:21:01",
+                interfaceName = "wlan1-sta",
+                model = "TP-Link Archer C6 (CPE)",
+                role = "نقطة منزلية (عميل)",
+                nodeType = com.example.data.model.NetworkNodeType.HOME_NODE,
+                status = com.example.data.model.NodeStatus.ACTIVE,
+                parentTowerId = "node_ap_main",
+                parentTowerName = "برج الإرسال المركزي 1",
+                isOnline = true,
+                pingMs = 5L,
+                connectedUsers = 4,
+                uptime = "4d 08h",
+                rxSpeedKbps = 3200.0,
+                txSpeedKbps = 1100.0,
+                totalBytesConsumed = 15_400_000_000L,
+                signalDbm = "-56 dBm",
+                location = "منزل الشيخ عبد الله",
+                cpuLoadPercent = 18,
+                memoryUsagePercent = 30,
+                temperature = "39°C",
+                voltage = "12.0 V",
+                frequency = "5 GHz",
+                channelWidth = "40 MHz",
+                ssid = "Home_Abdullah",
+                connectedClients = emptyList()
+            ),
+            com.example.data.model.NetworkNode(
+                id = "node_home_2",
+                name = "محطة منزل المهندس طارق",
+                ipAddress = "192.168.88.22",
+                macAddress = "D4:CA:6D:AA:22:02",
+                interfaceName = "wlan1-sta",
+                model = "MikroTik hEX lite",
+                role = "نقطة منزلية (مقطوع النت)",
+                nodeType = com.example.data.model.NetworkNodeType.HOME_NODE,
+                status = com.example.data.model.NodeStatus.NO_INTERNET,
+                parentTowerId = "node_ap_main",
+                parentTowerName = "برج الإرسال المركزي 1",
+                isOnline = true,
+                pingMs = 12L,
+                connectedUsers = 2,
+                uptime = "1d 04h",
+                rxSpeedKbps = 240.0,
+                txSpeedKbps = 80.0,
+                totalBytesConsumed = 4_200_000_000L,
+                signalDbm = "-68 dBm",
+                location = "منزل م. طارق",
+                cpuLoadPercent = 32,
+                memoryUsagePercent = 40,
+                temperature = "43°C",
+                voltage = "12.1 V",
+                frequency = "2.4 GHz",
+                channelWidth = "20 MHz",
+                ssid = "Home_Tariq_Net",
+                connectedClients = emptyList()
+            ),
+            com.example.data.model.NetworkNode(
+                id = "node_home_3",
+                name = "نقطة منزل عمار اليرموك",
+                ipAddress = "192.168.88.23",
+                macAddress = "D4:CA:6D:AA:23:03",
+                interfaceName = "ether2",
+                model = "Tenda F3 (Station)",
+                role = "نقطة منزلية (طافية/مغلقة)",
+                nodeType = com.example.data.model.NetworkNodeType.HOME_NODE,
+                status = com.example.data.model.NodeStatus.OFFLINE,
+                parentTowerId = "node_ap_main",
+                parentTowerName = "برج الإرسال المركزي 1",
+                isOnline = false,
+                pingMs = 0L,
+                connectedUsers = 0,
+                uptime = "0s (مغلق)",
+                rxSpeedKbps = 0.0,
+                txSpeedKbps = 0.0,
+                totalBytesConsumed = 9_800_000_000L,
+                signalDbm = "لا توجد إشارة",
+                location = "حي اليرموك - منزل عمار",
+                cpuLoadPercent = 0,
+                memoryUsagePercent = 0,
+                temperature = "--",
+                voltage = "0 V",
+                frequency = "--",
+                channelWidth = "--",
+                ssid = "Offline_Node",
+                connectedClients = emptyList()
+            ),
+            com.example.data.model.NetworkNode(
                 id = "node_starlink",
                 name = "سيرفر Starlink الرئيسي (WAN)",
                 ipAddress = "192.168.1.1",
                 macAddress = "94:10:3E:11:22:33",
                 interfaceName = "ether1-WAN",
                 model = "Starlink Terminal Gen 3",
-                role = "مصدر الإنترنت (Starlink)",
+                role = "مصدر الإنترنت الرئيسي (Starlink)",
+                nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
+                status = com.example.data.model.NodeStatus.ACTIVE,
                 isOnline = true,
                 pingMs = 24L,
                 connectedUsers = 4,
@@ -354,12 +465,14 @@ class MikrotikRepository {
             ),
             com.example.data.model.NetworkNode(
                 id = "node_ap_west",
-                name = "نقطة البث الغربية (القطاع 2)",
+                name = "برج القطاع الغربي 2 (Sector)",
                 ipAddress = "192.168.88.4",
                 macAddress = "D4:CA:6D:CC:33:03",
                 interfaceName = "ether4",
                 model = "MikroTik BaseBox 2",
-                role = "أكسس بوينت قطاعي (Sector)",
+                role = "برج قطاعي رئيسي (Sector)",
+                nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
+                status = com.example.data.model.NodeStatus.ACTIVE,
                 isOnline = true,
                 pingMs = 4L,
                 connectedUsers = 8,
@@ -379,13 +492,47 @@ class MikrotikRepository {
                 connectedClients = emptyList()
             ),
             com.example.data.model.NetworkNode(
+                id = "node_home_4",
+                name = "نقطة منزل بقالة النور",
+                ipAddress = "192.168.88.31",
+                macAddress = "D4:CA:6D:CC:44:11",
+                interfaceName = "wlan1-sta",
+                model = "Tenda Nova Mesh",
+                role = "نقطة منزلية (عميل)",
+                nodeType = com.example.data.model.NetworkNodeType.HOME_NODE,
+                status = com.example.data.model.NodeStatus.ACTIVE,
+                parentTowerId = "node_ap_west",
+                parentTowerName = "برج القطاع الغربي 2",
+                isOnline = true,
+                pingMs = 7L,
+                connectedUsers = 5,
+                uptime = "2d 02h",
+                rxSpeedKbps = 1850.0,
+                txSpeedKbps = 620.0,
+                totalBytesConsumed = 8_900_000_000L,
+                signalDbm = "-61 dBm",
+                location = "بقالة النور - الشارع الغربي",
+                cpuLoadPercent = 20,
+                memoryUsagePercent = 34,
+                temperature = "40°C",
+                voltage = "12.0 V",
+                frequency = "2.4 GHz",
+                channelWidth = "20 MHz",
+                ssid = "Baqala_AlNoor",
+                connectedClients = emptyList()
+            ),
+            com.example.data.model.NetworkNode(
                 id = "node_ap_north",
-                name = "موجه الفرع الشمالي (مكرر إشارة)",
+                name = "موجه الفرع الشمالي (Point to Point)",
                 ipAddress = "192.168.88.5",
                 macAddress = "D4:CA:6D:DD:44:04",
                 interfaceName = "wlan1-bridge",
                 model = "MikroTik SXTsq 5",
-                role = "ربط لاسلكي (Point to Point)",
+                role = "نقطة توزيع (Point to Point)",
+                nodeType = com.example.data.model.NetworkNodeType.DISTRIBUTION,
+                status = com.example.data.model.NodeStatus.ACTIVE,
+                parentTowerId = "node_ap_west",
+                parentTowerName = "برج القطاع الغربي 2",
                 isOnline = true,
                 pingMs = 5L,
                 connectedUsers = 6,
@@ -1841,7 +1988,22 @@ class MikrotikRepository {
         _activeUsers.value.forEachIndexed { index, active ->
             val cleanMac = active.macAddress.uppercase()
             val hostName = active.hostName.ifBlank { active.comment.ifBlank { "" } }
-            val detected = com.example.data.util.DeviceDetector.detectDevice(cleanMac, hostName, active.user)
+            val detected = if (active.deviceModel.isNotBlank()) {
+                com.example.data.util.DeviceDetector.detectDevice(cleanMac, hostName, active.user).let { d ->
+                    d.copy(modelName = active.deviceModel)
+                }
+            } else {
+                com.example.data.util.DeviceDetector.detectDevice(cleanMac, hostName, active.user)
+            }
+
+            // Permanently cache device info in memory so sessions never lose device name or details
+            lastKnownUserTelemetry[active.user] = UserKnownTelemetry(
+                macAddress = cleanMac,
+                ipAddress = active.address,
+                hostName = hostName,
+                nodeName = active.nodeName,
+                deviceInfo = detected
+            )
 
             val matchingCard = cardList.find { it.name == active.user }
             val cardProfile = matchingCard?.profile?.takeIf { it.isNotBlank() } ?: "افتراضية"
@@ -1855,11 +2017,11 @@ class MikrotikRepository {
             val loginDisplay = NetworkUtils.formatArabicFullDateTime(loginTs)
 
             val packageLimit = matchingCard?.limitBytesTotal ?: 0L
-            val isQuotaOver = packageLimit > 0L && (active.bytesIn + active.bytesOut) >= packageLimit
+            val isQuotaOver = matchingCard?.isExpiredQuota ?: (packageLimit > 0L && (active.bytesIn + active.bytesOut) >= packageLimit)
 
             sessionList.add(
                 com.example.data.model.UserSessionRecord(
-                    id = "sess_active_${active.id}_$index",
+                    id = "sess_active_${active.user}",
                     username = active.user,
                     ipAddress = active.address.ifBlank { "$subnetPrefix.${100 + index}" },
                     macAddress = cleanMac.ifBlank { "غير مسجل" },
@@ -1882,33 +2044,39 @@ class MikrotikRepository {
             )
         }
 
-        // Add previous sessions from cards with historical usage
+        // Add previous sessions from cards with historical usage preserving device & node info
         cardList.forEachIndexed { index, card ->
             if (!activeUsernames.contains(card.name)) {
                 val isUsed = card.uptime != "0s" || card.bytesIn > 0 || card.bytesOut > 0
                 val packageLimit = card.limitBytesTotal
-                val isDataExhausted = packageLimit > 0L && (card.bytesIn + card.bytesOut) >= packageLimit
-                val isTimeExpired = (card.limitUptime.isNotBlank() && card.uptime.isNotBlank() && card.uptime == card.limitUptime) || 
-                        card.comment.contains("expired", ignoreCase = true) || card.comment.contains("منتهي", ignoreCase = true)
-                val isExpired = isDataExhausted || isTimeExpired || card.disabled || card.isExpired
+                val isDataExhausted = card.isExpiredQuota
+                val isTimeExpired = card.isExpiredValidity
+                val isExpired = card.isExpired
 
                 val reason = when {
-                    isDataExhausted -> "انتهى الرصيد (استنفد حجم البيانات المقررة)"
-                    isTimeExpired -> "انتهت الصلاحية (انقضاء الوقت المحدد: ${card.limitUptime})"
+                    isDataExhausted -> "انتهى الرصيد (استنفد حجم البيانات المقررة: ${if (packageLimit > 0) NetworkUtils.formatBytes(packageLimit) else "100%"})"
+                    isTimeExpired -> "انتهت الصلاحية (انقضاء وقت الكرت: ${card.limitUptime.ifBlank { card.uptime }})"
                     card.disabled -> "تم إيقاف الكرت من قبل الإدارة"
                     isUsed -> "جلسة سابقة مكتملة (تسجيل خروج)"
                     else -> "كرت متاح في المخزون (غير مباع بعد)"
                 }
 
+                // Look up last known device telemetry for this subscriber so device info is never lost
+                val known = lastKnownUserTelemetry[card.name]
+                val resolvedMac = known?.macAddress?.takeIf { it.isNotBlank() } ?: "مسجل بالراوتر"
+                val resolvedIp = known?.ipAddress?.takeIf { it.isNotBlank() } ?: "غير متصل حالياً"
+                val resolvedNode = known?.nodeName?.takeIf { it.isNotBlank() } ?: serverName
+                val resolvedDevice = known?.deviceInfo ?: com.example.data.util.DeviceDetector.detectDevice("", card.comment, card.name)
+
                 sessionList.add(
                     com.example.data.model.UserSessionRecord(
-                        id = "sess_card_${card.id}_$index",
+                        id = "sess_card_${card.name}",
                         username = card.name,
-                        ipAddress = "غير متصل حالياً",
-                        macAddress = "منتهي الجلسة",
+                        ipAddress = resolvedIp,
+                        macAddress = resolvedMac,
                         isOnline = false,
                         loginTime = if (isUsed) "جلسة سابقة (استهلاك ${NetworkUtils.formatBytes(card.bytesIn + card.bytesOut)})" else "غير مستخدم بعد",
-                        logoutTime = if (isExpired) "منتهي الرصيد / الصلاحية" else if (isUsed) "جلسة مغلقة" else "جاهز للاستخدام",
+                        logoutTime = if (isExpired) (if (isDataExhausted) "انتهى الرصيد" else "انتهت الصلاحية") else if (isUsed) "جلسة مغلقة" else "جاهز للاستخدام",
                         duration = card.uptime.ifBlank { "0s" },
                         bytesIn = card.bytesIn,
                         bytesOut = card.bytesOut,
@@ -1916,9 +2084,9 @@ class MikrotikRepository {
                         terminateReason = reason,
                         profile = card.profile,
                         price = card.price.ifBlank { "غير محدد" },
-                        deviceInfo = com.example.data.util.DeviceDetector.detectDevice("", card.comment, card.name),
+                        deviceInfo = resolvedDevice,
                         comment = card.comment.ifBlank { if (isUsed) "كرت مستخدم سابق" else "كرت جاهز للبيع" },
-                        nodeName = serverName,
+                        nodeName = resolvedNode,
                         packageLimitBytes = packageLimit,
                         isQuotaExhausted = isDataExhausted
                     )
@@ -2725,16 +2893,136 @@ class MikrotikRepository {
         }
     }
 
+    suspend fun checkNodeHeartbeat(
+        node: com.example.data.model.NetworkNode,
+        gatewayIp: String = "192.168.88.1"
+    ): com.example.data.model.NetworkNode {
+        return withContext(Dispatchers.IO) {
+            val isDemo = activeConfig?.isDemoMode == true || activeConfig == null
+            val now = System.currentTimeMillis()
+            if (isDemo) {
+                return@withContext when (node.id) {
+                    "node_home_3" -> node.copy(
+                        status = com.example.data.model.NodeStatus.OFFLINE,
+                        isOnline = false,
+                        pingMs = 0L,
+                        lastCheckTime = now
+                    )
+                    "node_home_2" -> node.copy(
+                        status = com.example.data.model.NodeStatus.NO_INTERNET,
+                        isOnline = true,
+                        pingMs = 14L,
+                        lastCheckTime = now
+                    )
+                    else -> node.copy(
+                        status = com.example.data.model.NodeStatus.ACTIVE,
+                        isOnline = true,
+                        pingMs = (Random.nextLong(2, 9)),
+                        lastCheckTime = now,
+                        lastSeenTime = now
+                    )
+                }
+            }
+
+            // Real network heartbeat polling
+            val start = System.currentTimeMillis()
+            var isReachable = false
+            var responseMs = 0L
+
+            val pingRes = NetworkUtils.pingHost(node.ipAddress, timeoutMs = 900)
+            if (pingRes.first) {
+                isReachable = true
+                responseMs = pingRes.second.coerceAtLeast(1L)
+            } else {
+                // Fallback socket probe on common network ports
+                for (port in listOf(80, 8728, 8291, 443)) {
+                    if (NetworkUtils.testSocketConnection(node.ipAddress, port, timeoutMs = 450)) {
+                        isReachable = true
+                        responseMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+                        break
+                    }
+                }
+            }
+
+            if (!isReachable) {
+                return@withContext node.copy(
+                    status = com.example.data.model.NodeStatus.OFFLINE,
+                    isOnline = false,
+                    pingMs = 0L,
+                    lastCheckTime = now
+                )
+            }
+
+            // Node responded directly: test gateway reachability to detect internet problems
+            val isGwReachable = NetworkUtils.pingHost(gatewayIp, timeoutMs = 800).first ||
+                    NetworkUtils.testSocketConnection("8.8.8.8", 53, timeoutMs = 600)
+
+            val resolvedStatus = if (isGwReachable) {
+                com.example.data.model.NodeStatus.ACTIVE
+            } else {
+                com.example.data.model.NodeStatus.NO_INTERNET
+            }
+
+            node.copy(
+                status = resolvedStatus,
+                isOnline = true,
+                pingMs = responseMs,
+                lastCheckTime = now,
+                lastSeenTime = now
+            )
+        }
+    }
+
+    suspend fun pollAllNodesHeartbeat(context: android.content.Context? = null): List<com.example.data.model.NetworkNode> {
+        return withContext(Dispatchers.IO) {
+            val currentNodes = _networkNodes.value
+            if (currentNodes.isEmpty()) return@withContext emptyList()
+
+            val gateway = activeConfig?.ipAddress?.ifBlank { "192.168.88.1" } ?: "192.168.88.1"
+            val checkedNodes = kotlinx.coroutines.coroutineScope {
+                currentNodes.map { node ->
+                    async {
+                        checkNodeHeartbeat(node, gateway)
+                    }
+                }.awaitAll()
+            }
+
+            _networkNodes.value = checkedNodes
+
+            // Persist immediately in RouterCacheManager for ultra-fast restore on app relaunch
+            context?.let { ctx ->
+                val cfg = activeConfig
+                val rName = cfg?.name?.ifBlank { "راوتر MikroTik" } ?: "راوتر MikroTik"
+                val rIp = cfg?.ipAddress ?: "192.168.88.1"
+                com.example.data.local.RouterCacheManager.saveSnapshot(
+                    context = ctx,
+                    ipAddress = rIp,
+                    routerName = rName,
+                    resource = _resourceState.value,
+                    routerBoard = _routerBoardInfo.value,
+                    cards = _cards.value,
+                    profiles = _profiles.value,
+                    activeUsers = _activeUsers.value,
+                    servers = _hotspotServers.value,
+                    nodes = checkedNodes,
+                    logs = _systemLogs.value,
+                    ipBindings = _ipBindings.value
+                )
+            }
+
+            checkedNodes
+        }
+    }
+
     suspend fun pingNetworkNode(nodeId: String): Pair<Boolean, Long> {
         return withContext(Dispatchers.IO) {
             val node = _networkNodes.value.firstOrNull { it.id == nodeId }
             if (node != null) {
-                val (reachable, ms) = NetworkUtils.pingHost(node.ipAddress, timeoutMs = 1500)
-                val effectiveMs = if (reachable && ms > 0) ms else if (reachable) 3L else -1L
+                val updatedNode = checkNodeHeartbeat(node, activeConfig?.ipAddress ?: "192.168.88.1")
                 _networkNodes.value = _networkNodes.value.map {
-                    if (it.id == nodeId) it.copy(isOnline = reachable, pingMs = if (reachable) effectiveMs else 0L) else it
+                    if (it.id == nodeId) updatedNode else it
                 }
-                Pair(reachable, effectiveMs)
+                Pair(updatedNode.isOnline, updatedNode.pingMs)
             } else {
                 Pair(false, -1L)
             }

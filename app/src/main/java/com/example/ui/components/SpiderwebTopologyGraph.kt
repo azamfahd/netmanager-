@@ -51,6 +51,8 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Flare
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Height
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Refresh
@@ -62,6 +64,9 @@ import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiTethering
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -149,10 +154,24 @@ fun SpiderwebTopologyGraph(
     modifier: Modifier = Modifier,
     onToggleFullScreen: (() -> Unit)? = null
 ) {
-    var currentLayout by remember { mutableStateOf(NetworkTopologyLayout.HIERARCHICAL_TREE) }
+    var currentLayout by remember(nodes.size) {
+        mutableStateOf(if (nodes.size > 8) NetworkTopologyLayout.HIERARCHICAL_TREE else NetworkTopologyLayout.HIERARCHICAL_TREE)
+    }
     var isControlsExpanded by remember { mutableStateOf(false) }
     var filterMode by remember { mutableStateOf(TopologyFilterMode.ALL) }
     var isCompactHeight by remember { mutableStateOf(true) } // Default small view height for mobile
+    var isClusteringActive by remember { mutableStateOf(true) }
+    var selectedClusterTower by remember { mutableStateOf<NetworkNode?>(null) }
+
+    // Map parent tower ID to its child home nodes
+    val towerChildNodesMap = remember(nodes) {
+        val map = mutableMapOf<String, MutableList<NetworkNode>>()
+        nodes.filter { it.nodeType == com.example.data.model.NetworkNodeType.HOME_NODE }.forEach { homeNode ->
+            val pId = homeNode.parentTowerId ?: "node_ap_main"
+            map.getOrPut(pId) { mutableListOf() }.add(homeNode)
+        }
+        map
+    }
 
     // Filter nodes according to internal quick status filter
     val rawFilteredNodes = remember(nodes, filterMode) {
@@ -163,11 +182,16 @@ fun SpiderwebTopologyGraph(
         }
     }
 
-    // Filter out central router from satellites so it is never duplicated
-    val satelliteNodes = remember(rawFilteredNodes) {
-        rawFilteredNodes
+    // Filter out central router from satellites; in clustering mode, hide clustered home nodes to prevent clutter
+    val satelliteNodes = remember(rawFilteredNodes, isClusteringActive) {
+        val nonCentral = rawFilteredNodes
             .filter { it.id != "node_main_router" && !it.role.contains("Gateway", ignoreCase = true) && !it.role.contains("الرئيسي للشبكة", ignoreCase = true) }
             .distinctBy { it.id.ifBlank { it.ipAddress } }
+        if (isClusteringActive) {
+            nonCentral.filter { it.nodeType != com.example.data.model.NetworkNodeType.HOME_NODE || it.parentTowerId == null }
+        } else {
+            nonCentral
+        }
     }
 
     // Adaptive default initial scale for small screens
@@ -184,13 +208,13 @@ fun SpiderwebTopologyGraph(
     var zoomScale by remember { mutableFloatStateOf(defaultInitialZoom) }
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
-    var spacingScale by remember {
-        mutableFloatStateOf(if (satelliteNodes.size > 8) 0.85f else 1.0f)
+    var spacingScale by remember(satelliteNodes.size) {
+        mutableFloatStateOf(if (satelliteNodes.size > 8) 0.80f else 1.0f)
     }
-    var cardScale by remember {
-        mutableFloatStateOf(if (satelliteNodes.size > 10) 0.90f else 1.0f)
+    var cardScale by remember(satelliteNodes.size) {
+        mutableFloatStateOf(if (satelliteNodes.size > 10) 0.85f else 1.0f)
     }
-    var isCompactMode by remember { mutableStateOf(satelliteNodes.size > 6) }
+    var isCompactMode by remember(satelliteNodes.size) { mutableStateOf(satelliteNodes.size > 6) }
 
     val infiniteTransition = rememberInfiniteTransition(label = "cyber_pulse")
 
@@ -1036,14 +1060,20 @@ fun SpiderwebTopologyGraph(
                         scaleY = cardScale
                     }
             ) {
+                val childHomeNodes = towerChildNodesMap[node.id] ?: emptyList()
+                val hasCluster = isClusteringActive && childHomeNodes.isNotEmpty()
                 if (isCompactMode) {
                     CompactTopologyNodeBadge(
                         node = node,
+                        childCount = if (hasCluster) childHomeNodes.size else 0,
+                        onClusterClick = { selectedClusterTower = node },
                         onClick = { onNodeClick(node) }
                     )
                 } else {
                     TopologyNodeItemCard(
                         node = node,
+                        childCount = if (hasCluster) childHomeNodes.size else 0,
+                        onClusterClick = { selectedClusterTower = node },
                         onClick = { onNodeClick(node) }
                     )
                 }
@@ -1355,49 +1385,68 @@ fun SpiderwebTopologyGraph(
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
             )
         }
+
+        // 6. Cluster Home Nodes Dialog
+        selectedClusterTower?.let { tower ->
+            val childNodes = towerChildNodesMap[tower.id] ?: emptyList()
+            ClusterHomeNodesDialog(
+                tower = tower,
+                childNodes = childNodes,
+                onNodeClick = { childNode ->
+                    selectedClusterTower = null
+                    onNodeClick(childNode)
+                },
+                onDismiss = { selectedClusterTower = null }
+            )
+        }
     }
 }
 
 /**
- * Detailed Topology Node Item Card
+ * Detailed Topology Node Item Card with Semantic Icons & Material 3 4-State Visual Indicators
  */
 @Composable
 private fun TopologyNodeItemCard(
     node: NetworkNode,
+    childCount: Int = 0,
+    onClusterClick: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
-    val borderColor = when {
-        !node.isOnline -> StatusErrorRed
-        node.hasIssue -> StatusWarningAmber
-        node.cpuLoadPercent > 75 -> StatusWarningAmber
-        else -> CyberGreenNeon
+    val statusColor = when (node.effectiveStatus) {
+        com.example.data.model.NodeStatus.ACTIVE -> Color(0xFF2E7D32) // الأخضر: للنقاط المفعلة والنشطة
+        com.example.data.model.NodeStatus.OFFLINE -> Color(0xFFC62828) // الأحمر: للنقاط المغلقة (لا يوجد رد)
+        com.example.data.model.NodeStatus.NO_INTERNET -> Color(0xFFEF6C00) // البرتقالي/الأصفر: مشاكل في الإنترنت
+        com.example.data.model.NodeStatus.DISABLED -> Color(0xFF757575) // الرمادي: غير مؤرشفة أو معطلة
     }
 
-    val iconVector = when {
-        node.role.contains("برج", ignoreCase = true) -> Icons.Default.CellTower
-        node.role.contains("Starlink", ignoreCase = true) -> Icons.Default.WifiTethering
-        node.role.contains("لاسلكي", ignoreCase = true) -> Icons.Default.Wifi
-        else -> Icons.Default.Router
+    val iconVector = when (node.nodeType) {
+        com.example.data.model.NetworkNodeType.MAIN_TOWER -> Icons.Default.CellTower
+        com.example.data.model.NetworkNodeType.HOME_NODE -> Icons.Default.Home
+        com.example.data.model.NetworkNodeType.DISTRIBUTION -> {
+            if (node.role.contains("Starlink", ignoreCase = true)) Icons.Default.WifiTethering
+            else if (node.role.contains("لاسلكي", ignoreCase = true)) Icons.Default.Wifi
+            else Icons.Default.Router
+        }
     }
 
     Card(
         modifier = Modifier
-            .width(104.dp)
+            .width(108.dp)
             .clickable(onClick = onClick)
-            .shadow(6.dp, RoundedCornerShape(12.dp), spotColor = borderColor)
+            .shadow(6.dp, RoundedCornerShape(12.dp), spotColor = statusColor)
             .testTag("node_topology_item_${node.id}"),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = Color(0xFF0A1812)
         ),
-        border = BorderStroke(1.2.dp, borderColor)
+        border = BorderStroke(1.2.dp, statusColor)
     ) {
         Column(
             modifier = Modifier.padding(6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
-            // Header Row: Status dot, Role icon & CPU badge
+            // Header Row: Status dot, Semantic Icon & Status Badge
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1405,25 +1454,25 @@ private fun TopologyNodeItemCard(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(7.dp)
+                        .size(8.dp)
                         .clip(CircleShape)
-                        .background(if (node.isOnline) StatusActiveGreen else StatusErrorRed)
+                        .background(statusColor)
                 )
 
                 Icon(
                     imageVector = iconVector,
-                    contentDescription = null,
-                    tint = borderColor,
-                    modifier = Modifier.size(15.dp)
+                    contentDescription = node.nodeType.labelAr,
+                    tint = statusColor,
+                    modifier = Modifier.size(16.dp)
                 )
 
                 Surface(
-                    color = borderColor.copy(alpha = 0.2f),
+                    color = statusColor.copy(alpha = 0.2f),
                     shape = RoundedCornerShape(4.dp)
                 ) {
                     Text(
-                        text = "${node.cpuLoadPercent}%",
-                        color = borderColor,
+                        text = if (node.isOnline) "${node.pingMs}ms" else "طافي",
+                        color = statusColor,
                         fontWeight = FontWeight.Bold,
                         fontSize = 8.sp,
                         modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
@@ -1471,6 +1520,39 @@ private fun TopologyNodeItemCard(
                     )
                 }
             }
+
+            // Smart Clustering Badge (if this tower has child home nodes)
+            if (childCount > 0) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onClusterClick?.invoke() }
+                        .padding(top = 2.dp),
+                    color = CyberGreenNeon.copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(4.dp),
+                    border = BorderStroke(0.6.dp, CyberGreenNeon.copy(alpha = 0.6f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Home,
+                            contentDescription = null,
+                            tint = CyberGreenNeon,
+                            modifier = Modifier.size(10.dp)
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text(
+                            text = "+$childCount منازل",
+                            color = CyberGreenNeon,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 8.sp
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1481,23 +1563,31 @@ private fun TopologyNodeItemCard(
 @Composable
 private fun CompactTopologyNodeBadge(
     node: NetworkNode,
+    childCount: Int = 0,
+    onClusterClick: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
-    val borderColor = when {
-        !node.isOnline -> StatusErrorRed
-        node.hasIssue -> StatusWarningAmber
-        node.cpuLoadPercent > 75 -> StatusWarningAmber
-        else -> CyberGreenNeon
+    val statusColor = when (node.effectiveStatus) {
+        com.example.data.model.NodeStatus.ACTIVE -> Color(0xFF2E7D32)
+        com.example.data.model.NodeStatus.OFFLINE -> Color(0xFFC62828)
+        com.example.data.model.NodeStatus.NO_INTERNET -> Color(0xFFEF6C00)
+        com.example.data.model.NodeStatus.DISABLED -> Color(0xFF757575)
+    }
+
+    val iconVector = when (node.nodeType) {
+        com.example.data.model.NetworkNodeType.MAIN_TOWER -> Icons.Default.CellTower
+        com.example.data.model.NetworkNodeType.HOME_NODE -> Icons.Default.Home
+        else -> Icons.Default.WifiTethering
     }
 
     Surface(
         modifier = Modifier
             .clickable(onClick = onClick)
-            .shadow(4.dp, RoundedCornerShape(16.dp), spotColor = borderColor)
+            .shadow(4.dp, RoundedCornerShape(16.dp), spotColor = statusColor)
             .testTag("compact_node_badge_${node.id}"),
         shape = RoundedCornerShape(16.dp),
         color = Color(0xFF07140D),
-        border = BorderStroke(1.dp, borderColor)
+        border = BorderStroke(1.dp, statusColor)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -1508,7 +1598,14 @@ private fun CompactTopologyNodeBadge(
                 modifier = Modifier
                     .size(6.dp)
                     .clip(CircleShape)
-                    .background(if (node.isOnline) StatusActiveGreen else StatusErrorRed)
+                    .background(statusColor)
+            )
+
+            Icon(
+                imageVector = iconVector,
+                contentDescription = null,
+                tint = statusColor,
+                modifier = Modifier.size(12.dp)
             )
 
             Text(
@@ -1519,12 +1616,165 @@ private fun CompactTopologyNodeBadge(
                 maxLines = 1
             )
 
-            Text(
-                text = "${node.cpuLoadPercent}%",
-                color = borderColor,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 8.sp
-            )
+            if (childCount > 0) {
+                Surface(
+                    color = CyberGreenNeon.copy(alpha = 0.25f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.clickable { onClusterClick?.invoke() }
+                ) {
+                    Text(
+                        text = "+$childCount",
+                        color = CyberGreenNeon,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 8.sp,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                    )
+                }
+            } else {
+                Text(
+                    text = if (node.isOnline) "${node.pingMs}ms" else "طافي",
+                    color = statusColor,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 8.sp
+                )
+            }
         }
     }
+}
+
+/**
+ * Smart Clustering Expandable Dialog for Tower Home Nodes
+ */
+@Composable
+private fun ClusterHomeNodesDialog(
+    tower: NetworkNode,
+    childNodes: List<NetworkNode>,
+    onNodeClick: (NetworkNode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(CyberGreenNeon.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CellTower,
+                        contentDescription = null,
+                        tint = CyberGreenNeon,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Column {
+                    Text(
+                        text = tower.name,
+                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "النقاط المنزلية المتصلة بالبرج (${childNodes.size} محطة)",
+                        style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                        color = NetworkCyanLight
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (childNodes.isEmpty()) {
+                    Text(
+                        text = "لا توجد نقاط منزلية تابعة لهذا البرج حالياً.",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
+                } else {
+                    childNodes.forEach { child ->
+                        val childStatusColor = when (child.effectiveStatus) {
+                            com.example.data.model.NodeStatus.ACTIVE -> Color(0xFF2E7D32)
+                            com.example.data.model.NodeStatus.OFFLINE -> Color(0xFFC62828)
+                            com.example.data.model.NodeStatus.NO_INTERNET -> Color(0xFFEF6C00)
+                            com.example.data.model.NodeStatus.DISABLED -> Color(0xFF757575)
+                        }
+
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onNodeClick(child) },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            ),
+                            border = BorderStroke(1.dp, childStatusColor.copy(alpha = 0.5f))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Home,
+                                        contentDescription = null,
+                                        tint = childStatusColor,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            text = child.name,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                        Text(
+                                            text = "${child.ipAddress} • ${child.model}",
+                                            fontSize = 10.sp,
+                                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+
+                                Surface(
+                                    color = childStatusColor.copy(alpha = 0.15f),
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = child.statusTitleAr,
+                                        color = childStatusColor,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = CyberGreenNeon.copy(alpha = 0.9f))
+            ) {
+                Text("إغلاق", color = Color.Black, fontWeight = FontWeight.Bold)
+            }
+        }
+    )
 }

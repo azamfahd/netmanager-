@@ -122,13 +122,43 @@ data class HotspotCard(
     val price: String = "",
     val posAgent: String = ""
 ) {
+    val isExpiredQuota: Boolean
+        get() {
+            if (limitBytesTotal > 0L && (bytesIn + bytesOut) >= limitBytesTotal) return true
+            val c = comment.lowercase()
+            if (c.contains("traffic limit") || c.contains("quota") || c.contains("رصيد") || c.contains("البيانات") || c.contains("حجم") || c.contains("استنفاد")) return true
+            return false
+        }
+
+    val isExpiredValidity: Boolean
+        get() {
+            if (limitUptime.isNotBlank() && uptime.isNotBlank()) {
+                val upSec = parseCardUptimeSeconds(uptime)
+                val limSec = parseCardUptimeSeconds(limitUptime)
+                if (limSec > 0L && upSec >= limSec) return true
+                if (uptime.trim() == limitUptime.trim() && uptime.trim() != "0s") return true
+            }
+            val c = comment.lowercase()
+            if (c.contains("uptime limit") || c.contains("time limit") || c.contains("صلاحية") || c.contains("انتهى الوقت") || c.contains("انتهاء الوقت")) return true
+            return false
+        }
+
     val isExpired: Boolean
         get() {
-            if (disabled) return true
-            if (limitBytesTotal > 0 && (bytesIn + bytesOut) >= limitBytesTotal) return true
-            if (limitUptime.isNotBlank() && uptime.isNotBlank() && uptime == limitUptime) return true
+            if (isExpiredQuota || isExpiredValidity) return true
+            if (disabled && (uptime != "0s" || bytesIn > 0L || bytesOut > 0L)) return true
             if (comment.contains("expired", ignoreCase = true) || comment.contains("منتهي", ignoreCase = true)) return true
+            if (disabled) return true
             return false
+        }
+
+    val expiryReason: String
+        get() = when {
+            isExpiredQuota -> "انتهى الرصيد (استنفاد حجم البيانات المحدد)"
+            isExpiredValidity -> "انتهت الصلاحية (انقضاء وقت الكرت: ${limitUptime.ifBlank { uptime }})"
+            disabled -> "كرت متوقف أو معطل من الإدارة"
+            comment.contains("expired", ignoreCase = true) || comment.contains("منتهي", ignoreCase = true) -> "كرت منتهي الصلاحية"
+            else -> "صالح ونشط"
         }
 
     val isActive: Boolean
@@ -136,6 +166,19 @@ data class HotspotCard(
 
     val isUnused: Boolean
         get() = !disabled && (uptime.isBlank() || uptime == "0s") && bytesIn == 0L && bytesOut == 0L
+}
+
+private fun parseCardUptimeSeconds(uptime: String): Long {
+    if (uptime.isBlank()) return 0L
+    var total = 0L
+    val clean = uptime.lowercase().replace(" ", "")
+    val w = Regex("""(\d+)w""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+    val d = Regex("""(\d+)d""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+    val h = Regex("""(\d+)h""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+    val m = Regex("""(\d+)m""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+    val s = Regex("""(\d+)s""").find(clean)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+    total += w * 604800L + d * 86400L + h * 3600L + m * 60L + s
+    return total
 }
 
 data class HotspotProfile(
@@ -219,6 +262,23 @@ data class NodeConnectedClient(
     val deviceInfo: DeviceIdentification = DeviceIdentification()
 )
 
+enum class NodeStatus(val labelAr: String) {
+    ACTIVE("متصل (نشط)"),
+    OFFLINE("مغلق / لا يوجد رد"),
+    NO_INTERNET("مقطوع الإنترنت"),
+    DISABLED("معطل / غير مؤرشف");
+
+    val titleAr: String get() = labelAr
+}
+
+enum class NetworkNodeType(val labelAr: String) {
+    MAIN_TOWER("برج رئيسي"),
+    DISTRIBUTION("نقطة توزيع"),
+    HOME_NODE("نقطة منزلية");
+
+    val titleAr: String get() = labelAr
+}
+
 data class NetworkNode(
     val id: String,
     val name: String,
@@ -226,8 +286,12 @@ data class NetworkNode(
     val macAddress: String = "64:D1:54:3B:88:12",
     val interfaceName: String = "ether2",
     val model: String = "MikroTik cAP ac",
-    val role: String = "أكسس بوينت (بث)", // أكسس بوينت, برج رئيسي, موجه فرعي, سيرفر Starlink
-    val isOnline: Boolean = true,
+    val role: String = "أكسس بوينت (بث)", // أكسس بوينت, برج رئيسي, موجه فرعي, سيرفر Starlink, نقطة منزلية
+    val nodeType: NetworkNodeType = NetworkNodeType.DISTRIBUTION,
+    val status: NodeStatus = NodeStatus.ACTIVE,
+    val parentTowerId: String? = null,
+    val parentTowerName: String? = null,
+    val isOnline: Boolean = (status == NodeStatus.ACTIVE || status == NodeStatus.NO_INTERNET),
     val pingMs: Long = 4L,
     val connectedUsers: Int = 12,
     val uptime: String = "4d 12h",
@@ -245,10 +309,36 @@ data class NetworkNode(
     val ssid: String = "YemenNet_Tower_1",
     val firmwareVersion: String = "RouterOS v7.14.3",
     val lastSeenTime: Long = System.currentTimeMillis(),
+    val lastCheckTime: Long = System.currentTimeMillis(),
     val connectedClients: List<NodeConnectedClient> = emptyList()
 ) {
+    val effectiveStatus: NodeStatus
+        get() = when {
+            status == NodeStatus.DISABLED -> NodeStatus.DISABLED
+            status == NodeStatus.NO_INTERNET -> NodeStatus.NO_INTERNET
+            !isOnline || status == NodeStatus.OFFLINE -> NodeStatus.OFFLINE
+            else -> NodeStatus.ACTIVE
+        }
+
+    val statusColorRgb: Long
+        get() = when (effectiveStatus) {
+            NodeStatus.ACTIVE -> 0xFF2E7D32 // أخضر: للنقاط المفعلة والنشطة
+            NodeStatus.OFFLINE -> 0xFFC62828 // أحمر: للنقاط المغلقة (لا يوجد رد)
+            NodeStatus.NO_INTERNET -> 0xFFEF6C00 // برتقالي/أصفر: لمشاكل الإنترنت
+            NodeStatus.DISABLED -> 0xFF757575 // رمادي: غير مؤرشفة أو معطلة
+        }
+
+    val statusTitleAr: String
+        get() = when (effectiveStatus) {
+            NodeStatus.ACTIVE -> "متصل (نشط)"
+            NodeStatus.OFFLINE -> "مغلق / لا يوجد رد"
+            NodeStatus.NO_INTERNET -> "مقطوع الإنترنت"
+            NodeStatus.DISABLED -> "معطل / غير مؤرشف"
+        }
+
     val hasIssue: Boolean
         get() {
+            if (effectiveStatus == NodeStatus.OFFLINE || effectiveStatus == NodeStatus.NO_INTERNET) return true
             if (!isOnline) return true
             if (cpuLoadPercent > 70) return true
             if (pingMs > 80) return true
@@ -259,6 +349,9 @@ data class NetworkNode(
 
     val issueDescription: String
         get() {
+            if (effectiveStatus == NodeStatus.OFFLINE) return "النقطة مغلقة تماماً (لا يوجد رد نهائياً من الـ IP)"
+            if (effectiveStatus == NodeStatus.NO_INTERNET) return "يوجد اتصال مع الراوتر ولكن مقطوع الإنترنت (Gateway unreachable)"
+            if (effectiveStatus == NodeStatus.DISABLED) return "النقطة معطلة يدوياً أو غير مؤرشفة"
             if (!isOnline) return "النقطة طافية/غير متصلة بالشبكة"
             if (cpuLoadPercent > 70) return "ضغط عالي على المعالج ($cpuLoadPercent%)"
             if (pingMs > 80) return "بطء استجابة وارتفاع Ping (${pingMs}ms)"

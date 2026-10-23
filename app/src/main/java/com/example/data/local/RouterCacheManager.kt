@@ -84,8 +84,18 @@ object RouterCacheManager {
                     put("routerboard", routerBoard.routerboard)
                 })
 
+                val currentCardNames = cards.map { it.name }.toSet()
+                val existingCards = try { loadSnapshot(context, ipAddress)?.cards ?: emptyList() } catch (_: Exception) { emptyList() }
+                val allCombinedCards = mutableListOf<HotspotCard>()
+                allCombinedCards.addAll(cards)
+                existingCards.filter { it.isExpired || it.bytesIn > 0L || it.bytesOut > 0L }.forEach { prevCard ->
+                    if (!currentCardNames.contains(prevCard.name)) {
+                        allCombinedCards.add(prevCard)
+                    }
+                }
+
                 put("cards", JSONArray().apply {
-                    cards.forEach { c ->
+                    allCombinedCards.forEach { c ->
                         put(JSONObject().apply {
                             put("id", c.id)
                             put("name", c.name)
@@ -159,6 +169,10 @@ object RouterCacheManager {
                             put("interfaceName", n.interfaceName)
                             put("model", n.model)
                             put("role", n.role)
+                            put("nodeType", n.nodeType.name)
+                            put("status", n.status.name)
+                            put("parentTowerId", n.parentTowerId ?: "")
+                            put("parentTowerName", n.parentTowerName ?: "")
                             put("isOnline", n.isOnline)
                             put("pingMs", n.pingMs)
                             put("connectedUsers", n.connectedUsers)
@@ -177,6 +191,7 @@ object RouterCacheManager {
                             put("ssid", n.ssid)
                             put("firmwareVersion", n.firmwareVersion)
                             put("lastSeenTime", n.lastSeenTime)
+                            put("lastCheckTime", n.lastCheckTime)
                         })
                     }
                 })
@@ -325,6 +340,31 @@ object RouterCacheManager {
             val nArr = root.optJSONArray("nodes") ?: JSONArray()
             for (i in 0 until nArr.length()) {
                 val o = nArr.getJSONObject(i)
+                val nRole = o.optString("role", "")
+                val nTypeStr = o.optString("nodeType", "")
+                val nodeType = try {
+                    if (nTypeStr.isNotBlank()) NetworkNodeType.valueOf(nTypeStr)
+                    else when {
+                        nRole.contains("برج", ignoreCase = true) || nRole.contains("Tower", ignoreCase = true) || nRole.contains("سيرفر", ignoreCase = true) || nRole.contains("Gateway", ignoreCase = true) -> NetworkNodeType.MAIN_TOWER
+                        nRole.contains("منزل", ignoreCase = true) || nRole.contains("Home", ignoreCase = true) || nRole.contains("عميل", ignoreCase = true) || nRole.contains("CPE", ignoreCase = true) -> NetworkNodeType.HOME_NODE
+                        else -> NetworkNodeType.DISTRIBUTION
+                    }
+                } catch (_: Exception) {
+                    NetworkNodeType.DISTRIBUTION
+                }
+
+                val nStatusStr = o.optString("status", "")
+                val isOnlineVal = o.optBoolean("isOnline", true)
+                val nodeStatus = try {
+                    if (nStatusStr.isNotBlank()) NodeStatus.valueOf(nStatusStr)
+                    else if (isOnlineVal) NodeStatus.ACTIVE else NodeStatus.OFFLINE
+                } catch (_: Exception) {
+                    if (isOnlineVal) NodeStatus.ACTIVE else NodeStatus.OFFLINE
+                }
+
+                val parentIdStr = o.optString("parentTowerId", "")
+                val parentNameStr = o.optString("parentTowerName", "")
+
                 nodesList.add(
                     NetworkNode(
                         id = o.optString("id", ""),
@@ -333,8 +373,12 @@ object RouterCacheManager {
                         macAddress = o.optString("macAddress", "64:D1:54:3B:88:12"),
                         interfaceName = o.optString("interfaceName", "ether2"),
                         model = o.optString("model", "MikroTik cAP ac"),
-                        role = o.optString("role", ""),
-                        isOnline = o.optBoolean("isOnline", true),
+                        role = nRole,
+                        nodeType = nodeType,
+                        status = nodeStatus,
+                        parentTowerId = if (parentIdStr.isNotBlank()) parentIdStr else null,
+                        parentTowerName = if (parentNameStr.isNotBlank()) parentNameStr else null,
+                        isOnline = isOnlineVal,
                         pingMs = o.optLong("pingMs", 4L),
                         connectedUsers = o.optInt("connectedUsers", 12),
                         uptime = o.optString("uptime", "4d 12h"),
@@ -351,7 +395,8 @@ object RouterCacheManager {
                         channelWidth = o.optString("channelWidth", ""),
                         ssid = o.optString("ssid", ""),
                         firmwareVersion = o.optString("firmwareVersion", ""),
-                        lastSeenTime = o.optLong("lastSeenTime", System.currentTimeMillis())
+                        lastSeenTime = o.optLong("lastSeenTime", System.currentTimeMillis()),
+                        lastCheckTime = o.optLong("lastCheckTime", System.currentTimeMillis())
                     )
                 )
             }

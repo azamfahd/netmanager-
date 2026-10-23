@@ -14,7 +14,9 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -179,8 +181,8 @@ fun VoucherPrintScreen(
     val startIndex = safePageIndex * cardsPerPage
     val pageCards = cards.drop(startIndex).take(cardsPerPage)
 
-    // Mobile tabs (Preview vs Customization controls)
-    var mobileTab by remember { mutableIntStateOf(0) } // 0: Preview Sheet, 1: Design Controls
+    // Collapsible customization panel state for mobile
+    var showControlPanel by remember { mutableStateOf(false) }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -251,26 +253,48 @@ fun VoucherPrintScreen(
                         )
                     }
 
-                    // Print Button
+                    // Customization Toggle Button in TopAppBar (Compact)
+                    Button(
+                        onClick = { showControlPanel = !showControlPanel },
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF00838F)
+                        ),
+                        modifier = Modifier
+                            .padding(horizontal = 2.dp)
+                            .testTag("toggle_customization_top_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text("تخصيص", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    }
+
+                    // Print Button (Compact)
                     Button(
                         onClick = {
                             VoucherPrintUtils.printVouchers(context, cards, currentConfig)
                         },
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = RouterBlue
                         ),
                         modifier = Modifier
-                            .padding(end = 8.dp)
+                            .padding(horizontal = 2.dp)
                             .testTag("direct_print_btn")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Print,
                             contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(14.dp)
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("طباعة", fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text("طباعة", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -289,10 +313,10 @@ fun VoucherPrintScreen(
             if (isWideScreen) {
                 // Wide Screen: Dual Pane (Left Sheet Preview, Right Control Panel matching image)
                 Row(modifier = Modifier.fillMaxSize()) {
-                    // Left 65%: Sheet Preview & Pagination
+                    // Left 74%: Sheet Preview & Pagination
                     Box(
                         modifier = Modifier
-                            .weight(0.68f)
+                            .weight(0.74f)
                             .fillMaxHeight()
                             .background(Color(0xFFF0F4F8))
                             .padding(16.dp),
@@ -317,10 +341,10 @@ fun VoucherPrintScreen(
                         )
                     }
 
-                    // Right 32%: Dark Blue Control Panel matching user's image exactly!
+                    // Right 26%: Compact Dark Blue Control Panel
                     Box(
                         modifier = Modifier
-                            .weight(0.32f)
+                            .weight(0.26f)
                             .fillMaxHeight()
                             .background(Color(0xFF0D253A))
                     ) {
@@ -385,130 +409,150 @@ fun VoucherPrintScreen(
                     }
                 }
             } else {
-                // Mobile Screen: Tabbed view for Sheet Preview & Control Panel
-                Column(modifier = Modifier.fillMaxSize()) {
-                    TabRow(
-                        selectedTabIndex = mobileTab,
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        modifier = Modifier.fillMaxWidth()
+                // Mobile Screen: Sheet Preview background with sliding collapsible side drawer overlay
+                Box(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0xFFF0F4F8))
+                            .padding(8.dp)
                     ) {
-                        Tab(
-                            selected = mobileTab == 0,
-                            onClick = { mobileTab = 0 },
-                            text = {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(Icons.Default.ViewModule, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Text("معاينة صفحة الكروت")
-                                }
-                            }
-                        )
-                        Tab(
-                            selected = mobileTab == 1,
-                            onClick = { mobileTab = 1 },
-                            text = {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Text("أدوات التخصيص والتصميم")
-                                }
-                            }
+                        SheetPreviewArea(
+                            pageCards = pageCards,
+                            columns = columns,
+                            rows = rows,
+                            offsetX = offsetX,
+                            offsetY = offsetY,
+                            fontSizeSp = fontSizeSp,
+                            templateType = templateType,
+                            customImageUri = customImageUri,
+                            networkName = networkName,
+                            contactPhone = contactPhone,
+                            safePageIndex = safePageIndex,
+                            totalPages = totalPages,
+                            onPrevPage = { if (safePageIndex > 0) currentPageIndex-- },
+                            onNextPage = { if (safePageIndex < totalPages - 1) currentPageIndex++ },
+                            context = context
                         )
                     }
 
-                    if (mobileTab == 0) {
+                    // Backdrop Scrim when control panel is open
+                    if (showControlPanel) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .background(Color(0xFFF0F4F8))
-                                .padding(8.dp)
-                        ) {
-                            SheetPreviewArea(
-                                pageCards = pageCards,
-                                columns = columns,
-                                rows = rows,
-                                offsetX = offsetX,
-                                offsetY = offsetY,
-                                fontSizeSp = fontSizeSp,
-                                templateType = templateType,
-                                customImageUri = customImageUri,
-                                networkName = networkName,
-                                contactPhone = contactPhone,
-                                safePageIndex = safePageIndex,
-                                totalPages = totalPages,
-                                onPrevPage = { if (safePageIndex > 0) currentPageIndex-- },
-                                onNextPage = { if (safePageIndex < totalPages - 1) currentPageIndex++ },
-                                context = context
-                            )
-                        }
-                    } else {
+                                .background(Color.Black.copy(alpha = 0.35f))
+                                .clickable { showControlPanel = false }
+                        )
+                    }
+
+                    // Sliding Side Drawer for Customization Panel with swipe-to-dismiss gesture
+                    AnimatedVisibility(
+                        visible = showControlPanel,
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                        enter = androidx.compose.animation.slideInHorizontally(initialOffsetX = { it }),
+                        exit = androidx.compose.animation.slideOutHorizontally(targetOffsetX = { it })
+                    ) {
                         Box(
                             modifier = Modifier
-                                .fillMaxSize()
+                                .fillMaxHeight()
+                                .width(265.dp)
                                 .background(Color(0xFF0D253A))
-                        ) {
-                            CustomizationControlPanel(
-                                offsetX = offsetX,
-                                onOffsetXChange = { offsetX = it },
-                                offsetY = offsetY,
-                                onOffsetYChange = { offsetY = it },
-                                fontSizeSp = fontSizeSp,
-                                onFontSizeChange = { fontSizeSp = it },
-                                cardHeightMm = cardHeightMm,
-                                onCardHeightMmChange = { cardHeightMm = it },
-                                cardWidthMm = cardWidthMm,
-                                onCardWidthMmChange = { cardWidthMm = it },
-                                columns = columns,
-                                onColumnsChange = { columns = it },
-                                rows = rows,
-                                onRowsChange = { rows = it },
-                                cardsCount = cards.size,
-                                cardsPerPage = cardsPerPage,
-                                totalPages = totalPages,
-                                templateType = templateType,
-                                onTemplateTypeChange = { templateType = it },
-                                customImageUri = customImageUri,
-                                onSelectImageClick = {
-                                    photoPickerLauncher.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
-                                },
-                                onClearCustomImage = {
-                                    customImageUri = null
-                                    templateType = CardTemplateType.SCOUD_BLUE
-                                },
-                                networkName = networkName,
-                                onNetworkNameChange = { networkName = it },
-                                contactPhone = contactPhone,
-                                onContactPhoneChange = { contactPhone = it },
-                                onPrintClick = {
-                                    VoucherPrintUtils.printVouchers(context, cards, currentConfig)
-                                },
-                                onExportPdfClick = {
-                                    Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
-                                    VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
-                                        if (file != null) {
-                                            VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
-                                        } else {
-                                            Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
-                                },
-                                onExportImageClick = {
-                                    Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
-                                    VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
-                                        if (file != null) {
-                                            VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
-                                        } else {
-                                            Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                .shadow(8.dp)
+                                .pointerInput(Unit) {
+                                    detectHorizontalDragGestures { _, dragAmount ->
+                                        // Swipe right to close panel
+                                        if (dragAmount > 20f) {
+                                            showControlPanel = false
                                         }
                                     }
                                 }
-                            )
+                        ) {
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Color(0xFF15334E))
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "أدوات التخصيص والتصميم",
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp
+                                    )
+                                    IconButton(onClick = { showControlPanel = false }) {
+                                        Icon(Icons.Default.Close, contentDescription = "إغلاق", tint = Color.White)
+                                    }
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f)
+                                ) {
+                                    CustomizationControlPanel(
+                                        offsetX = offsetX,
+                                        onOffsetXChange = { offsetX = it },
+                                        offsetY = offsetY,
+                                        onOffsetYChange = { offsetY = it },
+                                        fontSizeSp = fontSizeSp,
+                                        onFontSizeChange = { fontSizeSp = it },
+                                        cardHeightMm = cardHeightMm,
+                                        onCardHeightMmChange = { cardHeightMm = it },
+                                        cardWidthMm = cardWidthMm,
+                                        onCardWidthMmChange = { cardWidthMm = it },
+                                        columns = columns,
+                                        onColumnsChange = { columns = it },
+                                        rows = rows,
+                                        onRowsChange = { rows = it },
+                                        cardsCount = cards.size,
+                                        cardsPerPage = cardsPerPage,
+                                        totalPages = totalPages,
+                                        templateType = templateType,
+                                        onTemplateTypeChange = { templateType = it },
+                                        customImageUri = customImageUri,
+                                        onSelectImageClick = {
+                                            photoPickerLauncher.launch(
+                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                            )
+                                        },
+                                        onClearCustomImage = {
+                                            customImageUri = null
+                                            templateType = CardTemplateType.SCOUD_BLUE
+                                        },
+                                        networkName = networkName,
+                                        onNetworkNameChange = { networkName = it },
+                                        contactPhone = contactPhone,
+                                        onContactPhoneChange = { contactPhone = it },
+                                        onPrintClick = {
+                                            VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                                        },
+                                        onExportPdfClick = {
+                                            Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
+                                            VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
+                                                if (file != null) {
+                                                    VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
+                                                } else {
+                                                    Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        },
+                                        onExportImageClick = {
+                                            Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
+                                            VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
+                                                if (file != null) {
+                                                    VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
+                                                } else {
+                                                    Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -675,6 +719,26 @@ fun SingleCardRender(
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.FillBounds
             )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .offset {
+                        IntOffset(
+                            x = (offsetX * 0.4f).roundToInt(),
+                            y = (offsetY * 0.2f).roundToInt()
+                        )
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = card.name,
+                    fontSize = (fontSizeSp * 0.6f).sp,
+                    fontWeight = FontWeight.Black,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF0D1B2A),
+                    textAlign = TextAlign.Center
+                )
+            }
         } else {
             // Default Scoud Net style template as shown in user's image
             Row(modifier = Modifier.fillMaxSize()) {

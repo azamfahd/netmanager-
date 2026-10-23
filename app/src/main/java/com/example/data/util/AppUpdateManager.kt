@@ -239,6 +239,18 @@ object AppUpdateManager {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
+            // Explicitly grant URI read permission to all matching package installer handlers
+            val resolvingActivities = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.queryIntentActivities(installIntent, android.content.pm.PackageManager.ResolveInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.queryIntentActivities(installIntent, 0)
+            }
+            for (resolveInfo in resolvingActivities) {
+                val pkgName = resolveInfo.activityInfo.packageName
+                context.grantUriPermission(pkgName, apkUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
             context.startActivity(installIntent)
             Result.success(Unit)
         } catch (e: Exception) {

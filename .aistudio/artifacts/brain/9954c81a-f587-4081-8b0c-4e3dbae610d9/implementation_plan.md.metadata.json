@@ -1,6 +1,6 @@
 {
-  "summary": "خطة عمل شاملة ومفصلة لنقل وترتيب قسم الأرباح والمبيعات والإحصائيات إلى تبويب رئيسي مستقل، وتطوير نظام أرشفة وتتبع الجلسات والمستخدمين المنتهية والنشطة مع التفاصيل الكاملة، وإصلاح مشاكل تعليق حقول الإدخال ومعالجة توليد الكروت في الراوتر الحقيقي بشكل فعلي ومؤكد.",
-  "updatedAt": "2026-10-16T17:59:06.685139494Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Implementation plan for advanced Voucher Print Screen customization with split screen and text position/size controls",
+  "updatedAt":  "2026-10-23T18:11:16.748975319Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }

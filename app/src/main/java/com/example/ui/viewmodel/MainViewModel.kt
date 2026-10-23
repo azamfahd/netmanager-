@@ -48,7 +48,9 @@ enum class CardFilter {
     ALL,
     ACTIVE,
     UNUSED,
-    EXPIRED
+    EXPIRED,
+    EXPIRED_QUOTA,
+    EXPIRED_VALIDITY
 }
 
 class MainViewModel(
@@ -127,8 +129,77 @@ class MainViewModel(
     val activeUsers: StateFlow<List<HotspotActiveUser>> = repository.activeUsers
     val cards: StateFlow<List<HotspotCard>> = repository.cards
     val profiles: StateFlow<List<HotspotProfile>> = repository.profiles
-    val ipBindings: StateFlow<List<IpBinding>> = repository.ipBindings
     val networkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = repository.networkNodes
+    val ipBindings: StateFlow<List<IpBinding>> = repository.ipBindings
+
+    private val _isHeartbeatScanning = MutableStateFlow(false)
+    val isHeartbeatScanning: StateFlow<Boolean> = _isHeartbeatScanning.asStateFlow()
+
+    private val _lastHeartbeatScanTime = MutableStateFlow<Long>(System.currentTimeMillis())
+    val lastHeartbeatScanTime: StateFlow<Long> = _lastHeartbeatScanTime.asStateFlow()
+
+    private val _isClusteringEnabled = MutableStateFlow(true)
+    val isClusteringEnabled: StateFlow<Boolean> = _isClusteringEnabled.asStateFlow()
+
+    fun toggleClustering() {
+        _isClusteringEnabled.value = !_isClusteringEnabled.value
+    }
+
+    fun runHeartbeatCheck(context: Context? = null) {
+        viewModelScope.launch {
+            _isHeartbeatScanning.value = true
+            try {
+                val updatedNodes = repository.pollAllNodesHeartbeat(context)
+                _lastHeartbeatScanTime.value = System.currentTimeMillis()
+
+                val entities = updatedNodes.map { n ->
+                    com.example.data.local.NetworkNodeEntity(
+                        id = n.id,
+                        name = n.name,
+                        ipAddress = n.ipAddress,
+                        macAddress = n.macAddress,
+                        interfaceName = n.interfaceName,
+                        model = n.model,
+                        role = n.role,
+                        nodeType = n.nodeType.name,
+                        status = n.effectiveStatus.name,
+                        parentTowerId = n.parentTowerId,
+                        parentTowerName = n.parentTowerName,
+                        isOnline = n.isOnline,
+                        pingMs = n.pingMs,
+                        connectedUsers = n.connectedUsers,
+                        uptime = n.uptime,
+                        rxSpeedKbps = n.rxSpeedKbps,
+                        txSpeedKbps = n.txSpeedKbps,
+                        totalBytesConsumed = n.totalBytesConsumed,
+                        signalDbm = n.signalDbm,
+                        location = n.location,
+                        cpuLoadPercent = n.cpuLoadPercent,
+                        memoryUsagePercent = n.memoryUsagePercent,
+                        temperature = n.temperature,
+                        voltage = n.voltage,
+                        frequency = n.frequency,
+                        channelWidth = n.channelWidth,
+                        ssid = n.ssid,
+                        firmwareVersion = n.firmwareVersion,
+                        lastSeenTime = n.lastSeenTime,
+                        lastCheckTime = n.lastCheckTime
+                    )
+                }
+                database.appDao().insertOrUpdateNetworkNodes(entities)
+
+                val activeCount = updatedNodes.count { it.effectiveStatus == com.example.data.model.NodeStatus.ACTIVE }
+                val noInternetCount = updatedNodes.count { it.effectiveStatus == com.example.data.model.NodeStatus.NO_INTERNET }
+                val offlineCount = updatedNodes.count { it.effectiveStatus == com.example.data.model.NodeStatus.OFFLINE }
+                _toastEvent.emit("تم فحص نبضات القلب: $activeCount نشط 🟢 • $noInternetCount بدون نت 🟠 • $offlineCount مغلق 🔴")
+            } catch (e: Exception) {
+                _toastEvent.emit("خطأ أثناء فحص نبضات القلب: ${e.message}")
+            } finally {
+                _isHeartbeatScanning.value = false
+            }
+        }
+    }
+
     val userSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = repository.userSessions
     val activityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = repository.activityEvents
     val adminUsers: StateFlow<List<com.example.data.model.AdminUser>> = repository.adminUsers
@@ -1220,6 +1291,8 @@ class MainViewModel(
                 CardFilter.ACTIVE -> isCurrentlyOnline && !card.isExpired
                 CardFilter.UNUSED -> isUnused
                 CardFilter.EXPIRED -> card.isExpired
+                CardFilter.EXPIRED_QUOTA -> card.isExpiredQuota
+                CardFilter.EXPIRED_VALIDITY -> card.isExpiredValidity
             }
 
             matchesQuery && matchesFilter
@@ -1892,7 +1965,8 @@ class MainViewModel(
                 } else {
                     _updateCheckState.value = UpdateCheckState.UpToDate(
                         currentVersion = BuildConfig.VERSION_NAME,
-                        latestTag = releaseInfo.tagName
+                        latestTag = releaseInfo.tagName,
+                        release = releaseInfo
                     )
                     if (isManual) {
                         _toastEvent.emit("البرنامج محدث لأحدث إصدار (${BuildConfig.VERSION_NAME})")
@@ -1903,6 +1977,37 @@ class MainViewModel(
                 if (isManual) {
                     _toastEvent.emit(error.localizedMessage ?: "فشل التحقق من التحديثات")
                 }
+            }
+        }
+    }
+
+    fun forceInstallLatestRelease(context: Context) {
+        viewModelScope.launch {
+            _toastEvent.emit("جاري الاتصال بالمستودع لجلب أحدث نسخة APK...")
+            _updateCheckState.value = UpdateCheckState.Checking
+            val checkRes = AppUpdateManager.checkLatestRelease(BuildConfig.VERSION_NAME)
+            checkRes.onSuccess { (releaseInfo, _) ->
+                _updateCheckState.value = UpdateCheckState.UpdateAvailable(
+                    release = releaseInfo,
+                    currentVersion = BuildConfig.VERSION_NAME,
+                    isNewer = true
+                )
+                val apkUrl = releaseInfo.apkAsset?.downloadUrl
+                if (!apkUrl.isNullOrBlank()) {
+                    downloadAndInstallUpdate(context, apkUrl)
+                } else {
+                    val browserIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(releaseInfo.htmlUrl)).apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(browserIntent)
+                    _toastEvent.emit("تم فتح صفحة التحديث لتنزيل حزمة APK وتثبيتها مباشرة")
+                }
+            }.onFailure { err ->
+                _toastEvent.emit("تعذر جلب التحديث: ${err.message}، جاري فتح المستودع...")
+                val browserIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(AppUpdateManager.GITHUB_RELEASES_WEB_URL)).apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(browserIntent)
             }
         }
     }

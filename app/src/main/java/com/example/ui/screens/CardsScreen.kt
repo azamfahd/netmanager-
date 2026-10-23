@@ -155,6 +155,12 @@ fun CardsScreen(
     val countExpired = remember(distinctCards) {
         distinctCards.count { it.isExpired }
     }
+    val countExpiredQuota = remember(distinctCards) {
+        distinctCards.count { it.isExpiredQuota }
+    }
+    val countExpiredValidity = remember(distinctCards) {
+        distinctCards.count { it.isExpiredValidity }
+    }
 
     val onCardDetailClick: (HotspotCard) -> Unit = { card ->
         val cardKey = card.name.lowercase()
@@ -281,6 +287,20 @@ fun CardsScreen(
                     selected = currentFilter == CardFilter.EXPIRED,
                     onClick = { viewModel.updateCardFilter(CardFilter.EXPIRED) },
                     label = { Text("منتهية ($countExpired)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
+                )
+                FilterChip(
+                    selected = currentFilter == CardFilter.EXPIRED_QUOTA,
+                    onClick = { viewModel.updateCardFilter(CardFilter.EXPIRED_QUOTA) },
+                    label = { Text("انتهى الرصيد ($countExpiredQuota)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
+                )
+                FilterChip(
+                    selected = currentFilter == CardFilter.EXPIRED_VALIDITY,
+                    onClick = { viewModel.updateCardFilter(CardFilter.EXPIRED_VALIDITY) },
+                    label = { Text("انتهت الصلاحية ($countExpiredValidity)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.height(36.dp)
                 )

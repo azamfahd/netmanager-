@@ -35,7 +35,8 @@ sealed class UpdateCheckState {
     ) : UpdateCheckState()
     data class UpToDate(
         val currentVersion: String,
-        val latestTag: String
+        val latestTag: String,
+        val release: GitHubReleaseInfo? = null
     ) : UpdateCheckState()
     data class Error(val message: String) : UpdateCheckState()
 }

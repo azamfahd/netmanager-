@@ -551,25 +551,14 @@ fun NetworkToolsScreen(
 
                         OutlinedButton(
                             onClick = {
-                                manualCheckTriggered = true
-                                viewModel.checkForUpdates(isManual = true)
+                                viewModel.forceInstallLatestRelease(context)
                             },
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.height(46.dp)
                         ) {
-                            if (updateCheckState is UpdateCheckState.Checking && manualCheckTriggered) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    color = MaterialTheme.colorScheme.primary,
-                                    strokeWidth = 2.dp
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("جاري الفحص...")
-                            } else {
-                                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("تحميل آخر إصدار")
-                            }
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("تثبيت آخر نسخة على أي حال", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                         }
                     }
                     

@@ -161,9 +161,33 @@ interface AppDao {
     @Query("UPDATE user_login_history SET bytesIn = :bytesIn, bytesOut = :bytesOut, totalBytes = :totalBytes, duration = :duration WHERE username = :username AND logoutTime = 'متصل الآن'")
     suspend fun updateActiveLoginStats(username: String, bytesIn: Long, bytesOut: Long, totalBytes: Long, duration: String)
 
+    @Query("UPDATE user_login_history SET bytesIn = :bytesIn, bytesOut = :bytesOut, totalBytes = :totalBytes, duration = :duration, ipAddress = :ipAddress, macAddress = :macAddress, deviceModel = :deviceModel, deviceBrand = :deviceBrand, nodeName = :nodeName WHERE username = :username AND logoutTime = 'متصل الآن'")
+    suspend fun updateActiveLoginFullStats(username: String, bytesIn: Long, bytesOut: Long, totalBytes: Long, duration: String, ipAddress: String, macAddress: String, deviceModel: String, deviceBrand: String, nodeName: String)
+
     @Query("UPDATE user_login_history SET logoutTime = :logoutTime, duration = :duration, bytesIn = :bytesIn, bytesOut = :bytesOut, totalBytes = :totalBytes, terminateReason = :reason WHERE username = :username AND logoutTime = 'متصل الآن'")
     suspend fun finalizeUserLogin(username: String, logoutTime: String, duration: String, bytesIn: Long, bytesOut: Long, totalBytes: Long, reason: String)
 
     @Query("DELETE FROM user_login_history WHERE username = :username")
     suspend fun clearLoginHistoryForUser(username: String)
+
+    // ==========================================
+    // Network Nodes & Heartbeat Status Storage
+    // ==========================================
+    @Query("SELECT * FROM network_nodes ORDER BY lastCheckTime DESC")
+    fun getAllNetworkNodesFlow(): Flow<List<NetworkNodeEntity>>
+
+    @Query("SELECT * FROM network_nodes")
+    suspend fun getAllNetworkNodesSync(): List<NetworkNodeEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateNetworkNodes(nodes: List<NetworkNodeEntity>)
+
+    @Query("UPDATE network_nodes SET status = :status, isOnline = :isOnline, pingMs = :pingMs, lastCheckTime = :lastCheckTime WHERE id = :nodeId")
+    suspend fun updateNodeHeartbeat(nodeId: String, status: String, isOnline: Boolean, pingMs: Long, lastCheckTime: Long)
+
+    @Query("DELETE FROM network_nodes WHERE id = :nodeId")
+    suspend fun deleteNetworkNodeEntity(nodeId: String)
+
+    @Query("DELETE FROM network_nodes")
+    suspend fun clearAllNetworkNodes()
 }

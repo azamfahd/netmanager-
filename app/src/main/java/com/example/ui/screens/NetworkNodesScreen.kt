@@ -27,6 +27,9 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.NetworkPing
 import androidx.compose.material.icons.filled.Refresh
@@ -37,6 +40,7 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiTethering
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -76,8 +80,11 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material3.CircularProgressIndicator
 import com.example.data.model.NetworkNode
+import com.example.data.model.NetworkNodeType
 import com.example.data.model.NodeSortOption
+import com.example.data.model.NodeStatus
 import com.example.data.network.NetworkUtils
 import com.example.ui.components.ConfirmDialog
 import com.example.ui.components.FullScreenTopologyDialog
@@ -102,6 +109,9 @@ fun NetworkNodesScreen(
     val allNodes by viewModel.networkNodes.collectAsStateWithLifecycle()
     val searchQuery by viewModel.nodeSearchQuery.collectAsStateWithLifecycle()
     val currentSortOption by viewModel.nodeSortOption.collectAsStateWithLifecycle()
+    val isHeartbeatScanning by viewModel.isHeartbeatScanning.collectAsStateWithLifecycle()
+    val lastHeartbeatScanTime by viewModel.lastHeartbeatScanTime.collectAsStateWithLifecycle()
+    val isClusteringEnabled by viewModel.isClusteringEnabled.collectAsStateWithLifecycle()
 
     var showAddNodeDialog by remember { mutableStateOf(false) }
     var showFullScreenTopology by remember { mutableStateOf(false) }
@@ -109,7 +119,9 @@ fun NetworkNodesScreen(
     var nodeToDelete by remember { mutableStateOf<NetworkNode?>(null) }
     var selectedDisplayTab by remember { mutableStateOf(0) }
 
-    val totalOnline = allNodes.count { it.isOnline }
+    val activeCount = allNodes.count { it.effectiveStatus == NodeStatus.ACTIVE }
+    val offlineCount = allNodes.count { it.effectiveStatus == NodeStatus.OFFLINE }
+    val noInternetCount = allNodes.count { it.effectiveStatus == NodeStatus.NO_INTERNET }
     val totalUsersOnNodes = allNodes.sumOf { it.connectedUsers }
 
     val displayedNodes = nodes
@@ -122,16 +134,16 @@ fun NetworkNodesScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 1. Ultra-Compact Sleek Network Health Status Bar
+            // 1. Ultra-Compact Sleek Network Health Status Bar with Heartbeat Mechanism
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = RouterBlue
                 ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
-                Box(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(
@@ -143,7 +155,8 @@ fun NetworkNodesScreen(
                                 )
                             )
                         )
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -155,54 +168,130 @@ fun NetworkNodesScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.CellTower,
-                                contentDescription = null,
-                                tint = Color.White,
+                                imageVector = Icons.Default.Favorite,
+                                contentDescription = "نبضات القلب",
+                                tint = Color(0xFFFF5252),
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "حالة الأبراج: $totalOnline / ${allNodes.size} متصل",
+                                text = "مراقبة نبضات القلب (Heartbeat)",
                                 color = Color.White,
-                                fontSize = 11.sp,
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         }
 
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        // Heartbeat Check Action Button
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(enabled = !isHeartbeatScanning) { viewModel.runHeartbeatCheck() }
+                                .testTag("btn_trigger_heartbeat"),
+                            color = if (isHeartbeatScanning) Color.White.copy(alpha = 0.2f) else Color.White.copy(alpha = 0.28f),
+                            shape = RoundedCornerShape(8.dp)
                         ) {
                             Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Group,
-                                    contentDescription = null,
-                                    tint = Color(0xFFB9F6CA),
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Text(
-                                    text = "$totalUsersOnNodes مشترك",
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                if (isHeartbeatScanning) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(12.dp),
+                                        strokeWidth = 1.5.dp,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "جارِ الفحص...",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Text(
+                                        text = "فحص فوري",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
+                        }
+                    }
 
+                    // Status counts row with Material 3 4-color indicators
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            // Active (Green)
                             Surface(
-                                color = if (allNodes.any { it.hasIssue }) Color(0xFFFFD54F).copy(alpha = 0.25f) else Color(0xFFB9F6CA).copy(alpha = 0.25f),
-                                shape = RoundedCornerShape(6.dp)
+                                color = Color(0xFF2E7D32).copy(alpha = 0.35f),
+                                shape = RoundedCornerShape(6.dp),
+                                border = BorderStroke(0.5.dp, Color(0xFF4CAF50).copy(alpha = 0.6f))
                             ) {
                                 Text(
-                                    text = if (allNodes.any { it.hasIssue }) "تحت المتابعة" else "مستقرة 100%",
-                                    color = if (allNodes.any { it.hasIssue }) Color(0xFFFFD54F) else Color(0xFFB9F6CA),
+                                    text = "🟢 $activeCount متصل",
+                                    color = Color(0xFFB9F6CA),
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                 )
                             }
+
+                            // No Internet (Orange/Amber)
+                            if (noInternetCount > 0) {
+                                Surface(
+                                    color = Color(0xFFEF6C00).copy(alpha = 0.35f),
+                                    shape = RoundedCornerShape(6.dp),
+                                    border = BorderStroke(0.5.dp, Color(0xFFFF9800).copy(alpha = 0.6f))
+                                ) {
+                                    Text(
+                                        text = "🟠 $noInternetCount مقطوع نت",
+                                        color = Color(0xFFFFE082),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+
+                            // Offline (Red)
+                            if (offlineCount > 0) {
+                                Surface(
+                                    color = Color(0xFFC62828).copy(alpha = 0.35f),
+                                    shape = RoundedCornerShape(6.dp),
+                                    border = BorderStroke(0.5.dp, Color(0xFFEF5350).copy(alpha = 0.6f))
+                                ) {
+                                    Text(
+                                        text = "🔴 $offlineCount مغلق",
+                                        color = Color(0xFFFFCDD2),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
                         }
+
+                        // Last Heartbeat Time
+                        Text(
+                            text = if (lastHeartbeatScanTime != null) "آخر فحص: $lastHeartbeatScanTime" else "$totalUsersOnNodes مشترك",
+                            color = Color.White.copy(alpha = 0.9f),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
             }
@@ -709,6 +798,14 @@ fun NetworkNodeItem(
     onPing: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val semanticIcon = when (node.nodeType) {
+        NetworkNodeType.MAIN_TOWER -> Icons.Default.CellTower
+        NetworkNodeType.DISTRIBUTION -> Icons.Default.WifiTethering
+        NetworkNodeType.HOME_NODE -> Icons.Default.Home
+    }
+    val statusColor = Color(node.statusColorRgb)
+    val statusBgColor = statusColor.copy(alpha = 0.14f)
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -718,45 +815,81 @@ fun NetworkNodeItem(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
+        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f)),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            // Header: Name, Role & Status Pill
+            // Header: Semantic Icon, Name, Type Badge & 4-Color Status Pill
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
+                    modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (node.isOnline) StatusActiveGreenBg else StatusErrorRedBg),
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(statusBgColor),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = if (node.role.contains("Starlink")) Icons.Default.WifiTethering else Icons.Default.CellTower,
-                            contentDescription = null,
-                            tint = if (node.isOnline) StatusActiveGreen else StatusErrorRed,
-                            modifier = Modifier.size(22.dp)
+                            imageVector = semanticIcon,
+                            contentDescription = node.nodeType.titleAr,
+                            tint = statusColor,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
 
-                    Column {
-                        Text(
-                            text = node.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "${node.ipAddress} • ${node.interfaceName}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = node.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1
+                            )
+                            // Node Type Pill (برج رئيسي، نقطة توزيع، نقطة منزلية)
+                            Surface(
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = node.nodeType.titleAr,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        // IP and Parent Tower if applicable
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "${node.ipAddress} • ${node.interfaceName}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (node.nodeType == NetworkNodeType.HOME_NODE && (!node.parentTowerName.isNullOrBlank() || !node.parentTowerId.isNullOrBlank())) {
+                                Text(
+                                    text = "• تابعة لـ: ${node.parentTowerName ?: node.parentTowerId}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF00897B),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -764,10 +897,31 @@ fun NetworkNodeItem(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    StatusPill(
-                        text = if (node.isOnline) "متصل (${node.pingMs}ms)" else "غير متصل",
-                        type = if (node.isOnline) StatusType.SUCCESS else StatusType.ERROR
-                    )
+                    // Unified Material 3 4-Color Status Pill
+                    Surface(
+                        color = statusBgColor,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.6f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(statusColor)
+                            )
+                            Text(
+                                text = if (node.effectiveStatus == NodeStatus.ACTIVE) "${node.statusTitleAr} (${node.pingMs}ms)" else node.statusTitleAr,
+                                color = statusColor,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
 
                     IconButton(
                         onClick = onDelete,
@@ -783,7 +937,7 @@ fun NetworkNodeItem(
                 }
             }
 
-            // شريط التحكم في الشبكة (Network Quick Control Bar)
+            // Quick Network & Heartbeat Control Bar
             Surface(
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
                 shape = RoundedCornerShape(8.dp),
@@ -825,10 +979,12 @@ fun NetworkNodeItem(
                                 )
                             }
                         }
+
                         Text(
-                            text = if (node.isOnline) "⚡ استجابة ${node.pingMs}ms" else "⚠️ غير مستجيب",
+                            text = if (node.lastCheckTime != null) "🕒 نبض: ${node.lastCheckTime}" else if (node.isOnline) "⚡ استجابة ${node.pingMs}ms" else "⚠️ غير مستجيب",
                             fontSize = 10.sp,
-                            color = if (node.isOnline) StatusActiveGreen else StatusErrorRed
+                            color = statusColor,
+                            fontWeight = FontWeight.Medium
                         )
                     }
 
@@ -863,9 +1019,9 @@ fun NetworkNodeItem(
             if (node.hasIssue) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Surface(
-                    color = StatusErrorRedBg,
+                    color = statusBgColor,
                     shape = RoundedCornerShape(8.dp),
-                    border = BorderStroke(0.5.dp, StatusErrorRed.copy(alpha = 0.4f)),
+                    border = BorderStroke(0.5.dp, statusColor.copy(alpha = 0.5f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
@@ -876,12 +1032,12 @@ fun NetworkNodeItem(
                         Icon(
                             imageVector = Icons.Default.Warning,
                             contentDescription = null,
-                            tint = StatusErrorRed,
+                            tint = statusColor,
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = "تنبيه الخلل: ${node.issueDescription}",
-                            color = StatusErrorRed,
+                            text = "تنبيه النقطة: ${node.issueDescription}",
+                            color = statusColor,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
                         )
@@ -1111,6 +1267,8 @@ fun AddNodeDialog(
     var role by remember { mutableStateOf("أكسس بوينت (بث)") }
     var location by remember { mutableStateOf("البرج الرئيسي") }
     var interfaceName by remember { mutableStateOf("ether2") }
+    var selectedNodeType by remember { mutableStateOf(NetworkNodeType.DISTRIBUTION) }
+    var parentTowerName by remember { mutableStateOf("البرج الرئيسي") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1129,6 +1287,34 @@ fun AddNodeDialog(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                // Node Type Selection
+                Text("نوع النقطة الدلالي:", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    NetworkNodeType.entries.forEach { type ->
+                        val isSelected = selectedNodeType == type
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { selectedNodeType = type },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                            border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                        ) {
+                            Text(
+                                text = type.titleAr,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(vertical = 6.dp, horizontal = 2.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -1148,6 +1334,18 @@ fun AddNodeDialog(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 )
+
+                if (selectedNodeType == NetworkNodeType.HOME_NODE) {
+                    OutlinedTextField(
+                        value = parentTowerName,
+                        onValueChange = { parentTowerName = it },
+                        label = { Text("اسم البرج التابعة له (للتجميع الذكي)") },
+                        placeholder = { Text("البرج الرئيسي / برج الشرق") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1207,6 +1405,10 @@ fun AddNodeDialog(
                             model = model.ifBlank { "MikroTik AP" },
                             role = role.ifBlank { "أكسس بوينت" },
                             location = location.ifBlank { "الموقع الرئيسي" },
+                            nodeType = selectedNodeType,
+                            parentTowerId = if (selectedNodeType == NetworkNodeType.HOME_NODE) "node_ap_main" else null,
+                            parentTowerName = if (selectedNodeType == NetworkNodeType.HOME_NODE) parentTowerName.ifBlank { "البرج الرئيسي" } else null,
+                            status = NodeStatus.ACTIVE,
                             isOnline = true,
                             pingMs = 3L,
                             connectedUsers = 0,
