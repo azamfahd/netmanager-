@@ -28,7 +28,10 @@ class ExampleRobolectricTest {
 
     @Test
     fun `verify batch voucher generation produces unique cards`() = runBlocking {
-        val repository = MikrotikRepository()
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = com.google.firebase.firestore.FirebaseFirestore.getInstance("demo-project")
+        val database = com.example.data.local.AppDatabase.getInstance(context)
+        val repository = MikrotikRepository(db)
         val config = BatchGenerationConfig(
             count = 15,
             profile = "TestProfile",
@@ -41,7 +44,7 @@ class ExampleRobolectricTest {
             price = "500 ر.ي",
             batchComment = "Unit Test Batch"
         )
-        val result = repository.generateBatch(config)
+        val result = repository.generateBatch(config, database.appDao())
         assertTrue(result.isSuccess)
         val generated = result.getOrNull().orEmpty()
         assertEquals(15, generated.size)

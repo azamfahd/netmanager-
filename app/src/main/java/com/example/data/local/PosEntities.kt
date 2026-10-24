@@ -1,6 +1,7 @@
 package com.example.data.local
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "pos_agents")
@@ -15,7 +16,14 @@ data class PosAgentEntity(
     val notes: String = ""
 )
 
-@Entity(tableName = "pos_card_assignments")
+@Entity(
+    tableName = "pos_card_assignments",
+    indices = [
+        Index(value = ["agentId"]),
+        Index(value = ["isSold"]),
+        Index(value = ["batchId"])
+    ]
+)
 data class PosCardAssignmentEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
@@ -31,7 +39,13 @@ data class PosCardAssignmentEntity(
     val soldAt: Long = 0L
 )
 
-@Entity(tableName = "pos_payments")
+@Entity(
+    tableName = "pos_payments",
+    indices = [
+        Index(value = ["agentId"]),
+        Index(value = ["paymentDate"])
+    ]
+)
 data class PosPaymentEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,

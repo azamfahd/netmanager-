@@ -11,6 +11,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import com.google.firebase.firestore.FirebaseFirestore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.AppDatabase
 import com.example.data.model.ConnectionState
@@ -20,17 +21,27 @@ import com.example.ui.screens.MainScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.viewmodel.MainViewModel
 import com.example.ui.viewmodel.MainViewModelFactory
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.auth
+import com.example.ui.screens.AuthScreen
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels {
         val database = AppDatabase.getInstance(applicationContext)
-        val repository = MikrotikRepository()
-        MainViewModelFactory(repository, database, applicationContext)
+        val db = FirebaseFirestore.getInstance(getString(R.string.firestore_database_id))
+        val repository = MikrotikRepository(db)
+        MainViewModelFactory(repository, database, db, applicationContext)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.google.firebase.FirebaseApp.initializeApp(this)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
@@ -38,7 +49,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    AppNavigation(viewModel = viewModel)
+                    AppContent(viewModel = viewModel)
                 }
             }
         }
@@ -46,12 +57,49 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun AppNavigation(viewModel: MainViewModel) {
+fun AppContent(viewModel: MainViewModel) {
+    var currentUser by remember { mutableStateOf(Firebase.auth.currentUser) }
+    var showAuthScreen by remember { mutableStateOf(false) }
+
+    DisposableEffect(Unit) {
+        val listener = FirebaseAuth.AuthStateListener { auth ->
+            currentUser = auth.currentUser
+        }
+        Firebase.auth.addAuthStateListener(listener)
+        onDispose {
+            Firebase.auth.removeAuthStateListener(listener)
+        }
+    }
+
+    if (showAuthScreen) {
+        AuthScreen(
+            onAuthSuccess = {
+                showAuthScreen = false
+                currentUser = Firebase.auth.currentUser
+            },
+            onDismiss = { showAuthScreen = false }
+        )
+    } else {
+        AppNavigation(
+            viewModel = viewModel,
+            onTriggerSignIn = { showAuthScreen = true }
+        )
+    }
+}
+
+@Composable
+fun AppNavigation(
+    viewModel: MainViewModel,
+    onTriggerSignIn: () -> Unit
+) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
 
     when (connectionState) {
         is ConnectionState.Connected -> {
-            MainScreen(viewModel = viewModel)
+            MainScreen(
+                viewModel = viewModel,
+                onTriggerSignIn = onTriggerSignIn
+            )
         }
         else -> {
             ConnectRouterScreen(viewModel = viewModel)

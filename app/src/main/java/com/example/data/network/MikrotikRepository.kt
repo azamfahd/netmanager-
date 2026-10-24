@@ -7,8 +7,10 @@ import com.example.data.model.CodeCharType
 import com.example.data.model.HotspotActiveUser
 import com.example.data.model.HotspotCard
 import com.example.data.model.HotspotProfile
+import com.example.data.local.SystemEventLogEntity
 import com.example.data.model.IpBinding
 import com.example.data.model.RouterConnectionConfig
+import com.google.firebase.firestore.FirebaseFirestore
 import com.example.data.model.RouterResource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,7 +42,7 @@ data class UserKnownTelemetry(
     val lastSeenTimestamp: Long = System.currentTimeMillis()
 )
 
-class MikrotikRepository {
+class MikrotikRepository(private val db: FirebaseFirestore) {
 
     private val lastKnownUserTelemetry = java.util.concurrent.ConcurrentHashMap<String, UserKnownTelemetry>()
 
@@ -1608,24 +1610,29 @@ class MikrotikRepository {
 
     private fun extractPriceFromText(comment: String, profileName: String, cardName: String): String {
         val combined = "$comment $profileName $cardName"
-        val explicitRegex = Regex("""(?i)(?:price=|سعر=|السعر=|فئة\s*|فئه\s*)(\d{2,6})""")
-        val explicitMatch = explicitRegex.find(combined)
-        if (explicitMatch != null && explicitMatch.groupValues.size > 1) {
-            return "${explicitMatch.groupValues[1]} ر.ي"
-        }
-
-        val currencyRegex = Regex("""(\d{2,6})\s*(?:ر\.?ي|ريال|YER|YR)""", RegexOption.IGNORE_CASE)
-        val currencyMatch = currencyRegex.find(combined)
-        if (currencyMatch != null && currencyMatch.groupValues.size > 1) {
-            return "${currencyMatch.groupValues[1]} ر.ي"
-        }
-
-        val commonPrices = listOf(100, 150, 200, 250, 300, 400, 500, 600, 700, 800, 1000, 1200, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 10000)
-        for (price in commonPrices) {
-            if (Regex("""\b$price\b""").containsMatchIn(comment) || Regex("""\b$price\b""").containsMatchIn(profileName)) {
-                return "$price ر.ي"
+        
+        // 1. More aggressive price detection (handle more currency formats and labels)
+        val pricePatterns = listOf(
+            Regex("""(?i)(?:price|سعر|السعر|فئة|فئه)[:\s]*(\d{2,6})"""),
+            Regex("""(\d{2,6})\s*(?:ر\.?ي|ريال|YER|YR|ريال يمني)""", RegexOption.IGNORE_CASE)
+        )
+        
+        for (regex in pricePatterns) {
+            val match = regex.find(combined)
+            if (match != null) {
+                return "${match.groupValues[1]} ر.ي"
             }
         }
+
+        // 2. Fallback: Check for bare numbers if profile name suggests a price (e.g., "Abu 200")
+        val numberMatch = Regex("""\b(\d{2,6})\b""").findAll(combined)
+        for (match in numberMatch) {
+            val num = match.groupValues[1].toIntOrNull() ?: continue
+            if (num in listOf(100, 150, 200, 250, 300, 400, 500, 600, 700, 800, 1000, 1200, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 10000)) {
+                return "$num ر.ي"
+            }
+        }
+        
         return "غير محدد"
     }
 
@@ -2404,7 +2411,7 @@ class MikrotikRepository {
         }
     }
 
-    suspend fun generateBatch(config: BatchGenerationConfig): Result<List<HotspotCard>> {
+    suspend fun generateBatch(config: BatchGenerationConfig, dao: com.example.data.local.AppDao): Result<List<HotspotCard>> {
         return withContext(Dispatchers.Default) {
             // 1. Validation: Verify profile against router profiles (case-insensitive & trimmed)
             val cleanProfileName = config.profile.trim()
@@ -2546,6 +2553,20 @@ class MikrotikRepository {
                                         cardAdded = true
                                     } else {
                                         val errBody = resp.body?.string().orEmpty()
+                                        failureReasons.add("فشل إضافة الكرت ${card.name}: ${resp.code} - $errBody")
+                                        
+                                        // Log failure with payload
+                                        dao.insertSystemEventLog(
+                                            SystemEventLogEntity(
+                                                actionType = "توليد كروت",
+                                                targetType = "كرت",
+                                                targetName = card.name,
+                                                description = "فشل إضافة الكرت للراوتر (${resp.code})",
+                                                status = "FAILED",
+                                                details = "البيانات المرسلة: $jsonBody | الاستجابة: $errBody"
+                                            )
+                                        )
+                                        
                                         // Auto-create missing hotspot profile and retry
                                         if (errBody.contains("profile", ignoreCase = true) || errBody.contains("not found", ignoreCase = true)) {
                                             try {

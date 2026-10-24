@@ -29,6 +29,9 @@ import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.ExitToApp
+import com.google.firebase.auth.auth
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -86,11 +89,13 @@ import kotlinx.coroutines.launch
 fun NetworkToolsScreen(
     viewModel: MainViewModel,
     onOpenSystemEventLog: () -> Unit = {},
+    onTriggerSignIn: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
     val currentConfig by viewModel.currentConfig.collectAsStateWithLifecycle()
     val ipBindings by viewModel.ipBindings.collectAsStateWithLifecycle()
+    val currentUser = com.google.firebase.Firebase.auth.currentUser
 
     val context = LocalContext.current
     val updateCheckState by viewModel.updateCheckState.collectAsStateWithLifecycle()
@@ -694,6 +699,140 @@ fun NetworkToolsScreen(
                         Icon(Icons.Default.ListAlt, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("فتح ومراقبة سجل أحداث النظام (شفافية كاملة)", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        // Cloud Sync & Account Linking Card (المزامنة السحابية وربط الحساب)
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("cloud_sync_card"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudDownload,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "المزامنة السحابية (Cloud Sync)",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "ربط البرنامج بحساب جوجل لحماية البيانات والمزامنة",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        StatusPill(
+                            text = if (currentUser != null) "مرتبط" else "غير مرتبط",
+                            type = if (currentUser != null) StatusType.SUCCESS else StatusType.WARNING
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    if (currentUser != null) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                // User info or avatar placeholder
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = currentUser.email?.take(1)?.uppercase() ?: "U",
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = currentUser.displayName ?: "مستخدم البرنامج",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = currentUser.email ?: "",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        OutlinedButton(
+                            onClick = {
+                                com.google.firebase.Firebase.auth.signOut()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = StatusErrorRed)
+                        ) {
+                            Icon(Icons.Default.ExitToApp, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("تسجيل الخروج وإلغاء المزامنة السحابية")
+                        }
+                    } else {
+                        Text(
+                            text = "المزامنة السحابية تتيح لك حفظ نسخة احتياطية من جميع العمليات والكروت والمبيعات في السحاب بشكل آمن، مما يضمن عدم فقدانها حتى في حال تغيير الجهاز.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 18.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Button(
+                            onClick = onTriggerSignIn,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(Icons.Default.ExitToApp, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("ربط البرنامج بحساب جوجل وتفعيل المزامنة")
+                        }
                     }
                 }
             }

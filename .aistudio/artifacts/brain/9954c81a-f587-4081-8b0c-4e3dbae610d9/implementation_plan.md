@@ -1,28 +1,46 @@
-# خطة وتوثيق حل مشاكل تفعيل باقات الكروت ومزامنة اتصال الراوتر وشاشة الباقات
+# Implementation Plan - 100% Data Retention & Hybrid Cloud-Local Sync System
 
-تم بنجاح فحص شامل لكافة طبقات الاتصال والشبكة مع راوتر MikroTik ومعالجة المشاكل الجذرية المذكورة:
+This plan outlines the transition of the application to a high-volume, professional system with zero data loss, 100% record retention, and real-time cloud synchronization.
 
----
-
-### 1. حل مشكلة تفعيل الباقات والكروت ("خطأ في تفاصيل الباقة")
-- **ربط الكروت الصارم بالباقة**: عند توليد كرت فردي أو دفعة كروت من شاشة توليد الكروت (`VoucherBatchDialog`) أو تعديل كرت (`EditCardDialog`):
-  - تم استبدال الفئات الوهمية السابقة بشرائح سريعة تعرض **باقات الراوتر الفعلية المعتمدة** فقط (`profiles`).
-  - تم إغلاق وإلغاء أي حقول تتيح للمستخدم إدخال أو تعديل محددات الوقت/الصلاحية أو حصة البيانات يدوياً من واجهة التوليد، لكونها معرفة وثابتة داخل باقة الراوتر نفسها (`Hotspot Profile`).
-  - يتم عرض تفاصيل الباقة المعتمدة من الراوتر كمعلومات استرشادية واضحة ومقفلة للقراءة فقط (الاسم، السعر، مهلة الجلسة، السرعة Rx/Tx، الأجهزة المتزامنة).
-  - يتم إرسال الكرت إلى الراوتر بالأمر القياسي الصريح: `/ip/hotspot/user/add =name=.. =password=.. =profile=<اسم_الباقة> =disabled=no`.
-  - في حال رد الراوتر بـ `!trap` ناتج عن تعارض في المحددات، تم تضمين آلية إعادة محاولة تلقائية ونظيفة فوراَ بالاعتماد الحصري على الباقة المعتمدة (`profile`) لضمان قبول الراوتر للكرت وتفعيله فوراً بدون أي خطأ.
+## User Requirements Addressed
+- **100% Data Retention**: No record (session, log, payment, card) is ever automatically or manually purged from the system.
+- **Hybrid Storage Architecture**: Every local record in Room is mirrored to Firebase Firestore for permanent cloud backup and multi-device access.
+- **MicroTik Parity**: Generated cards must match router configurations perfectly and be ready for immediate sale/use.
+- **Professional Stability**: Optimized indexing for high-volume data handling without performance degradation.
 
 ---
 
-### 2. حل مشكلة تعليق وإغلاق البرنامج عند الدخول إلى قسم الباقات (ANR & Crash Fix)
-- **المعالجة الحسابية المفرطة في خيط واجهة المستخدم الرئيسي**: تم تحويل العمليات الحسابية المتكررة وإحصائيات الباقات في `ProfilesScreen.kt` من حسابات داخل عناصر الـ `LazyColumn` إلى معالجة مسبقة ومحفوظة بالذاكرة (`ProfileDisplayStats` عبر `remember(profiles, cards, pricingMap)`).
-- **منع انهيار التخطيط عند فتح مربعات الحوار**: تم تزويد `AddProfileDialog` و`EditProfileDialog` بخاصية التمرير الرأسي `verticalScroll(rememberScrollState())` لمنع تجاوز أبعاد الشاشة عند ظهور لوحة المفاتيح.
-- **تأمين المفاتيح في LazyColumn**: استخدام `key = { it.name }` الفريد والمستقر بدلاً من المعرفات المؤقتة.
+## Completed & Ongoing Changes
+
+### 1. Permanent Retention Policy
+- **Removal of Purge Logic**: All automatic cleanup routines, row-count limits, and "Clear/Purge" UI buttons have been removed from the application.
+- **Schema Hardening**: Entities like `SessionArchiveEntity`, `SystemEventLogEntity`, and `UserLoginHistoryEntity` are now persistent stores that only grow.
+
+### 2. Hybrid Cloud Synchronization (Firestore)
+- **Real-Time Mirroring**: `MainViewModel` now integrates `syncToCloud` across all critical operations:
+  - System Logs & Router Event Logs.
+  - Voucher Generation (Batch History & POS Assignments).
+  - POS Operations (Agent management, Payments, Card sales).
+  - Network Node Heartbeats and Performance Telemetry.
+- **Zero-Trust Security**: `firestore.rules` and `firebase-blueprint.json` configured to gate all writes behind Google Sign-In UID checks and schema validation.
+
+### 3. Authentication & Security
+- **Google Sign-In**: Mandatory authentication via Jetpack Credential Manager to secure cloud data access.
+- **Auth Gate**: A dedicated `AuthScreen` protects the main application dashboard, ensuring only authorized owners access sensitive network and financial data.
+
+### 4. Database Performance (Room)
+- **Indexing**: Added composite and single-column indexes in `AppDao` and Entity classes for `timestamp`, `username`, and `agentId` to maintain speed at high row counts.
+- **Transactions**: Bulk operations (like generating 1000+ cards) use SQLite transactions for atomic, fast execution.
 
 ---
 
-### 3. تأمين وتزامن طبقة اتصال السوكيت (Socket Concurrency & Atomicity)
-- **قفل موحد لعمليات السوكيت (`socketLock`)**: تم تطبيق تزامن ذري عبر الدالة `executeSentence(words)`، بحيث تحتفظ العملية الواحدة بحق استخدام مقبس الـ API حتى الانتهاء التام من كتابة الأمر وقراءة الردود كاملة حتى `!done` أو `!fatal`.
-- **منع تداخل وتلوث البيانات**: لم يعد هناك أي احتمال لتداخل أوامر الاستعلام بالخلفية (مثل استعلام المعالج أو السرعة) مع عمليات إضافة الكروت أو جلب الباقات.
-- **إعادة الاتصال التلقائية النظيفة**: في حال حدوث أي خطأ في الاتصال، يتم إغلاق السوكيت فوراً وإعادة الاتصال والمصادقة تلقائياً بدون بقاء أي بايتات غير مقروءة في المقبس.
-- **دعم المعرفات في الحذف والتعديل**: إضافة دعم التعيين والحذف عبر المعرفات النصية `=numbers=$name` بالإضافة إلى المعرفات الداخلية `*id` لضمان عمل كافة العمليات على Hotspot و User Manager بنجاح.
+## Verification Plan
+
+### Automated Tests
+- **Firestore Rules**: Verified via JavaScript and Robolectric tests to ensure only the authenticated owner can write/read their data.
+- **Unit Tests**: Verified data persistence and relationship integrity in Room.
+
+### Manual Verification
+- **Full Retention Check**: Verified that no "Purge" or "Clear" options exist in the System Logs or Network Reports screens.
+- **Cloud Sync Verification**: Confirmed that local actions (generating cards, recording payments) trigger corresponding Firestore writes.
+- **Professional Flow**: Verified that card generation is ready for sale and mirrors Mikrotik logic exactly.

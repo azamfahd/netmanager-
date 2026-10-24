@@ -622,9 +622,45 @@ class RouterOsApiClient {
 
                 val targetName = cardName.ifBlank { cardId }
 
+                // 0. Remove active hotspot session first if any so Mikrotik doesn't keep/recreate the user
+                if (targetName.isNotBlank()) {
+                    try {
+                        writeSentence(listOf("/ip/hotspot/active/print", "?user=$targetName"))
+                        val activeSentences = readAllSentencesUntilDone()
+                        for (s in activeSentences) {
+                            if (s.firstOrNull() == "!re") {
+                                val activeMap = parseSentenceToMap(s)
+                                val activeId = activeMap[".id"]
+                                if (!activeId.isNullOrBlank()) {
+                                    writeSentence(listOf("/ip/hotspot/active/remove", "=.id=$activeId"))
+                                    readAllSentencesUntilDone()
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // Find .id by name first if cardId doesn't start with *
+                var actualId = cardId
+                if (!actualId.startsWith("*") && targetName.isNotBlank()) {
+                    try {
+                        writeSentence(listOf("/ip/hotspot/user/print", "?name=$targetName"))
+                        val userSentences = readAllSentencesUntilDone()
+                        for (s in userSentences) {
+                            if (s.firstOrNull() == "!re") {
+                                val userMap = parseSentenceToMap(s)
+                                if (userMap["name"]?.trim().equals(targetName.trim(), ignoreCase = true)) {
+                                    actualId = userMap[".id"] ?: actualId
+                                    break
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+
                 // 1. Try Hotspot removal
-                if (cardId.startsWith("*")) {
-                    val hsRes = executeRemoval(listOf("/ip/hotspot/user/remove", "=.id=$cardId"))
+                if (actualId.startsWith("*")) {
+                    val hsRes = executeRemoval(listOf("/ip/hotspot/user/remove", "=.id=$actualId"))
                     if (hsRes.isSuccess) return@withContext hsRes
                 }
                 if (targetName.isNotBlank()) {
@@ -633,8 +669,8 @@ class RouterOsApiClient {
                 }
 
                 // 2. Try User Manager v7
-                if (cardId.startsWith("*")) {
-                    val um7Res = executeRemoval(listOf("/user-manager/user/remove", "=.id=$cardId"))
+                if (actualId.startsWith("*")) {
+                    val um7Res = executeRemoval(listOf("/user-manager/user/remove", "=.id=$actualId"))
                     if (um7Res.isSuccess) return@withContext um7Res
                 }
                 if (targetName.isNotBlank()) {
@@ -755,9 +791,11 @@ class RouterOsApiClient {
         val words = mutableListOf(
             "/ip/hotspot/user/add",
             "=name=${card.name.trim()}",
-            "=password=${card.password}",
             "=disabled=no"
         )
+        if (card.password.isNotBlank()) {
+            words.add("=password=${card.password}")
+        }
         if (cleanProfile.isNotBlank()) words.add("=profile=$cleanProfile")
         val validUptime = formatRouterOsTime(card.limitUptime)
         if (!validUptime.isNullOrBlank()) {
@@ -786,10 +824,12 @@ class RouterOsApiClient {
                 val simpleWords = mutableListOf(
                     "/ip/hotspot/user/add",
                     "=name=${card.name.trim()}",
-                    "=password=${card.password}",
                     "=profile=$cleanProfile",
                     "=disabled=no"
                 )
+                if (card.password.isNotBlank()) {
+                    simpleWords.add("=password=${card.password}")
+                }
                 if (card.comment.isNotBlank()) simpleWords.add("=comment=${card.comment}")
                 writeSentence(simpleWords)
                 val retrySentences = readAllSentencesUntilDone()
@@ -809,7 +849,10 @@ class RouterOsApiClient {
 
     private fun addUserManagerV7User(card: HotspotCard): Result<Boolean> {
         try {
-            val words = mutableListOf("/user-manager/user/add", "=name=${card.name}", "=password=${card.password}", "=disabled=no")
+            val words = mutableListOf("/user-manager/user/add", "=name=${card.name}", "=disabled=no")
+            if (card.password.isNotBlank()) {
+                words.add("=password=${card.password}")
+            }
             if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
             writeSentence(words)
             val sentences = readAllSentencesUntilDone()
@@ -841,10 +884,12 @@ class RouterOsApiClient {
             val words = mutableListOf(
                 "/tool/user-manager/user/add",
                 "=username=${card.name}",
-                "=password=${card.password}",
                 "=customer=$cust",
                 "=disabled=no"
             )
+            if (card.password.isNotBlank()) {
+                words.add("=password=${card.password}")
+            }
             if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
             writeSentence(words)
             val sentences = readAllSentencesUntilDone()

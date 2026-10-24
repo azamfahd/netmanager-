@@ -11,7 +11,13 @@ import com.example.data.local.PosAgentSummary
 import com.example.data.local.PosCardAssignmentEntity
 import com.example.data.local.PosPaymentEntity
 import com.example.data.local.SavedRouterEntity
+import com.example.data.local.SystemEventLogEntity
 import com.example.data.local.toUserSessionRecord
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
+import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.SetOptions
 import com.example.data.model.BatchGenerationConfig
 import com.example.data.model.ConnectionState
 import com.example.data.model.HotspotActiveUser
@@ -56,6 +62,7 @@ enum class CardFilter {
 class MainViewModel(
     private val repository: MikrotikRepository,
     private val database: AppDatabase,
+    private val db: FirebaseFirestore,
     private val appContext: Context? = null
 ) : ViewModel() {
 
@@ -78,6 +85,34 @@ class MainViewModel(
                         logs = snapshot.logs,
                         ipBindings = snapshot.ipBindings
                     )
+                    
+                    // Persist logs to Room
+                    val dao = database.appDao()
+                    snapshot.logs.forEach { log ->
+                        val timestamp = System.currentTimeMillis()
+                        val insertedId = dao.insertSystemEventLog(
+                            SystemEventLogEntity(
+                                actionType = if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام",
+                                targetType = "راوتر",
+                                targetName = "سجل خارجي",
+                                description = log.message,
+                                details = "Topic: ${log.topics}",
+                                timestamp = timestamp
+                            )
+                        )
+                        
+                        // Sync to Cloud
+                        syncToCloud("systemLogs", insertedId.toString(), mapOf(
+                            "id" to insertedId.toString(),
+                            "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
+                            "actionType" to (if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام"),
+                            "targetType" to "راوتر",
+                            "targetName" to "سجل خارجي",
+                            "description" to log.message,
+                            "status" to "INFO",
+                            "operatorUsername" to "system"
+                        ))
+                    }
                 }
             }
         }
@@ -153,7 +188,7 @@ class MainViewModel(
                 _lastHeartbeatScanTime.value = System.currentTimeMillis()
 
                 val entities = updatedNodes.map { n ->
-                    com.example.data.local.NetworkNodeEntity(
+                    val entity = com.example.data.local.NetworkNodeEntity(
                         id = n.id,
                         name = n.name,
                         ipAddress = n.ipAddress,
@@ -185,6 +220,20 @@ class MainViewModel(
                         lastSeenTime = n.lastSeenTime,
                         lastCheckTime = n.lastCheckTime
                     )
+                    
+                    // Sync to Cloud
+                    syncToCloud("networkNodes", n.id, mapOf(
+                        "id" to n.id,
+                        "name" to n.name,
+                        "ipAddress" to n.ipAddress,
+                        "macAddress" to n.macAddress,
+                        "status" to n.effectiveStatus.name,
+                        "isOnline" to n.isOnline,
+                        "pingMs" to n.pingMs,
+                        "connectedUsers" to n.connectedUsers,
+                        "timestamp" to com.google.firebase.Timestamp.now()
+                    ))
+                    entity
                 }
                 database.appDao().insertOrUpdateNetworkNodes(entities)
 
@@ -221,6 +270,24 @@ class MainViewModel(
     val systemEventLogs: StateFlow<List<com.example.data.local.SystemEventLogEntity>> = database.appDao().getAllSystemEventLogs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private fun requireUserId(): String {
+        return Firebase.auth.currentUser?.uid
+            ?: throw IllegalStateException("يجب تسجيل الدخول أولاً للمزامنة السحابية")
+    }
+
+    private fun syncToCloud(collectionName: String, docId: String, data: Map<String, Any?>) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val uid = requireUserId()
+                db.collection("users").document(uid).collection(collectionName).document(docId)
+                    .set(data, SetOptions.merge())
+                    .addOnFailureListener { e ->
+                        logApplicationError("Cloud Sync", "فشل المزامنة لـ $collectionName: ${e.message}")
+                    }
+            } catch (_: Exception) {}
+        }
+    }
+
     fun recordSystemEvent(
         actionType: String,
         targetType: String,
@@ -231,25 +298,34 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             val routerIp = (_connectionState.value as? ConnectionState.Connected)?.ipAddress ?: _currentConfig.value.ipAddress.ifBlank { "192.168.88.1" }
-            database.appDao().insertSystemEventLog(
-                com.example.data.local.SystemEventLogEntity(
-                    actionType = actionType,
-                    targetType = targetType,
-                    targetName = targetName,
-                    description = description,
-                    operatorUsername = "admin",
-                    routerIp = routerIp,
-                    status = status,
-                    details = details
-                )
+            val timestamp = System.currentTimeMillis()
+            val log = com.example.data.local.SystemEventLogEntity(
+                actionType = actionType,
+                targetType = targetType,
+                targetName = targetName,
+                description = description,
+                operatorUsername = "admin",
+                routerIp = routerIp,
+                status = status,
+                details = details,
+                timestamp = timestamp
             )
-        }
-    }
-
-    fun clearSystemEventLogs() {
-        viewModelScope.launch {
-            database.appDao().clearAllSystemEventLogs()
-            _toastEvent.emit("تم مسح سجل أحداث وعمليات النظام بالكامل")
+            val insertedId = database.appDao().insertSystemEventLog(log)
+            
+            // Sync to Firestore
+            val cloudData = mapOf(
+                "id" to insertedId.toString(),
+                "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
+                "actionType" to actionType,
+                "targetType" to targetType,
+                "targetName" to targetName,
+                "description" to description,
+                "status" to status,
+                "operatorUsername" to "admin",
+                "routerIp" to routerIp,
+                "details" to details
+            )
+            syncToCloud("systemLogs", insertedId.toString(), cloudData)
         }
     }
 
@@ -482,14 +558,22 @@ class MainViewModel(
     fun logApplicationError(operation: String, errorMessage: String, details: String = "") {
         viewModelScope.launch {
             try {
-                database.appDao().insertErrorLog(
-                    com.example.data.local.RouterErrorLogEntity(
-                        operation = operation,
-                        errorMessage = errorMessage,
-                        details = details,
-                        timestamp = System.currentTimeMillis()
-                    )
+                val timestamp = System.currentTimeMillis()
+                val log = com.example.data.local.RouterErrorLogEntity(
+                    operation = operation,
+                    errorMessage = errorMessage,
+                    details = details,
+                    timestamp = timestamp
                 )
+                val insertedId = database.appDao().insertErrorLog(log)
+                
+                // Sync to Cloud
+                syncToCloud("errorLogs", insertedId.toString(), mapOf(
+                    "id" to insertedId.toString(),
+                    "operation" to operation,
+                    "errorMessage" to errorMessage,
+                    "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp))
+                ))
             } catch (_: Exception) {}
         }
     }
@@ -500,14 +584,23 @@ class MainViewModel(
 
     fun updatePackageCostAndPrice(profileName: String, costPrice: Double, salePrice: Double) {
         viewModelScope.launch {
+            val timestamp = System.currentTimeMillis()
             database.appDao().insertPackagePricing(
                 com.example.data.local.PackagePricingEntity(
                     profileName = profileName,
                     costPrice = costPrice.coerceAtLeast(0.0),
                     salePrice = salePrice.coerceAtLeast(0.0),
-                    updatedAt = System.currentTimeMillis()
+                    updatedAt = timestamp
                 )
             )
+            
+            // Sync to Cloud
+            syncToCloud("packagePricing", profileName, mapOf(
+                "profileName" to profileName,
+                "costPrice" to costPrice,
+                "salePrice" to salePrice,
+                "updatedAt" to com.google.firebase.Timestamp(java.util.Date(timestamp))
+            ))
             _toastEvent.emit("تم حفظ وتحديث سعر التكلفة والبيع لباقة ($profileName) بنجاح")
         }
     }
@@ -895,6 +988,10 @@ class MainViewModel(
                 if (activeList.isNotEmpty()) {
                     activeList.forEach { user ->
                         database.appDao().markCardAsSold(user.user, now)
+                        syncToCloud("posCards", user.user, mapOf(
+                            "isSold" to true,
+                            "soldAt" to com.google.firebase.Timestamp(java.util.Date(now))
+                        ))
 
                         // Persistent subscriber login tracking (تاريخ تسجيل الدخول والأجهزة والأوقات)
                         try {
@@ -905,27 +1002,36 @@ class MainViewModel(
                             val detectedDevice = com.example.data.util.DeviceDetector.detectDevice(user.macAddress, user.hostName, user.user)
 
                             if (activeLogin == null) {
-                                database.appDao().insertLoginHistory(
-                                    com.example.data.local.UserLoginHistoryEntity(
-                                        username = user.user,
-                                        loginTime = nowFormatted,
-                                        logoutTime = "متصل الآن",
-                                        duration = user.uptime.ifBlank { "0s" },
-                                        bytesIn = user.bytesIn,
-                                        bytesOut = user.bytesOut,
-                                        totalBytes = user.bytesIn + user.bytesOut,
-                                        ipAddress = user.address,
-                                        macAddress = user.macAddress,
-                                        deviceModel = detectedDevice.modelName,
-                                        deviceBrand = detectedDevice.brand,
-                                        deviceCategory = detectedDevice.category.name,
-                                        nodeName = user.nodeName,
-                                        profile = cardProf,
-                                        price = cardPrice,
-                                        terminateReason = "جلسة نشطة حالياً",
-                                        timestamp = now
-                                    )
+                                val loginEntity = com.example.data.local.UserLoginHistoryEntity(
+                                    username = user.user,
+                                    loginTime = nowFormatted,
+                                    logoutTime = "متصل الآن",
+                                    duration = user.uptime.ifBlank { "0s" },
+                                    bytesIn = user.bytesIn,
+                                    bytesOut = user.bytesOut,
+                                    totalBytes = user.bytesIn + user.bytesOut,
+                                    ipAddress = user.address,
+                                    macAddress = user.macAddress,
+                                    deviceModel = detectedDevice.modelName,
+                                    deviceBrand = detectedDevice.brand,
+                                    deviceCategory = detectedDevice.category.name,
+                                    nodeName = user.nodeName,
+                                    profile = cardProf,
+                                    price = cardPrice,
+                                    terminateReason = "جلسة نشطة حالياً",
+                                    timestamp = now
                                 )
+                                val insertedId = database.appDao().insertLoginHistory(loginEntity)
+                                
+                                // Sync to Cloud
+                                syncToCloud("loginHistory", insertedId.toString(), mapOf(
+                                    "id" to insertedId.toString(),
+                                    "username" to user.user,
+                                    "ipAddress" to user.address,
+                                    "macAddress" to user.macAddress,
+                                    "timestamp" to com.google.firebase.Timestamp(java.util.Date(now)),
+                                    "profile" to cardProf
+                                ))
                             } else {
                                 database.appDao().updateActiveLoginStats(
                                     username = user.user,
@@ -990,7 +1096,8 @@ class MainViewModel(
                 if (sessionList.isNotEmpty()) {
                     try {
                         val entities = sessionList.map { session ->
-                            com.example.data.local.SessionArchiveEntity(
+                            val archiveAt = System.currentTimeMillis()
+                            val entity = com.example.data.local.SessionArchiveEntity(
                                 sessionId = session.id,
                                 username = session.username,
                                 ipAddress = session.ipAddress,
@@ -1011,8 +1118,22 @@ class MainViewModel(
                                 deviceCategory = session.deviceInfo.category.name,
                                 packageLimitBytes = session.packageLimitBytes,
                                 isQuotaExhausted = session.isQuotaExhausted,
-                                timestamp = System.currentTimeMillis()
+                                timestamp = archiveAt
                             )
+                            
+                            // Sync to Cloud
+                            syncToCloud("sessionArchive", session.id, mapOf(
+                                "id" to session.id,
+                                "username" to session.username,
+                                "macAddress" to session.macAddress,
+                                "ipAddress" to session.ipAddress,
+                                "loginTime" to session.loginTime,
+                                "logoutTime" to session.logoutTime,
+                                "duration" to session.duration,
+                                "totalBytes" to session.totalBytes,
+                                "timestamp" to com.google.firebase.Timestamp(java.util.Date(archiveAt))
+                            ))
+                            entity
                         }
                         database.appDao().insertOrUpdateSessions(entities)
                     } catch (_: Exception) {}
@@ -1069,6 +1190,10 @@ class MainViewModel(
             val now = System.currentTimeMillis()
             usedCards.forEach { card ->
                 database.appDao().markCardAsSold(card.name, now)
+                syncToCloud("posCards", card.name, mapOf(
+                    "isSold" to true,
+                    "soldAt" to com.google.firebase.Timestamp(java.util.Date(now))
+                ))
             }
         }
     }
@@ -1265,13 +1390,6 @@ class MainViewModel(
             selectedTimeFilter = timeFilter
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.NetworkConsumptionReport())
-
-    fun clearSessionArchive() {
-        viewModelScope.launch {
-            database.appDao().clearSessionArchive()
-            _toastEvent.emit("تم إفراغ أرشيف الجلسات السابقة بنجاح")
-        }
-    }
 
     fun reactivateCardFromReport(cardId: String) {
         val target = cards.value.firstOrNull { it.id == cardId || it.name == cardId }
@@ -1568,18 +1686,28 @@ class MainViewModel(
                 // Auto-save or update router in saved list
                 if (!config.isDemoMode) {
                     val existing = database.appDao().getSavedRouterByIp(config.ipAddress)
-                    database.appDao().insertSavedRouter(
-                        SavedRouterEntity(
-                            id = existing?.id ?: 0,
-                            name = finalRouterName,
-                            ipAddress = config.ipAddress,
-                            port = config.port,
-                            username = config.username,
-                            password = if (config.password.isNotBlank()) config.password else (existing?.password ?: ""),
-                            useHttps = config.useHttps,
-                            lastConnectedTime = System.currentTimeMillis()
-                        )
+                    val routerEntity = SavedRouterEntity(
+                        id = existing?.id ?: 0,
+                        name = finalRouterName,
+                        ipAddress = config.ipAddress,
+                        port = config.port,
+                        username = config.username,
+                        password = if (config.password.isNotBlank()) config.password else (existing?.password ?: ""),
+                        useHttps = config.useHttps,
+                        lastConnectedTime = System.currentTimeMillis()
                     )
+                    val insertedId = database.appDao().insertSavedRouter(routerEntity)
+                    
+                    // Sync to Cloud
+                    syncToCloud("routers", if (routerEntity.id > 0) routerEntity.id.toString() else insertedId.toString(), mapOf(
+                        "id" to if (routerEntity.id > 0) routerEntity.id.toString() else insertedId.toString(),
+                        "name" to finalRouterName,
+                        "ipAddress" to config.ipAddress,
+                        "port" to config.port,
+                        "username" to config.username,
+                        "useHttps" to config.useHttps,
+                        "isDemoMode" to false
+                    ))
 
                     // Persist new cache snapshot
                     if (targetContext != null) {
@@ -1771,7 +1899,7 @@ class MainViewModel(
 
     fun generateBatch(config: BatchGenerationConfig) {
         viewModelScope.launch {
-            val result = repository.generateBatch(config)
+            val result = repository.generateBatch(config, database.appDao())
             if (result.isSuccess) {
                 val cards = result.getOrNull().orEmpty()
                 val batchName = config.batchComment.ifBlank { "دفعة ${cards.size} كروت" }
@@ -1781,6 +1909,7 @@ class MainViewModel(
                 val jsonArr = JSONArray()
                 cards.take(10).forEach { jsonArr.put(it.name) }
                 val batchId = "batch_${System.currentTimeMillis()}"
+                val timestamp = System.currentTimeMillis()
                 database.appDao().insertBatch(
                     BatchHistoryEntity(
                         batchId = batchId,
@@ -1788,15 +1917,38 @@ class MainViewModel(
                         profileName = config.profile,
                         cardCount = cards.size,
                         price = config.price,
-                        createdAt = System.currentTimeMillis(),
+                        createdAt = timestamp,
                         cardsJson = jsonArr.toString()
                     )
                 )
+                
+                // Sync to Cloud
+                syncToCloud("batchHistory", batchId, mapOf(
+                    "id" to batchId,
+                    "profileName" to config.profile,
+                    "count" to cards.size,
+                    "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
+                    "comment" to batchName
+                ))
 
                 // If assigned to a POS Agent, save assignments
                 if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
                     val priceNum = config.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
                     val assignments = cards.map { card ->
+                        val assignAt = System.currentTimeMillis()
+                        val assignmentId = "assign_${card.name}_${assignAt}"
+                        
+                        // Sync Assignment to Cloud
+                        syncToCloud("posCards", assignmentId, mapOf(
+                            "id" to assignmentId,
+                            "agentId" to config.posAgentId.toString(),
+                            "cardName" to card.name,
+                            "profileName" to config.profile,
+                            "priceAmount" to priceNum,
+                            "isSold" to false,
+                            "soldAt" to null
+                        ))
+
                         PosCardAssignmentEntity(
                             agentId = config.posAgentId,
                             agentName = config.posAgentName,
@@ -1805,7 +1957,7 @@ class MainViewModel(
                             profileName = config.profile,
                             priceAmount = priceNum,
                             discountPercent = config.discountPercent,
-                            assignedAt = System.currentTimeMillis(),
+                            assignedAt = assignAt,
                             isSold = false
                         )
                     }
@@ -1857,7 +2009,15 @@ class MainViewModel(
     // ==========================================
     fun addPosAgent(agent: PosAgentEntity) {
         viewModelScope.launch {
-            database.appDao().insertPosAgent(agent)
+            val insertedId = database.appDao().insertPosAgent(agent)
+            
+            // Sync to Cloud
+            syncToCloud("posAgents", insertedId.toString(), mapOf(
+                "id" to insertedId.toString(),
+                "name" to agent.name,
+                "phone" to agent.phone,
+                "discountPercent" to agent.discountPercent
+            ))
             _toastEvent.emit("تمت إضافة نقطة البيع (${agent.name}) بنجاح")
         }
     }
@@ -1879,15 +2039,24 @@ class MainViewModel(
 
     fun recordPosPayment(agentId: Long, agentName: String, amount: Double, note: String) {
         viewModelScope.launch {
-            database.appDao().insertPosPayment(
-                PosPaymentEntity(
-                    agentId = agentId,
-                    agentName = agentName,
-                    amount = amount,
-                    paymentDate = System.currentTimeMillis(),
-                    paymentNote = note.ifBlank { "دفعة نقدية / سداد" }
-                )
+            val timestamp = System.currentTimeMillis()
+            val payment = PosPaymentEntity(
+                agentId = agentId,
+                agentName = agentName,
+                amount = amount,
+                paymentDate = timestamp,
+                paymentNote = note.ifBlank { "دفعة نقدية / سداد" }
             )
+            val insertedId = database.appDao().insertPosPayment(payment)
+            
+            // Sync to Cloud
+            syncToCloud("posPayments", insertedId.toString(), mapOf(
+                "id" to insertedId.toString(),
+                "agentId" to agentId.toString(),
+                "amount" to amount,
+                "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
+                "note" to note.ifBlank { "دفعة نقدية / سداد" }
+            ))
             _toastEvent.emit("تم تسجيل سند قبض بمبلغ ${amount.toInt()} ر.ي بنجاح")
         }
     }
@@ -2125,6 +2294,28 @@ class MainViewModel(
         }
     }
 
+    fun getDatabaseStats(onResult: (Map<String, Int>) -> Unit) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val dao = database.appDao()
+                val stats = mapOf(
+                    "جلسات الأرشيف" to dao.getSessionArchiveCount(),
+                    "سجلات الأحداث" to dao.getSystemEventLogCount(),
+                    "سجلات الأخطاء" to dao.getRouterErrorLogCount(),
+                    "تعيينات الكروت" to dao.getCardAssignmentCount(),
+                    "مدفوعات الوكلاء" to dao.getPosPaymentCount()
+                )
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onResult(stats)
+                }
+            } catch (e: Exception) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onResult(emptyMap())
+                }
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         stopAutoRefresh()
@@ -2134,12 +2325,13 @@ class MainViewModel(
 class MainViewModelFactory(
     private val repository: MikrotikRepository,
     private val database: AppDatabase,
+    private val db: FirebaseFirestore,
     private val appContext: Context? = null
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
-            return MainViewModel(repository, database, appContext) as T
+            return MainViewModel(repository, database, db, appContext) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

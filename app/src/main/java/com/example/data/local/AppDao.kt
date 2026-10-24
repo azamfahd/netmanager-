@@ -128,9 +128,6 @@ interface AppDao {
     @Query("UPDATE session_archive SET isOnline = 0, logoutTime = :logoutTime, terminateReason = :reason, isQuotaExhausted = :isQuotaExhausted WHERE sessionId = :sessionId")
     suspend fun markSessionOffline(sessionId: String, logoutTime: String, reason: String, isQuotaExhausted: Boolean)
 
-    @Query("DELETE FROM session_archive")
-    suspend fun clearSessionArchive()
-
     // ==========================================
     // Router Error Logs
     // ==========================================
@@ -139,9 +136,6 @@ interface AppDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertErrorLog(log: RouterErrorLogEntity)
-
-    @Query("DELETE FROM router_error_logs")
-    suspend fun clearErrorLogs()
 
     // ==========================================
     // User Login & Device History per Subscriber
@@ -167,9 +161,6 @@ interface AppDao {
     @Query("UPDATE user_login_history SET logoutTime = :logoutTime, duration = :duration, bytesIn = :bytesIn, bytesOut = :bytesOut, totalBytes = :totalBytes, terminateReason = :reason, ipAddress = :ipAddress, macAddress = :macAddress, deviceModel = :deviceModel, deviceBrand = :deviceBrand, deviceCategory = :deviceCategory, nodeName = :nodeName WHERE username = :username AND logoutTime = 'متصل الآن'")
     suspend fun finalizeUserLogin(username: String, logoutTime: String, duration: String, bytesIn: Long, bytesOut: Long, totalBytes: Long, reason: String, ipAddress: String, macAddress: String, deviceModel: String, deviceBrand: String, deviceCategory: String, nodeName: String)
 
-    @Query("DELETE FROM user_login_history WHERE username = :username")
-    suspend fun clearLoginHistoryForUser(username: String)
-
     // ==========================================
     // Network Nodes & Heartbeat Status Storage
     // ==========================================
@@ -188,9 +179,6 @@ interface AppDao {
     @Query("DELETE FROM network_nodes WHERE id = :nodeId")
     suspend fun deleteNetworkNodeEntity(nodeId: String)
 
-    @Query("DELETE FROM network_nodes")
-    suspend fun clearAllNetworkNodes()
-
     // ==========================================
     // System Event Logs (Add, Edit, Delete Operations)
     // ==========================================
@@ -203,9 +191,24 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSystemEventLog(log: SystemEventLogEntity): Long
 
-    @Query("DELETE FROM system_event_logs")
-    suspend fun clearAllSystemEventLogs()
-
     @Query("DELETE FROM system_event_logs WHERE id = :id")
     suspend fun deleteSystemEventLogById(id: Long)
+
+    // ==========================================
+    // Database Maintenance & High-Volume Optimization
+    // ==========================================
+    @Query("SELECT COUNT(*) FROM session_archive")
+    suspend fun getSessionArchiveCount(): Int
+
+    @Query("SELECT COUNT(*) FROM system_event_logs")
+    suspend fun getSystemEventLogCount(): Int
+
+    @Query("SELECT COUNT(*) FROM router_error_logs")
+    suspend fun getRouterErrorLogCount(): Int
+
+    @Query("SELECT COUNT(*) FROM pos_card_assignments")
+    suspend fun getCardAssignmentCount(): Int
+
+    @Query("SELECT COUNT(*) FROM pos_payments")
+    suspend fun getPosPaymentCount(): Int
 }

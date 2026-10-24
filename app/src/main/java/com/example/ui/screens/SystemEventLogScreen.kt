@@ -106,7 +106,7 @@ fun SystemEventLogScreen(
 
     var searchQuery by remember { mutableStateOf("") }
     var selectedActionFilter by remember { mutableStateOf("الكل") } // الكل, إضافة, تعديل, حذف, الراوتر, فاشلة
-    var showClearConfirmDialog by remember { mutableStateOf(false) }
+    var showDbManagerDialog by remember { mutableStateOf(false) }
 
     // Filtered logs
     val filteredLogs = remember(eventLogs, searchQuery, selectedActionFilter) {
@@ -167,6 +167,12 @@ fun SystemEventLogScreen(
                 },
                 actions = {
                     IconButton(
+                        onClick = { showDbManagerDialog = true },
+                        modifier = Modifier.testTag("btn_db_manager")
+                    ) {
+                        Icon(Icons.Default.ListAlt, contentDescription = "إدارة وقاعدة البيانات")
+                    }
+                    IconButton(
                         onClick = { shareLogs(context, eventLogs) },
                         enabled = eventLogs.isNotEmpty(),
                         modifier = Modifier.testTag("btn_share_event_logs")
@@ -174,11 +180,11 @@ fun SystemEventLogScreen(
                         Icon(Icons.Default.Share, contentDescription = "مشاركة السجل")
                     }
                     IconButton(
-                        onClick = { showClearConfirmDialog = true },
+                        onClick = { shareLogs(context, eventLogs) },
                         enabled = eventLogs.isNotEmpty(),
-                        modifier = Modifier.testTag("btn_clear_event_logs")
+                        modifier = Modifier.testTag("btn_share_event_logs")
                     ) {
-                        Icon(Icons.Default.DeleteSweep, contentDescription = "مسح السجل", tint = StatusErrorRed)
+                        Icon(Icons.Default.Share, contentDescription = "مشاركة السجل")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -297,34 +303,11 @@ fun SystemEventLogScreen(
         }
     }
 
-    // Clear Confirmation Dialog
-    if (showClearConfirmDialog) {
-        AlertDialog(
-            onDismissRequest = { showClearConfirmDialog = false },
-            icon = { Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = StatusErrorRed, modifier = Modifier.size(36.dp)) },
-            title = { Text("مسح سجل أحداث النظام؟", fontWeight = FontWeight.Bold) },
-            text = {
-                Text(
-                    "هل أنت متأكد من رغبتك في مسح كافة أحداث وسجلات عمليات الراوتر المخزنة محلياً؟ لا يمكن التراجع عن هذه الخطوة.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.clearSystemEventLogs()
-                        showClearConfirmDialog = false
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = StatusErrorRed)
-                ) {
-                    Text("نعم، مسح السجل بالكامل")
-                }
-            },
-            dismissButton = {
-                OutlinedButton(onClick = { showClearConfirmDialog = false }) {
-                    Text("إلغاء")
-                }
-            }
+    // Database Management & Storage Optimization Dialog
+    if (showDbManagerDialog) {
+        DatabaseManagementDialog(
+            viewModel = viewModel,
+            onDismiss = { showDbManagerDialog = false }
         )
     }
 }
@@ -733,3 +716,94 @@ private fun diagnoseError(details: String): Pair<String, String> {
             Pair("حدث خطأ غير متوقع أثناء تنفيذ العملية على الراوتر.", "راجع سجلات الراوتر (Log) وتأكد من حالة الاتصال وصحة البيانات المدخلة.")
     }
 }
+
+@Composable
+private fun DatabaseManagementDialog(
+    viewModel: MainViewModel,
+    onDismiss: () -> Unit
+) {
+    var dbStats by remember { mutableStateOf<Map<String, Int>?>(null) }
+    var isLoadingStats by remember { mutableStateOf(true) }
+    var actionMessage by remember { mutableStateOf<String?>(null) }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        viewModel.getDatabaseStats { stats ->
+            dbStats = stats
+            isLoadingStats = false
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("إدارة وتطوير قاعدة البيانات والذاكرة", fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "نظام إدارة البيانات الضخمة (High-Volume Data Engine) مصمم للتعامل بكفاءة فورية مع آلاف السجلات والكروت وجلسات المستخدمين.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (isLoadingStats) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(100.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(36.dp))
+                    }
+                } else if (dbStats != null) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("إحصائيات الجداول المخزنة محلياً:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            dbStats?.forEach { (tableName, count) ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(tableName, style = MaterialTheme.typography.bodyMedium)
+                                    Text("$count سجل", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = CyberGreenPrimary)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!actionMessage.isNullOrBlank()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = actionMessage ?: "",
+                            modifier = Modifier.padding(10.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+                Text("تأمين وحفظ البيانات:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text(
+                    "يتم حفظ كافة السجلات والعمليات بشكل دائم في قاعدة البيانات المحلية والسحابية (Firestore) لضمان عدم ضياع أي بيانات ولتوفير أرشفة كاملة للنشاط.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CyberGreenPrimary
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("إغلاق")
+            }
+        }
+    )
+}
+

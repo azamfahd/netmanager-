@@ -84,7 +84,6 @@ fun NetworkConsumptionReportView(
 
     var searchExpiredQuery by remember { mutableStateOf("") }
     var cardToReactivate by remember { mutableStateOf<ExpiredCardSummary?>(null) }
-    var showClearArchiveConfirm by remember { mutableStateOf(false) }
 
     val filteredExpiredCards = remember(report.expiredCardsList, searchExpiredQuery) {
         if (searchExpiredQuery.isBlank()) report.expiredCardsList else {
@@ -166,13 +165,7 @@ fun NetworkConsumptionReportView(
                     Text("مشاركة التقرير", fontSize = 12.sp)
                 }
 
-                // Clear Archive Button
-                IconButton(
-                    onClick = { showClearArchiveConfirm = true },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(Icons.Default.DeleteSweep, contentDescription = "تفريغ الأرشيف", tint = MaterialTheme.colorScheme.error)
-                }
+                // Share / Export Report Button
             }
         }
 
@@ -460,20 +453,6 @@ fun NetworkConsumptionReportView(
         )
     }
 
-    // Clear Archive Confirmation Dialog
-    if (showClearArchiveConfirm) {
-        ConfirmDialog(
-            title = "إفراغ أرشيف الجلسات السابقة",
-            message = "هل أنت متأكد من رغبتك في حذف وتفريغ سجل أرشيف الجلسات السابقة المخزنة محلياً؟ لن يؤثر ذلك على كروت الراوتر الحالية.",
-            confirmText = "إفراغ الأرشيف",
-            isDestructive = true,
-            onConfirm = {
-                viewModel.clearSessionArchive()
-                showClearArchiveConfirm = false
-            },
-            onDismiss = { showClearArchiveConfirm = false }
-        )
-    }
 }
 
 @Composable

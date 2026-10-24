@@ -1,12 +1,20 @@
 package com.example.data.local
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.example.data.model.DeviceCategory
 import com.example.data.model.DeviceIdentification
 import com.example.data.model.UserSessionRecord
 
-@Entity(tableName = "session_archive")
+@Entity(
+    tableName = "session_archive",
+    indices = [
+        Index(value = ["username"]),
+        Index(value = ["ipAddress"]),
+        Index(value = ["timestamp"])
+    ]
+)
 data class SessionArchiveEntity(
     @PrimaryKey
     val sessionId: String,

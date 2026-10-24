@@ -1,13 +1,20 @@
 package com.example.data.local
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
  * Entity to persist System Event Logs for all Add, Edit, Delete, and Control operations
  * performed on the MikroTik router or local system.
  */
-@Entity(tableName = "system_event_logs")
+@Entity(
+    tableName = "system_event_logs",
+    indices = [
+        Index(value = ["timestamp"]),
+        Index(value = ["actionType"])
+    ]
+)
 data class SystemEventLogEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,

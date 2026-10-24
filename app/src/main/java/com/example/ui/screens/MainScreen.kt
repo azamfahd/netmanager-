@@ -101,6 +101,7 @@ enum class AppTab(val title: String, val icon: ImageVector) {
 @Composable
 fun MainScreen(
     viewModel: MainViewModel,
+    onTriggerSignIn: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
@@ -592,7 +593,8 @@ fun MainScreen(
                     AppTab.TOOLS -> {
                         NetworkToolsScreen(
                             viewModel = viewModel,
-                            onOpenSystemEventLog = { isShowingSystemEventLogScreen = true }
+                            onOpenSystemEventLog = { isShowingSystemEventLogScreen = true },
+                            onTriggerSignIn = onTriggerSignIn
                         )
                     }
                 }
