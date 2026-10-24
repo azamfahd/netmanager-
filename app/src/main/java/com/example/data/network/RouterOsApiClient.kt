@@ -362,7 +362,22 @@ class RouterOsApiClient {
         return withContext(Dispatchers.IO) {
             try {
                 ensureConnected()
-                val target = if (profile.id.startsWith("*")) "=.id=${profile.id}" else "=numbers=${profile.name}"
+                var profileId = profile.id
+                if (!profileId.startsWith("*")) {
+                    writeSentence(listOf("/ip/hotspot/user/profile/print"))
+                    val sentences = readAllSentencesUntilDone()
+                    for (s in sentences) {
+                        if (s.firstOrNull() == "!re") {
+                            val map = parseSentenceToMap(s)
+                            if (map["name"]?.trim().equals(profile.name.trim(), ignoreCase = true)) {
+                                profileId = map[".id"] ?: profileId
+                                break
+                            }
+                        }
+                    }
+                }
+
+                val target = if (profileId.startsWith("*")) "=.id=$profileId" else "=name=${profile.name}"
                 val words = mutableListOf("/ip/hotspot/user/profile/set", target)
                 val cleanRateLimit = profile.rateLimit.trim()
                 if (cleanRateLimit.isNotBlank() && cleanRateLimit != "غير محدد" && cleanRateLimit != "مفتوح") {
@@ -673,8 +688,15 @@ class RouterOsApiClient {
         return withContext(Dispatchers.IO) {
             try {
                 ensureConnected()
+                val profileName = card.profile.trim()
+                if (profileName.isNotBlank() && profileName != "default") {
+                    try {
+                        addProfile(HotspotProfile(id = "", name = profileName, rateLimit = "غير محدد"))
+                    } catch (_: Exception) {}
+                }
+
                 val targetProfile = synchronized(cachedProfiles) {
-                    cachedProfiles.firstOrNull { it.name.trim().equals(card.profile.trim(), ignoreCase = true) }
+                    cachedProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) }
                 }
                 val source = targetProfile?.source ?: ""
 

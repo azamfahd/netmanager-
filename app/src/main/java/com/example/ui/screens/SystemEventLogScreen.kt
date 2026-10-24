@@ -548,6 +548,25 @@ private fun EventLogCard(
                         )
                     }
 
+                    if (isFailed) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        val (rootCause, tip) = diagnoseError(log.details.ifBlank { log.description })
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = StatusErrorRed.copy(alpha = 0.08f),
+                            border = BorderStroke(1.dp, StatusErrorRed.copy(alpha = 0.3f))
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Icon(androidx.compose.material.icons.Icons.Default.Warning, contentDescription = null, tint = StatusErrorRed, modifier = Modifier.size(14.dp))
+                                    Text("التشخيص الذكي لسبب الخطأ:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = StatusErrorRed)
+                                }
+                                Text("السبب الجذري: $rootCause", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+                                Text("💡 الحل المقترح: $tip", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = RouterBlue)
+                            }
+                        }
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.End
@@ -695,4 +714,22 @@ private fun shareLogs(context: Context, logs: List<SystemEventLogEntity>) {
         putExtra(Intent.EXTRA_TEXT, sb.toString())
     }
     context.startActivity(Intent.createChooser(intent, "تصدير سجل أحداث النظام"))
+}
+
+private fun diagnoseError(details: String): Pair<String, String> {
+    val lower = details.lowercase()
+    return when {
+        lower.contains("profile") || lower.contains("not match") ->
+            Pair("اسم الباقة أو الملف الشخصي غير موجود أو غير مطابق في راوتر الميكروتك.", "تأكد من إنشاء الباقة بنفس الاسم في قسم 'باقات السرعات والأسعار' قبل محاولة إضافة كروت إليها.")
+        lower.contains("unknown parameter") || lower.contains("invalid") ->
+            Pair("إرسال معلمات أو بارامترات غير مدعومة من إصدار نظام الراوتر.", "تأكد من توافق إصدار النظام أو عدم إرسال قيم غير صالحة للراوتر.")
+        lower.contains("socket") || lower.contains("connect") || lower.contains("timeout") ->
+            Pair("فشل الاتصال بسيرفر الميكروتك (انقطاع الشبكة أو خطأ في العنوان/البورت).", "تحقق من اتصال الشبكة، صحة عنوان IP الراوتر، وبورت الـ API.")
+        lower.contains("logged in") || lower.contains("permission") || lower.contains("trap") ->
+            Pair("رفض الصلاحية أو خطأ في بيانات المصادقة (اسم المستخدم أو كلمة المرور).", "تأكد من صحة بيانات الدخول ومنح حساب الـ API صلاحيات كاملة (Full).")
+        lower.contains("already exists") ->
+            Pair("العنصر المراد إضافته موجود مسبقاً على الراوتر.", "قم بحذف العنصر القديم أولاً أو استخدام اسم مختلف.")
+        else ->
+            Pair("حدث خطأ غير متوقع أثناء تنفيذ العملية على الراوتر.", "راجع سجلات الراوتر (Log) وتأكد من حالة الاتصال وصحة البيانات المدخلة.")
+    }
 }
