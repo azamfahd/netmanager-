@@ -23,7 +23,6 @@ object AppUpdateManager {
     private const val GITHUB_OWNER = "azamfahd"
     private const val GITHUB_REPO = "netmanager-"
     const val GITHUB_RELEASES_WEB_URL = "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases"
-    private const val GITHUB_API_LATEST_RELEASE = "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -33,82 +32,122 @@ object AppUpdateManager {
 
     /**
      * Checks GitHub API for the latest published release.
+     * Tries primary repo, fallback repo name, /releases/latest, and /releases array.
      * Returns Pair<GitHubReleaseInfo, isNewerVersion>.
      */
     suspend fun checkLatestRelease(currentVersion: String): Result<Pair<GitHubReleaseInfo, Boolean>> = withContext(Dispatchers.IO) {
-        try {
-            val request = Request.Builder()
-                .url(GITHUB_API_LATEST_RELEASE)
-                .header("Accept", "application/vnd.github.v3+json")
-                .header("User-Agent", "NetManager-Android-App")
-                .build()
+        val repoCandidates = listOf(
+            Pair(GITHUB_OWNER, GITHUB_REPO),
+            Pair(GITHUB_OWNER, "netmanager")
+        )
 
-            val response = httpClient.newCall(request).execute()
-            val code = response.code
-            val bodyString = response.body?.string()
+        var lastError: String? = null
+        var isRateLimited = false
 
-            if (!response.isSuccessful || bodyString == null) {
-                if (code == 404) {
-                    return@withContext Result.failure(
-                        Exception("لم يتم العثور على إصدارات منشورة بعد في مستودع GitHub. قم بنشر Release أولاً عبر GitHub Actions.")
-                    )
-                } else if (code == 403) {
-                    return@withContext Result.failure(
-                        Exception("تم تجاوز حد طلبات GitHub المؤقت (Rate Limit). يرجى المحاولة بعد قليل أو زيارة صفحة الإصدارات مباشرة.")
-                    )
-                } else {
-                    return@withContext Result.failure(
-                        Exception("فشل الاتصال بخادم GitHub (رمز الخطأ: $code)")
-                    )
+        for ((owner, repo) in repoCandidates) {
+            try {
+                // 1. Try /releases/latest first
+                val latestUrl = "https://api.github.com/repos/$owner/$repo/releases/latest"
+                val reqLatest = Request.Builder()
+                    .url(latestUrl)
+                    .header("Accept", "application/vnd.github.v3+json")
+                    .header("User-Agent", "NetManager-Android-App")
+                    .build()
+
+                val respLatest = httpClient.newCall(reqLatest).execute()
+                val codeLatest = respLatest.code
+                val bodyLatest = respLatest.body?.string()
+
+                if (respLatest.isSuccessful && !bodyLatest.isNullOrBlank()) {
+                    val json = JSONObject(bodyLatest)
+                    val releaseInfo = parseReleaseJson(json, "https://github.com/$owner/$repo/releases")
+                    val isNewer = isVersionNewer(releaseInfo.tagName, currentVersion)
+                    return@withContext Result.success(Pair(releaseInfo, isNewer))
                 }
-            }
 
-            val json = JSONObject(bodyString)
-            val tagName = json.optString("tag_name", "")
-            val name = json.optString("name", tagName.ifBlank { "إصدار جديد" })
-            val body = json.optString("body", "")
-            val publishedAt = json.optString("published_at", "")
-            val htmlUrl = json.optString("html_url", GITHUB_RELEASES_WEB_URL)
+                if (codeLatest == 403) {
+                    isRateLimited = true
+                }
 
-            val assetsArray = json.optJSONArray("assets")
-            var apkAsset: GitHubReleaseAsset? = null
+                // 2. If 404, fallback to /releases array (in case latest tag is pre-release or untagged latest)
+                val allReleasesUrl = "https://api.github.com/repos/$owner/$repo/releases?per_page=5"
+                val reqAll = Request.Builder()
+                    .url(allReleasesUrl)
+                    .header("Accept", "application/vnd.github.v3+json")
+                    .header("User-Agent", "NetManager-Android-App")
+                    .build()
 
-            if (assetsArray != null) {
-                for (i in 0 until assetsArray.length()) {
-                    val assetJson = assetsArray.getJSONObject(i)
-                    val assetName = assetJson.optString("name", "")
-                    val assetSize = assetJson.optLong("size", 0L)
-                    val downloadUrl = assetJson.optString("browser_download_url", "")
-                    val contentType = assetJson.optString("content_type", "")
-
-                    if (assetName.endsWith(".apk", ignoreCase = true) ||
-                        contentType.contains("android.package-archive", ignoreCase = true)
-                    ) {
-                        apkAsset = GitHubReleaseAsset(
-                            name = assetName,
-                            size = assetSize,
-                            downloadUrl = downloadUrl,
-                            contentType = contentType
-                        )
-                        break
+                val respAll = httpClient.newCall(reqAll).execute()
+                val bodyAll = respAll.body?.string()
+                if (respAll.isSuccessful && !bodyAll.isNullOrBlank()) {
+                    val array = org.json.JSONArray(bodyAll)
+                    if (array.length() > 0) {
+                        val firstRelease = array.getJSONObject(0)
+                        val releaseInfo = parseReleaseJson(firstRelease, "https://github.com/$owner/$repo/releases")
+                        val isNewer = isVersionNewer(releaseInfo.tagName, currentVersion)
+                        return@withContext Result.success(Pair(releaseInfo, isNewer))
                     }
                 }
+
+                if (codeLatest == 404) {
+                    lastError = "لم يتم العثور على إصدارات منشورة في GitHub ($owner/$repo). قم بنشر Release أولاً عبر GitHub Actions."
+                } else if (codeLatest == 403) {
+                    lastError = "تم تجاوز حد طلبات GitHub المؤقت (Rate Limit). يرجى المحاولة بعد قليل أو زيارة صفحة الإصدارات مباشرة."
+                } else {
+                    lastError = "فشل الاتصال بخادم GitHub (رمز الخطأ: $codeLatest)"
+                }
+            } catch (e: Exception) {
+                lastError = "تعذر الاتصال بـ GitHub: ${e.localizedMessage ?: e.message}"
             }
-
-            val releaseInfo = GitHubReleaseInfo(
-                tagName = tagName,
-                name = name,
-                body = body,
-                publishedAt = publishedAt,
-                htmlUrl = htmlUrl,
-                apkAsset = apkAsset
-            )
-
-            val isNewer = isVersionNewer(tagName, currentVersion)
-            Result.success(Pair(releaseInfo, isNewer))
-        } catch (e: Exception) {
-            Result.failure(Exception("تعذر الاتصال بـ GitHub للتحقق من التحديثات: ${e.localizedMessage ?: e.message}"))
         }
+
+        if (isRateLimited) {
+            Result.failure(Exception("تم تجاوز حد طلبات GitHub المؤقت (Rate Limit). يرجى فتح صفحة المستودع: $GITHUB_RELEASES_WEB_URL"))
+        } else {
+            Result.failure(Exception(lastError ?: "تعذر التحقق من تحديثات GitHub"))
+        }
+    }
+
+    private fun parseReleaseJson(json: JSONObject, fallbackHtmlUrl: String): GitHubReleaseInfo {
+        val tagName = json.optString("tag_name", "")
+        val name = json.optString("name", tagName.ifBlank { "إصدار جديد" })
+        val body = json.optString("body", "")
+        val publishedAt = json.optString("published_at", "")
+        val htmlUrl = json.optString("html_url", fallbackHtmlUrl)
+
+        val assetsArray = json.optJSONArray("assets")
+        var apkAsset: GitHubReleaseAsset? = null
+
+        if (assetsArray != null) {
+            for (i in 0 until assetsArray.length()) {
+                val assetJson = assetsArray.getJSONObject(i)
+                val assetName = assetJson.optString("name", "")
+                val assetSize = assetJson.optLong("size", 0L)
+                val downloadUrl = assetJson.optString("browser_download_url", "")
+                val contentType = assetJson.optString("content_type", "")
+
+                if (assetName.endsWith(".apk", ignoreCase = true) ||
+                    contentType.contains("android.package-archive", ignoreCase = true)
+                ) {
+                    apkAsset = GitHubReleaseAsset(
+                        name = assetName,
+                        size = assetSize,
+                        downloadUrl = downloadUrl,
+                        contentType = contentType
+                    )
+                    break
+                }
+            }
+        }
+
+        return GitHubReleaseInfo(
+            tagName = tagName,
+            name = name,
+            body = body,
+            publishedAt = publishedAt,
+            htmlUrl = htmlUrl,
+            apkAsset = apkAsset
+        )
     }
 
     /**

@@ -22,6 +22,7 @@ import kotlin.random.Random
 
 class RouterOsApiClient {
 
+    private val socketLock = Any()
     private var socket: Socket? = null
     private var inStream: InputStream? = null
     private var outStream: OutputStream? = null
@@ -30,6 +31,8 @@ class RouterOsApiClient {
     private var lastPort: Int = 8728
     private var lastUsername: String = ""
     private var lastPassword: String = ""
+
+    private var lastExecutionSentences: List<List<String>> = emptyList()
 
     private val cachedProfiles = mutableListOf<HotspotProfile>()
 
@@ -358,21 +361,39 @@ class RouterOsApiClient {
     suspend fun updateProfile(profile: HotspotProfile): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                val words = mutableListOf("/ip/hotspot/user/profile/set", "=.id=${profile.id}")
-                if (profile.rateLimit.isNotBlank() && profile.rateLimit != "غير محدد") {
-                    words.add("=rate-limit=${profile.rateLimit}")
+                ensureConnected()
+                val target = if (profile.id.startsWith("*")) "=.id=${profile.id}" else "=numbers=${profile.name}"
+                val words = mutableListOf("/ip/hotspot/user/profile/set", target)
+                val cleanRateLimit = profile.rateLimit.trim()
+                if (cleanRateLimit.isNotBlank() && cleanRateLimit != "غير محدد" && cleanRateLimit != "مفتوح") {
+                    words.add("=rate-limit=$cleanRateLimit")
                 }
-                words.add("=shared-users=${profile.sharedUsers}")
-                if (profile.sessionTimeout.isNotBlank() && profile.sessionTimeout != "غير محدد") {
-                    words.add("=session-timeout=${profile.sessionTimeout}")
+                words.add("=shared-users=${if (profile.sharedUsers > 0) profile.sharedUsers else 1}")
+                val cleanTimeout = profile.sessionTimeout.trim()
+                if (cleanTimeout.isNotBlank() && cleanTimeout != "غير محدد") {
+                    val formattedTimeout = formatRouterOsTime(cleanTimeout)
+                    if (!formattedTimeout.isNullOrBlank()) {
+                        words.add("=session-timeout=$formattedTimeout")
+                    }
                 }
-                if (profile.price.isNotBlank()) {
+                if (profile.price.isNotBlank() && profile.price != "0" && profile.price != "مجاني") {
                     words.add("=comment=price=${profile.price}")
+                } else if (profile.comment.isNotBlank()) {
+                    words.add("=comment=${profile.comment}")
                 }
-                writeSentence(words)
-                val sentences = readAllSentencesUntilDone()
+
+                val sentences = executeSentence(words)
+                val trapSentence = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (trapSentence != null) {
+                    val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                        ?: "فشل تحديث الباقة في راوتر ميكروتك"
+                    return@withContext Result.failure(Exception(trapMsg))
+                }
                 val isDone = sentences.any { it.firstOrNull() == "!done" }
-                Result.success(isDone)
+                if (!isDone) {
+                    return@withContext Result.failure(Exception("لم يؤكد الراوتر تعديل الباقة"))
+                }
+                Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -584,21 +605,36 @@ class RouterOsApiClient {
                     return Result.failure(Exception("لم يؤكد الراوتر حذف الكرت"))
                 }
 
+                val targetName = cardName.ifBlank { cardId }
+
                 // 1. Try Hotspot removal
-                val hsRes = executeRemoval(listOf("/ip/hotspot/user/remove", "=.id=$cardId"))
-                if (hsRes.isSuccess) return@withContext hsRes
+                if (cardId.startsWith("*")) {
+                    val hsRes = executeRemoval(listOf("/ip/hotspot/user/remove", "=.id=$cardId"))
+                    if (hsRes.isSuccess) return@withContext hsRes
+                }
+                if (targetName.isNotBlank()) {
+                    val hsNameRes = executeRemoval(listOf("/ip/hotspot/user/remove", "=numbers=$targetName"))
+                    if (hsNameRes.isSuccess) return@withContext hsNameRes
+                }
 
                 // 2. Try User Manager v7
-                val um7Res = executeRemoval(listOf("/user-manager/user/remove", "=.id=$cardId"))
-                if (um7Res.isSuccess) return@withContext um7Res
+                if (cardId.startsWith("*")) {
+                    val um7Res = executeRemoval(listOf("/user-manager/user/remove", "=.id=$cardId"))
+                    if (um7Res.isSuccess) return@withContext um7Res
+                }
+                if (targetName.isNotBlank()) {
+                    val um7NameRes = executeRemoval(listOf("/user-manager/user/remove", "=numbers=$targetName"))
+                    if (um7NameRes.isSuccess) return@withContext um7NameRes
+                }
 
                 // 3. Try User Manager v6
-                val targetName = cardName.ifBlank { cardId }
-                val um6Res = executeRemoval(listOf("/tool/user-manager/user/remove", "=numbers=$targetName"))
-                if (um6Res.isSuccess) return@withContext um6Res
+                if (targetName.isNotBlank()) {
+                    val um6Res = executeRemoval(listOf("/tool/user-manager/user/remove", "=numbers=$targetName"))
+                    if (um6Res.isSuccess) return@withContext um6Res
+                }
 
                 // If all failed, return failure
-                Result.failure(Exception("فشل حذف الكرت من كافة المسارات: ${hsRes.exceptionOrNull()?.message}"))
+                Result.failure(Exception("فشل حذف الكرت من كافة المسارات بالراوتر ($targetName)"))
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -693,8 +729,14 @@ class RouterOsApiClient {
     }
 
     private fun addHotspotNativeUser(card: HotspotCard): Result<Boolean> {
-        val words = mutableListOf("/ip/hotspot/user/add", "=name=${card.name}", "=password=${card.password}")
-        if (card.profile.isNotBlank()) words.add("=profile=${card.profile}")
+        val cleanProfile = card.profile.trim()
+        val words = mutableListOf(
+            "/ip/hotspot/user/add",
+            "=name=${card.name.trim()}",
+            "=password=${card.password}",
+            "=disabled=no"
+        )
+        if (cleanProfile.isNotBlank()) words.add("=profile=$cleanProfile")
         val validUptime = formatRouterOsTime(card.limitUptime)
         if (!validUptime.isNullOrBlank()) {
             words.add("=limit-uptime=$validUptime")
@@ -712,10 +754,20 @@ class RouterOsApiClient {
         if (trapSentence != null) {
             val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                 ?: "رفض راوتر ميكروتك إضافة الكرت"
-            // If failed due to argument issue (e.g. limit-uptime or limit-bytes-total unsupported), retry simple add
-            if (trapMsg.contains("argument", ignoreCase = true) || trapMsg.contains("limit", ignoreCase = true)) {
-                val simpleWords = mutableListOf("/ip/hotspot/user/add", "=name=${card.name}", "=password=${card.password}")
-                if (card.profile.isNotBlank()) simpleWords.add("=profile=${card.profile}")
+            // If failed due to argument issue (e.g. limit-uptime or limit-bytes-total unsupported or malformed), retry strict profile add
+            if (cleanProfile.isNotBlank() && (
+                trapMsg.contains("argument", ignoreCase = true) ||
+                trapMsg.contains("limit", ignoreCase = true) ||
+                trapMsg.contains("invalid", ignoreCase = true) ||
+                trapMsg.contains("value", ignoreCase = true)
+            )) {
+                val simpleWords = mutableListOf(
+                    "/ip/hotspot/user/add",
+                    "=name=${card.name.trim()}",
+                    "=password=${card.password}",
+                    "=profile=$cleanProfile",
+                    "=disabled=no"
+                )
                 if (card.comment.isNotBlank()) simpleWords.add("=comment=${card.comment}")
                 writeSentence(simpleWords)
                 val retrySentences = readAllSentencesUntilDone()
@@ -735,7 +787,7 @@ class RouterOsApiClient {
 
     private fun addUserManagerV7User(card: HotspotCard): Result<Boolean> {
         try {
-            val words = mutableListOf("/user-manager/user/add", "=name=${card.name}", "=password=${card.password}")
+            val words = mutableListOf("/user-manager/user/add", "=name=${card.name}", "=password=${card.password}", "=disabled=no")
             if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
             writeSentence(words)
             val sentences = readAllSentencesUntilDone()
@@ -768,7 +820,8 @@ class RouterOsApiClient {
                 "/tool/user-manager/user/add",
                 "=username=${card.name}",
                 "=password=${card.password}",
-                "=customer=$cust"
+                "=customer=$cust",
+                "=disabled=no"
             )
             if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
             writeSentence(words)
@@ -844,14 +897,17 @@ class RouterOsApiClient {
                     return@withContext Result.success(true)
                 }
 
+                val target = if (card.id.startsWith("*")) "=.id=${card.id}" else "=numbers=${card.name}"
+                val cleanProfile = card.profile.trim()
                 val words = mutableListOf(
                     "/ip/hotspot/user/set",
-                    "=.id=${card.id}",
+                    target,
                     "=name=${card.name}",
                     "=password=${card.password}",
-                    "=profile=${card.profile}",
-                    "=comment=${card.comment}"
+                    "=disabled=no"
                 )
+                if (cleanProfile.isNotBlank()) words.add("=profile=$cleanProfile")
+                if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
                 val validUptime = formatRouterOsTime(card.limitUptime)
                 if (!validUptime.isNullOrBlank()) {
                     words.add("=limit-uptime=$validUptime")
@@ -860,7 +916,21 @@ class RouterOsApiClient {
                     words.add("=limit-bytes-total=${card.limitBytesTotal}")
                 }
                 writeSentence(words)
-                readAllSentencesUntilDone()
+                val sentences = readAllSentencesUntilDone()
+                val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (trap != null && !card.id.startsWith("*")) {
+                    // Try with pure profile and disabled=no
+                    val retryWords = mutableListOf(
+                        "/ip/hotspot/user/set",
+                        "=numbers=${card.name}",
+                        "=password=${card.password}",
+                        "=disabled=no"
+                    )
+                    if (cleanProfile.isNotBlank()) retryWords.add("=profile=$cleanProfile")
+                    if (card.comment.isNotBlank()) retryWords.add("=comment=${card.comment}")
+                    writeSentence(retryWords)
+                    readAllSentencesUntilDone()
+                }
                 Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -952,9 +1022,13 @@ class RouterOsApiClient {
                         words.add("=session-timeout=$formattedTimeout")
                     }
                 }
+                if (profile.price.isNotBlank() && profile.price != "0" && profile.price != "مجاني") {
+                    words.add("=comment=price=${profile.price}")
+                } else if (profile.comment.isNotBlank()) {
+                    words.add("=comment=${profile.comment}")
+                }
 
-                writeSentence(words)
-                val sentences = readAllSentencesUntilDone()
+                val sentences = executeSentence(words)
                 val trapSentence = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                 if (trapSentence != null) {
                     val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
@@ -979,21 +1053,33 @@ class RouterOsApiClient {
         return withContext(Dispatchers.IO) {
             try {
                 ensureConnected()
+                val targetName = profileName.ifBlank { profileId }
+
                 // 1. Try Hotspot profile removal
-                writeSentence(listOf("/ip/hotspot/user/profile/remove", "=.id=$profileId"))
-                val s1 = readAllSentencesUntilDone()
-                if (s1.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+                if (profileId.startsWith("*")) {
+                    val s1 = executeSentence(listOf("/ip/hotspot/user/profile/remove", "=.id=$profileId"))
+                    if (s1.any { it.firstOrNull() == "!done" } && s1.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                }
+                if (targetName.isNotBlank()) {
+                    val s1b = executeSentence(listOf("/ip/hotspot/user/profile/remove", "=numbers=$targetName"))
+                    if (s1b.any { it.firstOrNull() == "!done" } && s1b.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                }
 
                 // 2. Try User Manager v7 profile removal
-                writeSentence(listOf("/user-manager/profile/remove", "=.id=$profileId"))
-                val s2 = readAllSentencesUntilDone()
-                if (s2.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+                if (profileId.startsWith("*")) {
+                    val s2 = executeSentence(listOf("/user-manager/profile/remove", "=.id=$profileId"))
+                    if (s2.any { it.firstOrNull() == "!done" } && s2.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                }
+                if (targetName.isNotBlank()) {
+                    val s2b = executeSentence(listOf("/user-manager/profile/remove", "=numbers=$targetName"))
+                    if (s2b.any { it.firstOrNull() == "!done" } && s2b.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                }
 
                 // 3. Try User Manager v6 profile removal
-                val name = profileName.ifBlank { profileId }
-                writeSentence(listOf("/tool/user-manager/profile/remove", "=numbers=$name"))
-                val s3 = readAllSentencesUntilDone()
-                if (s3.any { it.firstOrNull() == "!done" }) return@withContext Result.success(true)
+                if (targetName.isNotBlank()) {
+                    val s3 = executeSentence(listOf("/tool/user-manager/profile/remove", "=numbers=$targetName"))
+                    if (s3.any { it.firstOrNull() == "!done" } && s3.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                }
 
                 Result.success(true)
             } catch (e: Exception) {
@@ -1277,6 +1363,87 @@ class RouterOsApiClient {
         return map
     }
 
+    private fun reconnectInternal() {
+        close()
+        val cleanHost = lastHost.trim()
+        val cleanUser = lastUsername.trim()
+        if (cleanHost.isBlank() || cleanUser.isBlank()) return
+
+        val sock = Socket()
+        sock.connect(InetSocketAddress(cleanHost, lastPort), 5000)
+        sock.soTimeout = 8000
+        socket = sock
+        inStream = sock.getInputStream()
+        outStream = sock.getOutputStream()
+
+        writeSentenceWithoutRetry(listOf("/login", "=name=$cleanUser", "=password=$lastPassword"))
+        val response = readSentenceWithoutRetry()
+        val replyType = response.firstOrNull() ?: ""
+
+        if (replyType == "!done" && response.none { it.startsWith("=ret=") }) {
+            return
+        }
+
+        val challengeParam = response.firstOrNull { it.startsWith("=ret=") }
+        if (replyType == "!done" && challengeParam != null) {
+            val challengeHex = challengeParam.removePrefix("=ret=")
+            val challengeBytes = hexStringToByteArray(challengeHex)
+            val md5 = MessageDigest.getInstance("MD5")
+            md5.update(0.toByte())
+            md5.update(lastPassword.toByteArray(Charsets.UTF_8))
+            md5.update(challengeBytes)
+            val digestHex = byteArrayToHexString(md5.digest())
+            val responseHash = "00$digestHex"
+
+            writeSentenceWithoutRetry(listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
+            readSentenceWithoutRetry()
+        }
+    }
+
+    fun executeSentence(words: List<String>): List<List<String>> = synchronized(socketLock) {
+        var attempts = 0
+        while (attempts < 2) {
+            attempts++
+            try {
+                if (socket == null || socket?.isClosed == true || socket?.isConnected != true) {
+                    if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
+                        reconnectInternal()
+                    }
+                }
+                val out = outStream ?: throw IllegalStateException("Socket is not connected")
+                val inS = inStream ?: throw IllegalStateException("Socket is not connected")
+
+                for (word in words) {
+                    writeWord(out, word)
+                }
+                out.write(0x00) // End of sentence
+                out.flush()
+
+                val sentences = mutableListOf<List<String>>()
+                while (true) {
+                    val sentence = mutableListOf<String>()
+                    while (true) {
+                        val word = readWord(inS)
+                        if (word.isEmpty()) break
+                        sentence.add(word)
+                    }
+                    if (sentence.isEmpty()) break
+                    sentences.add(sentence)
+                    val first = sentence.firstOrNull() ?: ""
+                    if (first == "!done" || first == "!fatal") break
+                }
+                lastExecutionSentences = sentences
+                return sentences
+            } catch (e: Exception) {
+                close()
+                if (attempts >= 2 || lastHost.isBlank()) {
+                    throw e
+                }
+            }
+        }
+        return emptyList()
+    }
+
     @Synchronized
     private fun writeSentenceWithoutRetry(words: List<String>) {
         val out = outStream ?: throw IllegalStateException("Socket is not connected")
@@ -1301,66 +1468,25 @@ class RouterOsApiClient {
 
     @Synchronized
     private fun writeSentence(words: List<String>) {
-        try {
-            writeSentenceWithoutRetry(words)
-        } catch (e: Exception) {
-            try {
-                if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
-                    close()
-                    val sock = Socket()
-                    sock.connect(InetSocketAddress(lastHost, lastPort), 5000)
-                    sock.soTimeout = 8000
-                    socket = sock
-                    inStream = sock.getInputStream()
-                    outStream = sock.getOutputStream()
-                    writeSentenceWithoutRetry(listOf("/login", "=name=$lastUsername", "=password=$lastPassword"))
-                    readSentenceWithoutRetry()
-
-                    writeSentenceWithoutRetry(words)
-                    return
-                }
-            } catch (_: Exception) {}
-            throw e
-        }
+        executeSentence(words)
     }
 
     @Synchronized
     private fun readSentence(): List<String> {
-        try {
-            return readSentenceWithoutRetry()
-        } catch (e: Exception) {
-            try {
-                if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
-                    close()
-                    val sock = Socket()
-                    sock.connect(InetSocketAddress(lastHost, lastPort), 5000)
-                    sock.soTimeout = 8000
-                    socket = sock
-                    inStream = sock.getInputStream()
-                    outStream = sock.getOutputStream()
-                    writeSentenceWithoutRetry(listOf("/login", "=name=$lastUsername", "=password=$lastPassword"))
-                    readSentenceWithoutRetry()
-
-                    return readSentenceWithoutRetry()
-                }
-            } catch (_: Exception) {}
-            throw e
+        return if (lastExecutionSentences.isNotEmpty()) {
+            val s = lastExecutionSentences.first()
+            lastExecutionSentences = lastExecutionSentences.drop(1)
+            s
+        } else {
+            emptyList()
         }
     }
 
     @Synchronized
     private fun readAllSentencesUntilDone(): List<List<String>> {
-        val sentences = mutableListOf<List<String>>()
-        while (true) {
-            val sentence = readSentence()
-            if (sentence.isEmpty()) break
-            sentences.add(sentence)
-            val first = sentence.firstOrNull() ?: ""
-            if (first == "!done" || first == "!fatal") {
-                break
-            }
-        }
-        return sentences
+        val res = lastExecutionSentences
+        lastExecutionSentences = emptyList()
+        return res
     }
 
     private fun writeWord(out: OutputStream, word: String) {

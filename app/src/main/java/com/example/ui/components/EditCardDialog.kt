@@ -211,12 +211,27 @@ fun EditCardDialog(
                     value = timeLimit,
                     onValueChange = { timeLimit = it },
                     readOnly = isProfileValid,
-                    label = { Text("حد الوقت (مثال: 1d أو 2h)") },
+                    label = { Text("مهلة الوقت / الصلاحية") },
                     leadingIcon = { Icon(Icons.Default.Timer, contentDescription = null) },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     singleLine = true
                 )
+
+                if (isProfileValid) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "🔒 تفاصيل الباقة (السعر والوقت والسرعة) مقفلة ومطابقة لإعدادات راوتر MikroTik لضمان تفعيل الكرت بشكل صحيح ومباشر.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+                }
 
                 // Comment
                 OutlinedTextField(

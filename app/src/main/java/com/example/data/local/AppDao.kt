@@ -190,4 +190,22 @@ interface AppDao {
 
     @Query("DELETE FROM network_nodes")
     suspend fun clearAllNetworkNodes()
+
+    // ==========================================
+    // System Event Logs (Add, Edit, Delete Operations)
+    // ==========================================
+    @Query("SELECT * FROM system_event_logs ORDER BY timestamp DESC LIMIT 300")
+    fun getAllSystemEventLogs(): Flow<List<SystemEventLogEntity>>
+
+    @Query("SELECT * FROM system_event_logs WHERE actionType = :actionType ORDER BY timestamp DESC")
+    fun getSystemEventLogsByAction(actionType: String): Flow<List<SystemEventLogEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSystemEventLog(log: SystemEventLogEntity): Long
+
+    @Query("DELETE FROM system_event_logs")
+    suspend fun clearAllSystemEventLogs()
+
+    @Query("DELETE FROM system_event_logs WHERE id = :id")
+    suspend fun deleteSystemEventLogById(id: Long)
 }

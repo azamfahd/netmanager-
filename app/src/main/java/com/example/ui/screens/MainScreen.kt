@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.SystemUpdate
 import com.example.data.model.UpdateCheckState
@@ -114,6 +115,7 @@ fun MainScreen(
     var preselectedAgentIdForBatch by remember { mutableLongStateOf(0L) }
     var isShowingPrintScreen by remember { mutableStateOf(false) }
     var isShowingAdminAuditScreen by remember { mutableStateOf(false) }
+    var isShowingSystemEventLogScreen by remember { mutableStateOf(false) }
     var selectedSessionForDetailScreen by remember { mutableStateOf<com.example.data.model.UserSessionRecord?>(null) }
     var showWelcomeDialog by remember { mutableStateOf(true) }
     var showUpdateDialog by remember { mutableStateOf(false) }
@@ -128,6 +130,16 @@ fun MainScreen(
         viewModel.toastEvent.collectLatest { message ->
             snackbarHostState.showSnackbar(message)
         }
+    }
+
+    // If showing system event log screen
+    if (isShowingSystemEventLogScreen) {
+        BackHandler { isShowingSystemEventLogScreen = false }
+        SystemEventLogScreen(
+            viewModel = viewModel,
+            onBackClick = { isShowingSystemEventLogScreen = false }
+        )
+        return
     }
 
     // If showing admin audit and permissions screen
@@ -217,6 +229,34 @@ fun MainScreen(
                 },
                 actions = {
                     val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
+                    val systemLogs by viewModel.systemEventLogs.collectAsStateWithLifecycle()
+
+                    // System Event Log Icon button
+                    IconButton(
+                        onClick = { isShowingSystemEventLogScreen = true },
+                        modifier = Modifier
+                            .padding(end = 2.dp)
+                            .testTag("btn_system_event_log_topbar")
+                    ) {
+                        Box {
+                            Icon(
+                                imageVector = Icons.Default.ListAlt,
+                                contentDescription = "سجل أحداث وعمليات النظام",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            if (systemLogs.isNotEmpty()) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(9.dp)
+                                        .clip(CircleShape)
+                                        .background(StatusActiveGreen)
+                                        .align(Alignment.TopEnd)
+                                )
+                            }
+                        }
+                    }
+
+                    // Admin Audit & Router Users button
                     IconButton(
                         onClick = { isShowingAdminAuditScreen = true },
                         modifier = Modifier
@@ -232,7 +272,7 @@ fun MainScreen(
                             if (auditLogs.isNotEmpty()) {
                                 Box(
                                     modifier = Modifier
-                                        .size(10.dp)
+                                        .size(9.dp)
                                         .clip(CircleShape)
                                         .background(MaterialTheme.colorScheme.error)
                                         .align(Alignment.TopEnd)
@@ -551,7 +591,8 @@ fun MainScreen(
                     }
                     AppTab.TOOLS -> {
                         NetworkToolsScreen(
-                            viewModel = viewModel
+                            viewModel = viewModel,
+                            onOpenSystemEventLog = { isShowingSystemEventLogScreen = true }
                         )
                     }
                 }

@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.platform.LocalContext
@@ -652,66 +654,50 @@ fun VoucherBatchDialog(
                     }
                 }
 
-                // 2. Predefined Categories (فئات الكروت الشائعة: 200, 300, 500, 1000, 2500)
-                Column {
-                    Text(
-                        text = "اختر فئة الكرت السريعة (الأسعار والصلاحيات):",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        PRESET_CATEGORIES.take(3).forEachIndexed { index, preset ->
-                            FilterChip(
-                                selected = selectedPresetIndex == index,
-                                onClick = {
-                                    selectedPresetIndex = index
-                                    applyPreset(preset)
-                                },
-                                label = {
-                                    Text(
-                                        text = preset.priceLabel,
-                                        fontWeight = if (selectedPresetIndex == index) FontWeight.Bold else FontWeight.Normal,
-                                        fontSize = 12.sp
-                                    )
-                                },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = preset.color.copy(alpha = 0.15f),
-                                    selectedLabelColor = preset.color
-                                ),
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        PRESET_CATEGORIES.drop(3).forEachIndexed { idx, preset ->
-                            val actualIndex = idx + 3
-                            FilterChip(
-                                selected = selectedPresetIndex == actualIndex,
-                                onClick = {
-                                    selectedPresetIndex = actualIndex
-                                    applyPreset(preset)
-                                },
-                                label = {
-                                    Text(
-                                        text = preset.priceLabel,
-                                        fontWeight = if (selectedPresetIndex == actualIndex) FontWeight.Bold else FontWeight.Normal,
-                                        fontSize = 12.sp
-                                    )
-                                },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = preset.color.copy(alpha = 0.15f),
-                                    selectedLabelColor = preset.color
-                                ),
-                                modifier = Modifier.weight(1f)
-                            )
+                // 2. Real Router Profiles Quick Selection Chips (باقات الراوتر المعتمدة)
+                if (profiles.isNotEmpty()) {
+                    Column {
+                        Text(
+                            text = "اختر باقة الراوتر السريعة المعتمدة:",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(profiles) { prof ->
+                                val isSelected = selectedProfile.trim().equals(prof.name.trim(), ignoreCase = true)
+                                Surface(
+                                    onClick = { applyRouterProfile(prof) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                    border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = prof.name,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
+                                            fontSize = 12.sp,
+                                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Surface(
+                                            color = (if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant).copy(alpha = 0.15f),
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Text(
+                                                text = prof.price.ifBlank { prof.rateLimit },
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1261,55 +1247,106 @@ fun VoucherBatchDialog(
                     }
                 }
 
-                // Time Limit Quick Chips & Field
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("مدة الصلاحية (الوقت):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        listOf("1h" to "1ساعة", "3h" to "3ساعات", "1d" to "يوم", "3d" to "3أيام", "7d" to "أسبوع", "30d" to "شهر").forEach { (vKey, vLabel) ->
-                            FilterChip(
-                                selected = timeLimit == vKey,
-                                onClick = { timeLimit = vKey },
-                                label = { Text(vLabel, fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                }
-
-                // Display selected profile details as read-only info
+                // Display selected profile details as verified read-only info from router
                 val activeProfileObj = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
                 if (activeProfileObj != null) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
                     ) {
-                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("تفاصيل الباقة المعتمدة من الراوتر:", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Tune,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "تفاصيل باقة الراوتر المعتمدة (${activeProfileObj.name}):",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primary,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = "معتمدة بالراوتر",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("السعر:", style = MaterialTheme.typography.bodyMedium)
+                                Text("سعر البيع المقترح:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Text(activeProfileObj.price, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
                             }
+
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("الصلاحية (الوقت):", style = MaterialTheme.typography.bodyMedium)
-                                Text(
-                                    text = if (activeProfileObj.validity.isNotBlank() && activeProfileObj.validity != "غير محدد") activeProfileObj.validity
-                                           else if (activeProfileObj.sessionTimeout.isNotBlank() && activeProfileObj.sessionTimeout != "غير محدد") activeProfileObj.sessionTimeout
-                                           else "غير محدد",
-                                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold
-                                )
+                                Text("مهلة الجلسة / الصلاحية:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                val valText = if (activeProfileObj.validity.isNotBlank() && activeProfileObj.validity != "غير محدد") activeProfileObj.validity
+                                    else if (activeProfileObj.sessionTimeout.isNotBlank() && activeProfileObj.sessionTimeout != "غير محدد") activeProfileObj.sessionTimeout
+                                    else "حسب إعدادات الراوتر"
+                                Text(valText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
                             }
+
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("حصة البيانات:", style = MaterialTheme.typography.bodyMedium)
-                                Text(
-                                    text = if (activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد") activeProfileObj.dataLimit
-                                           else "مفتوح",
-                                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold
-                                )
+                                Text("حصة البيانات:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                val dataText = if (activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد") activeProfileObj.dataLimit
+                                    else "مفتوح (غير محدد)"
+                                Text(dataText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                            }
+
+                            if (activeProfileObj.rateLimit.isNotBlank() && activeProfileObj.rateLimit != "غير محدد") {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("تحديد السرعة (Rx/Tx):", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(activeProfileObj.rateLimit, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("الأجهزة المتزامنة:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${activeProfileObj.sharedUsers} جهاز", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                            }
+
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = "🔒 تفاصيل وصلاحيات الباقة ثابتة ومطابقة لما في سيرفر الميكروتك تماماً لضمان عدم حدوث أي خطأ في تفعيل الكروت.",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }

@@ -218,6 +218,48 @@ class MainViewModel(
     val recentErrorLogs: StateFlow<List<com.example.data.local.RouterErrorLogEntity>> = database.appDao().getAllErrorLogs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val systemEventLogs: StateFlow<List<com.example.data.local.SystemEventLogEntity>> = database.appDao().getAllSystemEventLogs()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun recordSystemEvent(
+        actionType: String,
+        targetType: String,
+        targetName: String,
+        description: String,
+        status: String = "SUCCESS",
+        details: String = ""
+    ) {
+        viewModelScope.launch {
+            val routerIp = (_connectionState.value as? ConnectionState.Connected)?.ipAddress ?: _currentConfig.value.ipAddress.ifBlank { "192.168.88.1" }
+            database.appDao().insertSystemEventLog(
+                com.example.data.local.SystemEventLogEntity(
+                    actionType = actionType,
+                    targetType = targetType,
+                    targetName = targetName,
+                    description = description,
+                    operatorUsername = "admin",
+                    routerIp = routerIp,
+                    status = status,
+                    details = details
+                )
+            )
+        }
+    }
+
+    fun clearSystemEventLogs() {
+        viewModelScope.launch {
+            database.appDao().clearAllSystemEventLogs()
+            _toastEvent.emit("تم مسح سجل أحداث وعمليات النظام بالكامل")
+        }
+    }
+
+    fun deleteSystemEventLog(id: Long) {
+        viewModelScope.launch {
+            database.appDao().deleteSystemEventLogById(id)
+            _toastEvent.emit("تم حذف القيد من السجل")
+        }
+    }
+
     fun getLoginHistoryForUser(username: String): kotlinx.coroutines.flow.Flow<List<com.example.data.local.UserLoginHistoryEntity>> {
         return database.appDao().getLoginHistoryForUser(username)
     }
@@ -1668,8 +1710,10 @@ class MainViewModel(
         viewModelScope.launch {
             val result = repository.kickUser(user)
             if (result.isSuccess) {
+                recordSystemEvent("طرد", "جلسة", user.user, "تم فصل وقطع اتصال المستخدم (${user.user}) من الراوتر", "WARNING", "الآيبي: ${user.address}, الماك: ${user.macAddress}, وقت الاتصال: ${user.uptime}")
                 _toastEvent.emit("تم قطع اتصال المستخدم: ${user.user}")
             } else {
+                recordSystemEvent("طرد", "جلسة", user.user, "فشل قطع اتصال المستخدم (${user.user})", "FAILED", result.exceptionOrNull()?.message ?: "")
                 _toastEvent.emit("تعذر قطع اتصال المستخدم: ${result.exceptionOrNull()?.message}")
             }
         }
@@ -1679,8 +1723,10 @@ class MainViewModel(
         viewModelScope.launch {
             val result = repository.deleteCard(cardId)
             if (result.isSuccess) {
+                recordSystemEvent("حذف", "كرت", cardId, "تم حذف الكرت ($cardId) من الراوتر وقاعدة البيانات بنجاح", "SUCCESS")
                 _toastEvent.emit("تم حذف الكرت بنجاح")
             } else {
+                recordSystemEvent("حذف", "كرت", cardId, "فشل حذف الكرت ($cardId) من الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
                 _toastEvent.emit("فشل حذف الكرت")
             }
         }
@@ -1690,8 +1736,10 @@ class MainViewModel(
         viewModelScope.launch {
             val result = repository.reactivateCard(card)
             if (result.isSuccess) {
+                recordSystemEvent("تعديل", "كرت", card.name, "تمت إعادة تفعيل وتصفير عدادات استهلاك الكرت (${card.name}) في الراوتر", "SUCCESS")
                 _toastEvent.emit("تمت إعادة تفعيل وتصفير عدادات الكرت (${card.name}) بنجاح!")
             } else {
+                recordSystemEvent("تعديل", "كرت", card.name, "فشلت إعادة تفعيل الكرت (${card.name})", "FAILED", result.exceptionOrNull()?.message ?: "")
                 _toastEvent.emit("فشلت إعادة تفعيل الكرت: ${result.exceptionOrNull()?.message}")
             }
         }
@@ -1701,8 +1749,10 @@ class MainViewModel(
         viewModelScope.launch {
             val result = repository.updateCard(updatedCard)
             if (result.isSuccess) {
+                recordSystemEvent("تعديل", "كرت", updatedCard.name, "تم تحديث بيانات وإعدادات الكرت (${updatedCard.name}) في الراوتر", "SUCCESS", "الباقة: ${updatedCard.profile}, التعليق: ${updatedCard.comment}")
                 _toastEvent.emit("تم تحديث بيانات الكرت (${updatedCard.name}) بنجاح")
             } else {
+                recordSystemEvent("تعديل", "كرت", updatedCard.name, "فشل تحديث الكرت (${updatedCard.name}) في الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
                 _toastEvent.emit("فشل تحديث الكرت")
             }
         }
@@ -1712,6 +1762,8 @@ class MainViewModel(
         viewModelScope.launch {
             val result = repository.toggleCardDisabled(cardId, currentDisabled)
             if (result.isSuccess) {
+                val actionDesc = if (!currentDisabled) "تم إيقاف وتعطيل الكرت ($cardId) عن العمل في الراوتر" else "تم تفعيل وتشغيل الكرت ($cardId) في الراوتر"
+                recordSystemEvent("تعديل", "كرت", cardId, actionDesc, "SUCCESS")
                 _toastEvent.emit(if (!currentDisabled) "تم إيقاف الكرت" else "تم تفعيل الكرت")
             }
         }
@@ -1722,6 +1774,8 @@ class MainViewModel(
             val result = repository.generateBatch(config)
             if (result.isSuccess) {
                 val cards = result.getOrNull().orEmpty()
+                val batchName = config.batchComment.ifBlank { "دفعة ${cards.size} كروت" }
+                recordSystemEvent("إضافة", "دفعة كروت", batchName, "تم توليد وإضافة ${cards.size} كرت للباقة (${config.profile}) في الراوتر", "SUCCESS", "عدد الكروت: ${cards.size}, الباقة: ${config.profile}, البادئة: ${config.prefix}")
                 _toastEvent.emit("تم توليد ${cards.size} كرت بنجاح!")
                 // Save batch history
                 val jsonArr = JSONArray()
@@ -1730,7 +1784,7 @@ class MainViewModel(
                 database.appDao().insertBatch(
                     BatchHistoryEntity(
                         batchId = batchId,
-                        name = config.batchComment.ifBlank { "دفعة ${cards.size} كروت" },
+                        name = batchName,
                         profileName = config.profile,
                         cardCount = cards.size,
                         price = config.price,
@@ -1762,6 +1816,7 @@ class MainViewModel(
                 // Set printable cards for instant preview
                 _printableCards.value = cards
             } else {
+                recordSystemEvent("إضافة", "دفعة كروت", config.batchComment.ifBlank { "دفعة كروت" }, "فشل توليد دفعة كروت في الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
                 _toastEvent.emit("فشل توليد الكروت: ${result.exceptionOrNull()?.message}")
             }
         }
@@ -1771,6 +1826,7 @@ class MainViewModel(
         viewModelScope.launch {
             val result = repository.addSingleCard(card)
             if (result.isSuccess) {
+                recordSystemEvent("إضافة", "كرت", card.name, "تمت إضافة الكرت (${card.name}) للباقة (${card.profile}) في الراوتر بنجاح", "SUCCESS", "الباقة: ${card.profile}, كلمة المرور: ${card.password}, السعر: ${card.price}")
                 if (posAgentId > 0L && posAgentName.isNotBlank()) {
                     val priceNum = card.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
                     val assignment = PosCardAssignmentEntity(
@@ -1790,6 +1846,7 @@ class MainViewModel(
                     _toastEvent.emit("تمت إضافة وتفعيل الكرت (${card.name}) في الراوتر بنجاح!")
                 }
             } else {
+                recordSystemEvent("إضافة", "كرت", card.name, "فشل إضافة الكرت (${card.name}) إلى الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
                 _toastEvent.emit("فشل إضافة الكرت: ${result.exceptionOrNull()?.message}")
             }
         }
@@ -1871,22 +1928,43 @@ class MainViewModel(
 
     fun createProfile(profile: HotspotProfile) {
         viewModelScope.launch {
-            repository.createProfile(profile)
-            _toastEvent.emit("تم إنشاء باقة: ${profile.name}")
+            val res = repository.createProfile(profile)
+            if (res.isSuccess) {
+                repository.refreshData()
+                recordSystemEvent("إضافة", "باقة", profile.name, "تم إنشاء باقة جديدة (${profile.name}) في راوتر ميكروتك", "SUCCESS", "السرعة: ${profile.rateLimit}, الجلسة: ${profile.sessionTimeout}, الأجهزة: ${profile.sharedUsers}, السعر: ${profile.price}")
+                _toastEvent.emit("تم إنشاء باقة: ${profile.name} في الراوتر بنجاح")
+            } else {
+                recordSystemEvent("إضافة", "باقة", profile.name, "فشل إنشاء باقة (${profile.name}) في الراوتر", "FAILED", res.exceptionOrNull()?.message ?: "")
+                _toastEvent.emit(res.exceptionOrNull()?.message ?: "فشل إنشاء الباقة في الراوتر")
+            }
         }
     }
 
     fun updateProfile(profile: HotspotProfile) {
         viewModelScope.launch {
-            repository.updateProfile(profile)
-            _toastEvent.emit("تم حفظ وتحديث باقة: ${profile.name}")
+            val res = repository.updateProfile(profile)
+            if (res.isSuccess) {
+                repository.refreshData()
+                recordSystemEvent("تعديل", "باقة", profile.name, "تم تحديث إعدادات باقة (${profile.name}) في راوتر ميكروتك", "SUCCESS", "السرعة: ${profile.rateLimit}, الجلسة: ${profile.sessionTimeout}, الأجهزة: ${profile.sharedUsers}, السعر: ${profile.price}")
+                _toastEvent.emit("تم حفظ وتحديث باقة: ${profile.name} في الراوتر بنجاح")
+            } else {
+                recordSystemEvent("تعديل", "باقة", profile.name, "فشل تحديث باقة (${profile.name}) في الراوتر", "FAILED", res.exceptionOrNull()?.message ?: "")
+                _toastEvent.emit(res.exceptionOrNull()?.message ?: "فشل تحديث الباقة في الراوتر")
+            }
         }
     }
 
     fun deleteProfile(profile: HotspotProfile) {
         viewModelScope.launch {
-            repository.deleteProfile(profile)
-            _toastEvent.emit("تم حذف باقة: ${profile.name}")
+            val res = repository.deleteProfile(profile)
+            if (res.isSuccess) {
+                repository.refreshData()
+                recordSystemEvent("حذف", "باقة", profile.name, "تم حذف باقة (${profile.name}) من راوتر ميكروتك", "SUCCESS")
+                _toastEvent.emit("تم حذف باقة: ${profile.name} من الراوتر بنجاح")
+            } else {
+                recordSystemEvent("حذف", "باقة", profile.name, "فشل حذف باقة (${profile.name}) من الراوتر", "FAILED", res.exceptionOrNull()?.message ?: "")
+                _toastEvent.emit(res.exceptionOrNull()?.message ?: "فشل حذف الباقة من الراوتر")
+            }
         }
     }
 
@@ -1895,9 +1973,11 @@ class MainViewModel(
             _toastEvent.emit("جاري إرسال أمر إعادة تشغيل الراوتر...")
             val result = repository.rebootRouter()
             if (result.isSuccess) {
+                recordSystemEvent("إعادة تشغيل", "راوتر", "RouterOS", "تم إرسال أمر إعادة تشغيل راوتر ميكروتك بنجاح", "WARNING")
                 _toastEvent.emit("تمت إعادة تشغيل الراوتر!")
                 disconnect()
             } else {
+                recordSystemEvent("إعادة تشغيل", "راوتر", "RouterOS", "فشل أمر إعادة تشغيل الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
                 _toastEvent.emit("فشل أمر إعادة التشغيل")
             }
         }
@@ -1947,6 +2027,7 @@ class MainViewModel(
     fun deleteBatchHistory(batchId: String) {
         viewModelScope.launch {
             database.appDao().deleteBatch(batchId)
+            recordSystemEvent("حذف", "دفعة كروت", batchId, "تم حذف سجل الدفعة ($batchId) من قاعدة البيانات", "SUCCESS")
         }
     }
 

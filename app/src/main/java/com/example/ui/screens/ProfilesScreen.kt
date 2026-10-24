@@ -61,6 +61,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.HotspotCard
 import com.example.data.model.HotspotProfile
@@ -68,6 +70,19 @@ import com.example.ui.theme.CyberGreenBright
 import com.example.ui.theme.CyberGreenPrimary
 import com.example.ui.theme.NetworkCyan
 import com.example.ui.viewmodel.MainViewModel
+
+data class ProfileDisplayStats(
+    val totalCount: Int = 0,
+    val activeCount: Int = 0,
+    val unusedCount: Int = 0,
+    val expiredCount: Int = 0,
+    val soldCount: Int = 0,
+    val salePrice: Double = 500.0,
+    val costPrice: Double = 200.0,
+    val profitPerCard: Double = 300.0,
+    val profileRevenue: Double = 0.0,
+    val profileNetProfit: Double = 0.0
+)
 
 @Composable
 fun ProfilesScreen(
@@ -82,29 +97,54 @@ fun ProfilesScreen(
     var profileToEdit by remember { mutableStateOf<HotspotProfile?>(null) }
     var profileToDelete by remember { mutableStateOf<HotspotProfile?>(null) }
 
-    // Calculate overall statistics across all profiles from real cards
+    val pricingMap = remember(packagePricings) {
+        packagePricings.associateBy { it.profileName.trim().lowercase() }
+    }
+
+    val cardsByProfile = remember(cards) {
+        cards.groupBy { it.profile.trim().lowercase() }
+    }
+
+    val profileStatsMap = remember(profiles, cards, pricingMap) {
+        profiles.associate { profile ->
+            val pCards = cardsByProfile[profile.name.trim().lowercase()].orEmpty()
+            val total = pCards.size
+            val active = pCards.count { it.isActive }
+            val unused = pCards.count { it.isUnused }
+            val expired = pCards.count { it.isExpired }
+            val sold = pCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L || it.bytesOut > 0L }
+
+            val pricing = pricingMap[profile.name.trim().lowercase()]
+            val salePrice = pricing?.salePrice ?: profile.priceNumber.takeIf { it > 0 } ?: profile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
+            val costPrice = pricing?.costPrice ?: profile.costPrice.takeIf { it > 0 } ?: (salePrice * 0.40)
+            val profitPerCard = (salePrice - costPrice).coerceAtLeast(0.0)
+            val rev = sold * salePrice
+            val net = sold * profitPerCard
+
+            profile.name to ProfileDisplayStats(
+                totalCount = total,
+                activeCount = active,
+                unusedCount = unused,
+                expiredCount = expired,
+                soldCount = sold,
+                salePrice = salePrice,
+                costPrice = costPrice,
+                profitPerCard = profitPerCard,
+                profileRevenue = rev,
+                profileNetProfit = net
+            )
+        }
+    }
+
+    // Calculate overall statistics efficiently from memoized maps
     val totalProfiles = profiles.size
     val totalCardsCount = cards.size
-    val activeCardsCount = cards.count { it.isActive }
-    val unusedCardsCount = cards.count { it.isUnused }
-    val expiredCardsCount = cards.count { it.isExpired }
-    val soldCards = cards.filter { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L || it.bytesOut > 0L }
-    val soldCardsCount = soldCards.size
-
-    // Calculate real sold revenue and total inventory valuation
-    val soldRevenue = soldCards.sumOf { card ->
-        val prof = profiles.find { it.name.equals(card.profile, ignoreCase = true) }
-        val priceStr = prof?.price ?: card.price
-        val digits = priceStr.filter { it.isDigit() }
-        digits.toDoubleOrNull() ?: 500.0
-    }
-
-    val totalInventoryValue = cards.sumOf { card ->
-        val prof = profiles.find { it.name.equals(card.profile, ignoreCase = true) }
-        val priceStr = prof?.price ?: card.price
-        val digits = priceStr.filter { it.isDigit() }
-        digits.toDoubleOrNull() ?: 500.0
-    }
+    val activeCardsCount = remember(cards) { cards.count { it.isActive } }
+    val unusedCardsCount = remember(cards) { cards.count { it.isUnused } }
+    val expiredCardsCount = remember(cards) { cards.count { it.isExpired } }
+    val soldCardsCount = remember(profileStatsMap) { profileStatsMap.values.sumOf { it.soldCount } }
+    val soldRevenue = remember(profileStatsMap) { profileStatsMap.values.sumOf { it.profileRevenue } }
+    val totalInventoryValue = remember(profileStatsMap) { profileStatsMap.values.sumOf { it.totalCount * it.salePrice } }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -236,11 +276,12 @@ fun ProfilesScreen(
                         )
                     }
                 } else {
-                    items(profiles, key = { it.id }) { profile ->
+                    items(profiles, key = { it.name }) { profile ->
                         val pricing = packagePricings.find { it.profileName.equals(profile.name, ignoreCase = true) }
+                        val stats = profileStatsMap[profile.name] ?: ProfileDisplayStats()
                         ProfileCardItem(
                             profile = profile,
-                            cards = cards,
+                            stats = stats,
                             pricing = pricing,
                             onEditClick = { profileToEdit = profile },
                             onDeleteClick = { profileToDelete = profile },
@@ -342,25 +383,22 @@ fun ProfilesScreen(
 @Composable
 fun ProfileCardItem(
     profile: HotspotProfile,
-    cards: List<HotspotCard>,
+    stats: ProfileDisplayStats,
     pricing: com.example.data.local.PackagePricingEntity? = null,
     onEditClick: () -> Unit,
     onDeleteClick: (() -> Unit)? = null,
     onEditPricing: ((cost: Double, sale: Double) -> Unit)? = null
 ) {
-    // Filter cards belonging to this profile
-    val profileCards = cards.filter { it.profile.equals(profile.name, ignoreCase = true) }
-    val totalCount = profileCards.size
-    val activeCount = profileCards.count { it.isActive }
-    val unusedCount = profileCards.count { it.isUnused }
-    val expiredCount = profileCards.count { it.isExpired }
-    val soldCount = profileCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L || it.bytesOut > 0L }
-
-    val salePrice = pricing?.salePrice ?: profile.priceNumber.takeIf { it > 0 } ?: profile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
-    val costPrice = pricing?.costPrice ?: profile.costPrice.takeIf { it > 0 } ?: (salePrice * 0.40)
-    val profitPerCard = (salePrice - costPrice).coerceAtLeast(0.0)
-    val profileRevenue = soldCount * salePrice
-    val profileNetProfit = soldCount * profitPerCard
+    val totalCount = stats.totalCount
+    val activeCount = stats.activeCount
+    val unusedCount = stats.unusedCount
+    val expiredCount = stats.expiredCount
+    val soldCount = stats.soldCount
+    val salePrice = stats.salePrice
+    val costPrice = stats.costPrice
+    val profitPerCard = stats.profitPerCard
+    val profileRevenue = stats.profileRevenue
+    val profileNetProfit = stats.profileNetProfit
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -820,7 +858,10 @@ fun EditProfileDialog(
         title = { Text("تعديل باقة: ${profile.name}", fontWeight = FontWeight.Bold) },
         text = {
             Column(
-                modifier = Modifier.padding(vertical = 4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 OutlinedTextField(
@@ -1006,7 +1047,10 @@ fun AddProfileDialog(
         },
         text = {
             Column(
-                modifier = Modifier.padding(vertical = 4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // Quick Templates Row

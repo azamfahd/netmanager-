@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.PlayArrow
@@ -84,6 +85,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun NetworkToolsScreen(
     viewModel: MainViewModel,
+    onOpenSystemEventLog: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -580,6 +582,118 @@ fun NetworkToolsScreen(
                             onInstallDownloaded = { file -> AppUpdateManager.installApk(context, file) },
                             onDismiss = { showUpdateDialog = false }
                         )
+                    }
+                }
+            }
+        }
+
+        // System Event Log Card (سجل أحداث وعمليات الراوتر والشفافية)
+        item {
+            val eventLogs by viewModel.systemEventLogs.collectAsStateWithLifecycle()
+            val addCount = remember(eventLogs) { eventLogs.count { it.actionType == "إضافة" } }
+            val editCount = remember(eventLogs) { eventLogs.count { it.actionType == "تعديل" } }
+            val deleteCount = remember(eventLogs) { eventLogs.count { it.actionType == "حذف" } }
+
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("system_event_log_entry_card"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(RouterBlue.copy(alpha = 0.12f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.ListAlt, contentDescription = null, tint = RouterBlue, modifier = Modifier.size(22.dp))
+                            }
+                            Column {
+                                Text(
+                                    text = "سجل أحداث النظام (System Event Log)",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "توثيق وتتبع عمليات الإضافة، التعديل، والحذف",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        StatusPill(
+                            text = "${eventLogs.size} عملية",
+                            type = StatusType.INFO
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Stats indicators
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = StatusActiveGreen.copy(alpha = 0.1f),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("+$addCount", fontWeight = FontWeight.Bold, color = StatusActiveGreen, fontSize = 14.sp)
+                                Text("إضافات", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = RouterBlue.copy(alpha = 0.1f),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("~$editCount", fontWeight = FontWeight.Bold, color = RouterBlue, fontSize = 14.sp)
+                                Text("تعديلات", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = StatusErrorRed.copy(alpha = 0.1f),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("-$deleteCount", fontWeight = FontWeight.Bold, color = StatusErrorRed, fontSize = 14.sp)
+                                Text("حذفيات", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Button(
+                        onClick = onOpenSystemEventLog,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                            .testTag("btn_open_system_event_log"),
+                        colors = ButtonDefaults.buttonColors(containerColor = RouterBlue)
+                    ) {
+                        Icon(Icons.Default.ListAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("فتح ومراقبة سجل أحداث النظام (شفافية كاملة)", fontWeight = FontWeight.Bold)
                     }
                 }
             }

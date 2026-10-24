@@ -2784,7 +2784,7 @@ class MikrotikRepository {
     suspend fun createProfile(profile: HotspotProfile): Result<Boolean> {
         val config = activeConfig
         if (config != null && !config.isDemoMode) {
-            withContext(Dispatchers.IO) {
+            val opResult = withContext(Dispatchers.IO) {
                 if (isApiSocketMode) {
                     routerOsApiClient.addProfile(profile)
                 } else {
@@ -2805,12 +2805,23 @@ class MikrotikRepository {
                             .put(jsonBody.toRequestBody("application/json".toMediaType()))
                             .header("Authorization", credential)
                             .build()
-                        httpClient.newCall(putReq).execute()
-                    } catch (_: Exception) {}
+                        val resp = httpClient.newCall(putReq).execute()
+                        if (!resp.isSuccessful) {
+                            Result.failure(Exception("فشل إضافة الباقة عبر واجهة REST (رمز: ${resp.code})"))
+                        } else {
+                            Result.success(true)
+                        }
+                    } catch (e: Exception) {
+                        Result.failure(e)
+                    }
                 }
+            }
+            if (opResult.isFailure) {
+                return opResult
             }
         }
         val current = _profiles.value.toMutableList()
+        current.removeAll { it.name.equals(profile.name, ignoreCase = true) }
         current.add(profile)
         _profiles.value = current
         return Result.success(true)
@@ -2819,7 +2830,7 @@ class MikrotikRepository {
     suspend fun updateProfile(profile: HotspotProfile): Result<Boolean> {
         val config = activeConfig
         if (config != null && !config.isDemoMode) {
-            withContext(Dispatchers.IO) {
+            val opResult = withContext(Dispatchers.IO) {
                 if (isApiSocketMode) {
                     routerOsApiClient.updateProfile(profile)
                 } else {
@@ -2839,9 +2850,19 @@ class MikrotikRepository {
                             .patch(jsonBody.toRequestBody("application/json".toMediaType()))
                             .header("Authorization", credential)
                             .build()
-                        httpClient.newCall(patchReq).execute()
-                    } catch (_: Exception) {}
+                        val resp = httpClient.newCall(patchReq).execute()
+                        if (!resp.isSuccessful) {
+                            Result.failure(Exception("فشل تعديل الباقة عبر واجهة REST (رمز: ${resp.code})"))
+                        } else {
+                            Result.success(true)
+                        }
+                    } catch (e: Exception) {
+                        Result.failure(e)
+                    }
                 }
+            }
+            if (opResult.isFailure) {
+                return opResult
             }
         }
         _profiles.value = _profiles.value.map {
@@ -2853,7 +2874,7 @@ class MikrotikRepository {
     suspend fun deleteProfile(profile: HotspotProfile): Result<Boolean> {
         val config = activeConfig
         if (config != null && !config.isDemoMode) {
-            withContext(Dispatchers.IO) {
+            val opResult = withContext(Dispatchers.IO) {
                 if (isApiSocketMode) {
                     routerOsApiClient.deleteProfile(profile.id, profile.name)
                 } else {
@@ -2866,9 +2887,19 @@ class MikrotikRepository {
                             .delete()
                             .header("Authorization", credential)
                             .build()
-                        httpClient.newCall(delReq).execute()
-                    } catch (_: Exception) {}
+                        val resp = httpClient.newCall(delReq).execute()
+                        if (!resp.isSuccessful) {
+                            Result.failure(Exception("فشل حذف الباقة عبر واجهة REST (رمز: ${resp.code})"))
+                        } else {
+                            Result.success(true)
+                        }
+                    } catch (e: Exception) {
+                        Result.failure(e)
+                    }
                 }
+            }
+            if (opResult.isFailure) {
+                return opResult
             }
         }
         _profiles.value = _profiles.value.filter { it.id != profile.id && it.name != profile.name }
