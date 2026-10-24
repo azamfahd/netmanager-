@@ -227,7 +227,7 @@ fun VoucherBatchDialog(
     var price by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.price else PRESET_CATEGORIES[2].priceLabel) }
     var timeLimit by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.timeLimit else PRESET_CATEGORIES[2].timeLimit) }
     var dataLimitMBInput by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.dataLimitMB else PRESET_CATEGORIES[2].dataLimitMB.toString()) }
-    var isSingleCode by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.isSingleCode else false) }
+    var isSingleCode by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.isSingleCode else true) }
 
     // Batch specific state
     var batchCountInput by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.batchCount else "20") }
@@ -664,7 +664,7 @@ fun VoucherBatchDialog(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(profiles) { prof ->
+                            items(profiles, key = { "${it.id}_${it.name}_${it.source}" }) { prof ->
                                 val isSelected = selectedProfile.trim().equals(prof.name.trim(), ignoreCase = true)
                                 Surface(
                                     onClick = { applyRouterProfile(prof) },

@@ -276,7 +276,7 @@ fun ProfilesScreen(
                         )
                     }
                 } else {
-                    items(profiles, key = { it.name }) { profile ->
+                    items(profiles, key = { "${it.id}_${it.name}_${it.source}" }) { profile ->
                         val pricing = packagePricings.find { it.profileName.equals(profile.name, ignoreCase = true) }
                         val stats = profileStatsMap[profile.name] ?: ProfileDisplayStats()
                         ProfileCardItem(
