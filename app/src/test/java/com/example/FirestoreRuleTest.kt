@@ -45,8 +45,20 @@ class FirestoreRuleTest {
         Firebase.auth.useEmulator("127.0.0.1", 9099)
     }
 
+    private fun isEmulatorAvailable(port: Int): Boolean {
+        return try {
+            java.net.Socket("127.0.0.1", port).use { true }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     @Test
     fun `test writing a router document`() = runBlocking {
+        org.junit.Assume.assumeTrue(
+            "Firebase Auth & Firestore emulators are not running locally on ports 8085/9099",
+            isEmulatorAvailable(8085) && isEmulatorAvailable(9099)
+        )
         // Mock sign in (Robolectric Auth Emulator bypass)
         // In Robolectric, we can't easily use CredentialManager, 
         // so we use email/pass against the emulator for rules testing

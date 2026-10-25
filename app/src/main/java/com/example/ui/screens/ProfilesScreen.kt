@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.AlertDialog
@@ -94,7 +95,7 @@ fun ProfilesScreen(
     val packagePricings by viewModel.packagePricings.collectAsStateWithLifecycle()
     var showAddDialog by remember { mutableStateOf(false) }
     var initialTemplateForAdd by remember { mutableStateOf<PackageTemplate?>(null) }
-    var profileToEdit by remember { mutableStateOf<HotspotProfile?>(null) }
+    var profileToViewDetails by remember { mutableStateOf<HotspotProfile?>(null) }
     var profileToDelete by remember { mutableStateOf<HotspotProfile?>(null) }
 
     val pricingMap = remember(packagePricings) {
@@ -283,7 +284,7 @@ fun ProfilesScreen(
                             profile = profile,
                             stats = stats,
                             pricing = pricing,
-                            onEditClick = { profileToEdit = profile },
+                            onViewDetailsClick = { profileToViewDetails = profile },
                             onDeleteClick = { profileToDelete = profile },
                             onEditPricing = { cost, sale ->
                                 viewModel.updatePackageCostAndPrice(profile.name, cost, sale)
@@ -341,16 +342,10 @@ fun ProfilesScreen(
         )
     }
 
-    profileToEdit?.let { profile ->
-        EditProfileDialog(
+    profileToViewDetails?.let { profile ->
+        ProfileDetailsDialog(
             profile = profile,
-            onDismiss = { profileToEdit = null },
-            onConfirm = { updated ->
-                viewModel.updateProfile(updated)
-                val saleNum = updated.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
-                viewModel.updatePackageCostAndPrice(updated.name, updated.costPrice, saleNum)
-                profileToEdit = null
-            }
+            onDismiss = { profileToViewDetails = null }
         )
     }
 
@@ -385,7 +380,7 @@ fun ProfileCardItem(
     profile: HotspotProfile,
     stats: ProfileDisplayStats,
     pricing: com.example.data.local.PackagePricingEntity? = null,
-    onEditClick: () -> Unit,
+    onViewDetailsClick: () -> Unit,
     onDeleteClick: (() -> Unit)? = null,
     onEditPricing: ((cost: Double, sale: Double) -> Unit)? = null
 ) {
@@ -435,11 +430,39 @@ fun ProfileCardItem(
                         )
                     }
                     Column {
-                        Text(
-                            text = profile.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = profile.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Surface(
+                                color = CyberGreenPrimary.copy(alpha = 0.15f),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = CyberGreenPrimary,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Text(
+                                        text = "معتمدة بالسيرفر",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = CyberGreenPrimary
+                                    )
+                                }
+                            }
+                        }
                         if (profile.downloadLimit.isNotBlank() && profile.downloadLimit != "غير محدد") {
                             Text(
                                 text = "التحميل: ${profile.downloadLimit} • الرفع: ${profile.uploadLimit}",
@@ -474,12 +497,12 @@ fun ProfileCardItem(
                     }
 
                     IconButton(
-                        onClick = onEditClick,
+                        onClick = onViewDetailsClick,
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Edit,
-                            contentDescription = "تعديل الباقة",
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "عرض تفاصيل باقة السيرفر المعتمدة",
                             tint = CyberGreenPrimary,
                             modifier = Modifier.size(18.dp)
                         )
@@ -835,182 +858,113 @@ private fun TemplateItemCard(
 }
 
 @Composable
-fun EditProfileDialog(
+fun ProfileDetailsDialog(
     profile: HotspotProfile,
-    onDismiss: () -> Unit,
-    onConfirm: (HotspotProfile) -> Unit
+    onDismiss: () -> Unit
 ) {
-    var rateLimit by remember { mutableStateOf(profile.rateLimit) }
-    var sharedUsers by remember { mutableIntStateOf(profile.sharedUsers) }
-    var sessionTimeout by remember { mutableStateOf(profile.sessionTimeout) }
-    var price by remember { mutableStateOf(profile.price) }
-    var costPriceStr by remember {
-        mutableStateOf(if (profile.costPrice > 0) profile.costPrice.toInt().toString() else "")
-    }
-    var dataLimit by remember { mutableStateOf(profile.dataLimit) }
-
-    val quickPrices = listOf("100 ر.ي", "200 ر.ي", "300 ر.ي", "500 ر.ي", "1000 ر.ي", "2000 ر.ي", "5000 ر.ي")
-    val quickTimes = listOf("30m", "1h", "2h", "3h", "6h", "12h", "1d", "3d", "7d", "30d")
-    val quickSpeeds = listOf("512k/1M", "1M/2M", "2M/3M", "2M/4M", "4M/8M", "5M/10M", "10M/20M")
-
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("تعديل باقة: ${profile.name}", fontWeight = FontWeight.Bold) },
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Lock,
+                contentDescription = null,
+                tint = CyberGreenPrimary,
+                modifier = Modifier.size(28.dp)
+            )
+        },
+        title = {
+            Text(
+                text = "تفاصيل باقة السيرفر: ${profile.name}",
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleMedium
+            )
+        },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
                     .padding(vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedTextField(
-                    value = price,
-                    onValueChange = { price = it },
-                    label = { Text("سعر البيع للكرت (مثال: 500 ر.ي)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("edit_profile_price_input")
-                )
-
-                OutlinedTextField(
-                    value = costPriceStr,
-                    onValueChange = { costPriceStr = it },
-                    label = { Text("سعر التكلفة للكرت الواحد (مثال: 200 ر.ي)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("edit_profile_cost_input")
-                )
-
-                // Quick Price Chips
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(quickPrices) { qp ->
-                        Surface(
-                            onClick = { price = qp },
-                            shape = RoundedCornerShape(8.dp),
-                            color = if (price == qp) CyberGreenPrimary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
-                            border = if (price == qp) BorderStroke(1.dp, CyberGreenPrimary) else null
-                        ) {
-                            Text(
-                                text = qp,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = if (price == qp) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    }
-                }
-
-                OutlinedTextField(
-                    value = rateLimit,
-                    onValueChange = { rateLimit = it },
-                    label = { Text("السرعة Rx/Tx (مثال: 2M/4M أو 1024k/2048k)") },
-                    singleLine = true,
+                Surface(
+                    color = CyberGreenPrimary.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, CyberGreenPrimary.copy(alpha = 0.3f)),
                     modifier = Modifier.fillMaxWidth()
-                )
-
-                // Quick Speed Chips
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(quickSpeeds) { qs ->
-                        Surface(
-                            onClick = { rateLimit = qs },
-                            shape = RoundedCornerShape(8.dp),
-                            color = if (rateLimit == qs) NetworkCyan.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
-                            border = if (rateLimit == qs) BorderStroke(1.dp, NetworkCyan) else null
-                        ) {
-                            Text(
-                                text = qs,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = if (rateLimit == qs) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("عدد الأجهزة:")
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        listOf(1, 2, 3, 5).forEach { num ->
-                            OutlinedButton(
-                                onClick = { sharedUsers = num },
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text(
-                                    text = "$num",
-                                    fontWeight = if (sharedUsers == num) FontWeight.Bold else FontWeight.Normal
-                                )
-                            }
-                        }
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = CyberGreenPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = "🔒 هذه الباقة مستوردة ومعتمدة من سيرفر الميكروتك مباشرة، وهي غير قابلة للتعديل للحفاظ على استقرار وتطابق كروت الهوتسبوت تماماً مع السيرفر وبدون أي تعارض.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
 
-                OutlinedTextField(
-                    value = sessionTimeout,
-                    onValueChange = { sessionTimeout = it },
-                    label = { Text("مهلة الجلسة (مثال: 1h, 1d, 7d)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                // Quick Timeout Chips
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(quickTimes) { qt ->
-                        Surface(
-                            onClick = { sessionTimeout = qt },
-                            shape = RoundedCornerShape(8.dp),
-                            color = if (sessionTimeout == qt) MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
-                            border = if (sessionTimeout == qt) BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary) else null
-                        ) {
-                            Text(
-                                text = qt,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = if (sessionTimeout == qt) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    }
+                ProfileDetailItem(label = "اسم الباقة في السيرفر", value = profile.name)
+                ProfileDetailItem(label = "تحديد السرعة (Rate Limit)", value = if (profile.rateLimit.isNotBlank() && profile.rateLimit != "غير محدد") profile.rateLimit else "مفتوح (حسب إعدادات الراوتر)")
+                ProfileDetailItem(label = "الأجهزة المسموحة (Shared Users)", value = "${profile.sharedUsers} جهاز")
+                ProfileDetailItem(label = "مهلة الجلسة (Session Timeout)", value = if (profile.sessionTimeout.isNotBlank() && profile.sessionTimeout != "غير محدد") profile.sessionTimeout else "غير محدد")
+                ProfileDetailItem(label = "مهلة الخمول (Keepalive)", value = profile.keepaliveTimeout.ifBlank { "5m" })
+                ProfileDetailItem(label = "سعر البيع المقترح", value = profile.price.ifBlank { "500 ر.ي" })
+                ProfileDetailItem(label = "نوع الباقة ومصدرها", value = if (profile.source.contains("usermanager")) "يوزرمانجر (User Manager)" else "هوتسبوت ميكروتك (Hotspot Profile)")
+                if (profile.comment.isNotBlank()) {
+                    ProfileDetailItem(label = "ملاحظات الراوتر", value = profile.comment)
                 }
-
-                OutlinedTextField(
-                    value = dataLimit,
-                    onValueChange = { dataLimit = it },
-                    label = { Text("حصة البيانات (اختياري، مثال: 2048MB)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
             }
         },
         confirmButton = {
             Button(
-                onClick = {
-                    val saleNum = price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
-                    val costNum = costPriceStr.filter { it.isDigit() }.toDoubleOrNull() ?: (saleNum * 0.40)
-                    onConfirm(
-                        profile.copy(
-                            rateLimit = rateLimit.trim(),
-                            sharedUsers = sharedUsers,
-                            sessionTimeout = sessionTimeout.trim(),
-                            price = price.trim(),
-                            priceNumber = saleNum,
-                            costPrice = costNum,
-                            dataLimit = dataLimit.trim()
-                        )
-                    )
-                },
-                modifier = Modifier.testTag("save_profile_btn")
+                onClick = onDismiss,
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = CyberGreenPrimary),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Text("حفظ التعديلات في الراوتر")
-            }
-        },
-        dismissButton = {
-            OutlinedButton(onClick = onDismiss) {
-                Text("إلغاء")
+                Text("إغلاق", fontWeight = FontWeight.Bold)
             }
         }
     )
+}
+
+@Composable
+private fun ProfileDetailItem(label: String, value: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
 }
 
 @Composable

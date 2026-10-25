@@ -2413,16 +2413,27 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
 
     suspend fun generateBatch(config: BatchGenerationConfig, dao: com.example.data.local.AppDao): Result<List<HotspotCard>> {
         return withContext(Dispatchers.Default) {
-            // 1. Validation: Verify profile against router profiles (case-insensitive & trimmed)
+            // 1. Validation & Auto-provision: Verify profile against router profiles (case-insensitive & trimmed)
             val cleanProfileName = config.profile.trim()
             val existingProfiles = _profiles.value
-            val targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
-            val profileExists = cleanProfileName.isNotBlank() && (existingProfiles.isEmpty() || targetProfile != null || cleanProfileName.equals("default", ignoreCase = true))
+            var targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
+            val routerConfig = activeConfig
 
-            if (!profileExists && existingProfiles.isNotEmpty()) {
-                return@withContext Result.failure(
-                    Exception("الباقة المحددة ($cleanProfileName) غير مسجلة في الراوتر. يرجى اختيار باقة متوفرة من القائمة.")
-                )
+            if (routerConfig != null && !routerConfig.isDemoMode && cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
+                if (targetProfile == null) {
+                    try {
+                        val newProf = HotspotProfile(
+                            id = "",
+                            name = cleanProfileName,
+                            rateLimit = "غير محدد",
+                            sessionTimeout = config.timeLimit.ifBlank { "1d" },
+                            sharedUsers = 1,
+                            price = config.price
+                        )
+                        createProfile(newProf)
+                        targetProfile = _profiles.value.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
+                    } catch (_: Exception) {}
+                }
             }
 
             val generatedCards = mutableListOf<HotspotCard>()
@@ -2475,7 +2486,6 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
             }
 
             // 2. Real Router Verification & Synchronization
-            val routerConfig = activeConfig
             if (routerConfig != null && !routerConfig.isDemoMode) {
                 val addedCards = mutableListOf<HotspotCard>()
                 val failureReasons = mutableListOf<String>()
@@ -2533,14 +2543,15 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                 }
 
                                 if (!cardAdded) {
+                                    val cleanProfile = card.profile.trim()
                                     val jsonBody = JSONObject().apply {
-                                        put("name", card.name)
-                                        put("password", card.password)
-                                        put("profile", card.profile)
+                                        put("name", card.name.trim())
+                                        if (card.password.isNotBlank()) put("password", card.password.trim())
+                                        if (cleanProfile.isNotBlank()) put("profile", cleanProfile)
                                         val validUptime = routerOsApiClient.formatRouterOsTime(card.limitUptime)
                                         if (!validUptime.isNullOrBlank()) put("limit-uptime", validUptime)
-                                        if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal)
-                                        put("comment", card.comment)
+                                        if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal.toString())
+                                        if (card.comment.isNotBlank()) put("comment", card.comment)
                                     }.toString()
 
                                     val putReq = Request.Builder()
@@ -2553,25 +2564,12 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                         cardAdded = true
                                     } else {
                                         val errBody = resp.body?.string().orEmpty()
-                                        failureReasons.add("فشل إضافة الكرت ${card.name}: ${resp.code} - $errBody")
-                                        
-                                        // Log failure with payload
-                                        dao.insertSystemEventLog(
-                                            SystemEventLogEntity(
-                                                actionType = "توليد كروت",
-                                                targetType = "كرت",
-                                                targetName = card.name,
-                                                description = "فشل إضافة الكرت للراوتر (${resp.code})",
-                                                status = "FAILED",
-                                                details = "البيانات المرسلة: $jsonBody | الاستجابة: $errBody"
-                                            )
-                                        )
                                         
                                         // Auto-create missing hotspot profile and retry
-                                        if (errBody.contains("profile", ignoreCase = true) || errBody.contains("not found", ignoreCase = true)) {
-                                            try {
+                                        try {
+                                            if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
                                                 val createProfBody = JSONObject().apply {
-                                                    put("name", card.profile)
+                                                    put("name", cleanProfile)
                                                     put("shared-users", "1")
                                                 }.toString()
                                                 val createReq = Request.Builder()
@@ -2580,13 +2578,52 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                                     .header("Authorization", credential)
                                                     .build()
                                                 httpClient.newCall(createReq).execute()
+                                            }
 
-                                                val retryResp = httpClient.newCall(putReq).execute()
-                                                if (retryResp.isSuccessful) cardAdded = true
-                                            } catch (_: Exception) {}
-                                        }
+                                            // Retry with simple payload
+                                            val simpleJson = JSONObject().apply {
+                                                put("name", card.name.trim())
+                                                if (card.password.isNotBlank()) put("password", card.password.trim())
+                                                if (cleanProfile.isNotBlank()) put("profile", cleanProfile)
+                                                if (card.comment.isNotBlank()) put("comment", card.comment)
+                                            }.toString()
+                                            val retryReq = Request.Builder()
+                                                .url("$baseUrl/rest/ip/hotspot/user")
+                                                .put(simpleJson.toRequestBody("application/json".toMediaType()))
+                                                .header("Authorization", credential)
+                                                .build()
+                                            val retryResp = httpClient.newCall(retryReq).execute()
+                                            if (retryResp.isSuccessful) {
+                                                cardAdded = true
+                                            } else {
+                                                // Fallback with default profile
+                                                val defJson = JSONObject().apply {
+                                                    put("name", card.name.trim())
+                                                    if (card.password.isNotBlank()) put("password", card.password.trim())
+                                                    put("profile", "default")
+                                                }.toString()
+                                                val defReq = Request.Builder()
+                                                    .url("$baseUrl/rest/ip/hotspot/user")
+                                                    .put(defJson.toRequestBody("application/json".toMediaType()))
+                                                    .header("Authorization", credential)
+                                                    .build()
+                                                val defResp = httpClient.newCall(defReq).execute()
+                                                if (defResp.isSuccessful) cardAdded = true
+                                            }
+                                        } catch (_: Exception) {}
+
                                         if (!cardAdded) {
-                                            failureReasons.add("خطأ راوتر ($errBody)")
+                                            failureReasons.add("فشل إضافة الكرت ${card.name}: ${resp.code} - $errBody")
+                                            dao.insertSystemEventLog(
+                                                SystemEventLogEntity(
+                                                    actionType = "توليد كروت",
+                                                    targetType = "كرت",
+                                                    targetName = card.name,
+                                                    description = "فشل إضافة الكرت للراوتر (${resp.code})",
+                                                    status = "FAILED",
+                                                    details = "البيانات المرسلة: $jsonBody | الاستجابة: $errBody"
+                                                )
+                                            )
                                         }
                                     }
                                 }
@@ -2630,17 +2667,19 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
         return withContext(Dispatchers.IO) {
             val cleanProfileName = card.profile.trim()
             val existingProfiles = _profiles.value
-            val targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
-            val profileExists = cleanProfileName.isNotBlank() && (existingProfiles.isEmpty() || targetProfile != null || cleanProfileName.equals("default", ignoreCase = true))
+            var targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
 
-            if (!profileExists && existingProfiles.isNotEmpty()) {
-                return@withContext Result.failure(
-                    Exception("الباقة المحددة ($cleanProfileName) غير مسجلة في راوتر ميكروتك! يرجى اختيار باقة متوفرة من القائمة.")
-                )
+            val routerConfig = activeConfig
+            if (routerConfig != null && !routerConfig.isDemoMode && cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
+                if (targetProfile == null) {
+                    try {
+                        createProfile(HotspotProfile(id = "", name = cleanProfileName, rateLimit = "غير محدد", sessionTimeout = card.limitUptime.ifBlank { "1d" }))
+                        targetProfile = _profiles.value.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
+                    } catch (_: Exception) {}
+                }
             }
 
             val sanitizedCard = card.copy(profile = cleanProfileName)
-            val routerConfig = activeConfig
             if (routerConfig != null && !routerConfig.isDemoMode) {
                 if (isApiSocketMode) {
                     val socketRes = routerOsApiClient.addCard(sanitizedCard)
@@ -2659,9 +2698,9 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                         if (isUmProfile) {
                             try {
                                 val umUserJson = JSONObject().apply {
-                                    put("name", sanitizedCard.name)
-                                    put("password", sanitizedCard.password)
-                                    put("comment", sanitizedCard.comment)
+                                    put("name", sanitizedCard.name.trim())
+                                    if (sanitizedCard.password.isNotBlank()) put("password", sanitizedCard.password.trim())
+                                    if (sanitizedCard.comment.isNotBlank()) put("comment", sanitizedCard.comment)
                                 }.toString()
                                 val umReq = Request.Builder()
                                     .url("$baseUrl/rest/user-manager/user")
@@ -2672,8 +2711,8 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                 if (umResp.isSuccessful) {
                                     added = true
                                     val umProfJson = JSONObject().apply {
-                                        put("user", sanitizedCard.name)
-                                        put("profile", sanitizedCard.profile)
+                                        put("user", sanitizedCard.name.trim())
+                                        put("profile", sanitizedCard.profile.trim())
                                     }.toString()
                                     val assignReq = Request.Builder()
                                         .url("$baseUrl/rest/user-manager/user-profile")
@@ -2687,13 +2726,13 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
 
                         if (!added) {
                             val jsonBody = JSONObject().apply {
-                                put("name", sanitizedCard.name)
-                                put("password", sanitizedCard.password)
-                                put("profile", sanitizedCard.profile)
+                                put("name", sanitizedCard.name.trim())
+                                if (sanitizedCard.password.isNotBlank()) put("password", sanitizedCard.password.trim())
+                                if (sanitizedCard.profile.isNotBlank()) put("profile", sanitizedCard.profile.trim())
                                 val validUptime = routerOsApiClient.formatRouterOsTime(sanitizedCard.limitUptime)
                                 if (!validUptime.isNullOrBlank()) put("limit-uptime", validUptime)
-                                if (sanitizedCard.limitBytesTotal > 0) put("limit-bytes-total", sanitizedCard.limitBytesTotal)
-                                put("comment", sanitizedCard.comment)
+                                if (sanitizedCard.limitBytesTotal > 0) put("limit-bytes-total", sanitizedCard.limitBytesTotal.toString())
+                                if (sanitizedCard.comment.isNotBlank()) put("comment", sanitizedCard.comment)
                             }.toString()
 
                             val putReq = Request.Builder()
@@ -2702,12 +2741,14 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                 .header("Authorization", credential)
                                 .build()
                             val resp = httpClient.newCall(putReq).execute()
-                            if (!resp.isSuccessful) {
+                            if (resp.isSuccessful) {
+                                added = true
+                            } else {
                                 val errBody = resp.body?.string().orEmpty()
-                                if (errBody.contains("profile", ignoreCase = true) || errBody.contains("not found", ignoreCase = true)) {
-                                    try {
+                                try {
+                                    if (cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
                                         val createProfBody = JSONObject().apply {
-                                            put("name", sanitizedCard.profile)
+                                            put("name", cleanProfileName)
                                             put("shared-users", "1")
                                         }.toString()
                                         val createReq = Request.Builder()
@@ -2716,10 +2757,36 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                             .header("Authorization", credential)
                                             .build()
                                         httpClient.newCall(createReq).execute()
-                                        val retryResp = httpClient.newCall(putReq).execute()
-                                        if (retryResp.isSuccessful) added = true
-                                    } catch (_: Exception) {}
-                                }
+                                    }
+
+                                    val simpleJson = JSONObject().apply {
+                                        put("name", sanitizedCard.name.trim())
+                                        if (sanitizedCard.password.isNotBlank()) put("password", sanitizedCard.password.trim())
+                                        if (sanitizedCard.profile.isNotBlank()) put("profile", sanitizedCard.profile.trim())
+                                    }.toString()
+                                    val retryReq = Request.Builder()
+                                        .url("$baseUrl/rest/ip/hotspot/user")
+                                        .put(simpleJson.toRequestBody("application/json".toMediaType()))
+                                        .header("Authorization", credential)
+                                        .build()
+                                    val retryResp = httpClient.newCall(retryReq).execute()
+                                    if (retryResp.isSuccessful) {
+                                        added = true
+                                    } else {
+                                        val defJson = JSONObject().apply {
+                                            put("name", sanitizedCard.name.trim())
+                                            if (sanitizedCard.password.isNotBlank()) put("password", sanitizedCard.password.trim())
+                                            put("profile", "default")
+                                        }.toString()
+                                        val defReq = Request.Builder()
+                                            .url("$baseUrl/rest/ip/hotspot/user")
+                                            .put(defJson.toRequestBody("application/json".toMediaType()))
+                                            .header("Authorization", credential)
+                                            .build()
+                                        val defResp = httpClient.newCall(defReq).execute()
+                                        if (defResp.isSuccessful) added = true
+                                    }
+                                } catch (_: Exception) {}
                                 if (!added) {
                                     return@withContext Result.failure(Exception("استجاب الراوتر برفض إضافة الكرت: $errBody"))
                                 }

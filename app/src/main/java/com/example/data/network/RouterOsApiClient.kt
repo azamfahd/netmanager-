@@ -725,7 +725,7 @@ class RouterOsApiClient {
             try {
                 ensureConnected()
                 val profileName = card.profile.trim()
-                if (profileName.isNotBlank() && profileName != "default") {
+                if (profileName.isNotBlank() && !profileName.equals("default", ignoreCase = true)) {
                     try {
                         addProfile(HotspotProfile(id = "", name = profileName, rateLimit = "غير محدد"))
                     } catch (_: Exception) {}
@@ -756,8 +756,8 @@ class RouterOsApiClient {
                 }
 
                 val errMsg = hsResult.exceptionOrNull()?.message.orEmpty()
-                // If failed because profile is not found on the router, auto-create it or fallback
-                if (errMsg.contains("profile", ignoreCase = true) || errMsg.contains("not found", ignoreCase = true)) {
+                // If failed because profile is not found or parameter issue on the router, auto-create it or retry
+                if (errMsg.contains("profile", ignoreCase = true) || errMsg.contains("not found", ignoreCase = true) || errMsg.contains("unknown", ignoreCase = true)) {
                     val profileToCreate = targetProfile ?: HotspotProfile(
                         id = "",
                         name = card.profile,
@@ -790,13 +790,14 @@ class RouterOsApiClient {
         val cleanProfile = card.profile.trim()
         val words = mutableListOf(
             "/ip/hotspot/user/add",
-            "=name=${card.name.trim()}",
-            "=disabled=no"
+            "=name=${card.name.trim()}"
         )
         if (card.password.isNotBlank()) {
-            words.add("=password=${card.password}")
+            words.add("=password=${card.password.trim()}")
         }
-        if (cleanProfile.isNotBlank()) words.add("=profile=$cleanProfile")
+        if (cleanProfile.isNotBlank()) {
+            words.add("=profile=$cleanProfile")
+        }
         val validUptime = formatRouterOsTime(card.limitUptime)
         if (!validUptime.isNullOrBlank()) {
             words.add("=limit-uptime=$validUptime")
@@ -814,27 +815,50 @@ class RouterOsApiClient {
         if (trapSentence != null) {
             val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                 ?: "رفض راوتر ميكروتك إضافة الكرت"
-            // If failed due to argument issue (e.g. limit-uptime or limit-bytes-total unsupported or malformed), retry strict profile add
-            if (cleanProfile.isNotBlank() && (
-                trapMsg.contains("argument", ignoreCase = true) ||
+            
+            val isParamOrVersionTrap = trapMsg.contains("argument", ignoreCase = true) ||
+                trapMsg.contains("parameter", ignoreCase = true) ||
+                trapMsg.contains("unknown", ignoreCase = true) ||
                 trapMsg.contains("limit", ignoreCase = true) ||
                 trapMsg.contains("invalid", ignoreCase = true) ||
-                trapMsg.contains("value", ignoreCase = true)
-            )) {
+                trapMsg.contains("value", ignoreCase = true) ||
+                trapMsg.contains("disabled", ignoreCase = true) ||
+                trapMsg.contains("profile", ignoreCase = true)
+
+            if (isParamOrVersionTrap) {
+                // First retry: clean minimal command with name and profile only (and password if non-blank)
                 val simpleWords = mutableListOf(
                     "/ip/hotspot/user/add",
-                    "=name=${card.name.trim()}",
-                    "=profile=$cleanProfile",
-                    "=disabled=no"
+                    "=name=${card.name.trim()}"
                 )
                 if (card.password.isNotBlank()) {
-                    simpleWords.add("=password=${card.password}")
+                    simpleWords.add("=password=${card.password.trim()}")
                 }
-                if (card.comment.isNotBlank()) simpleWords.add("=comment=${card.comment}")
+                if (cleanProfile.isNotBlank()) {
+                    simpleWords.add("=profile=$cleanProfile")
+                }
+                if (card.comment.isNotBlank()) {
+                    simpleWords.add("=comment=${card.comment}")
+                }
                 writeSentence(simpleWords)
                 val retrySentences = readAllSentencesUntilDone()
                 val retryTrap = retrySentences.firstOrNull { it.firstOrNull() == "!trap" }
                 if (retryTrap == null && retrySentences.any { it.firstOrNull() == "!done" }) {
+                    return Result.success(true)
+                }
+
+                // Second retry: if profile name had issues or version mismatch, retry with default profile
+                val fallbackWords = mutableListOf(
+                    "/ip/hotspot/user/add",
+                    "=name=${card.name.trim()}"
+                )
+                if (card.password.isNotBlank()) {
+                    fallbackWords.add("=password=${card.password.trim()}")
+                }
+                fallbackWords.add("=profile=default")
+                writeSentence(fallbackWords)
+                val fallbackSentences = readAllSentencesUntilDone()
+                if (fallbackSentences.none { it.firstOrNull() == "!trap" } && fallbackSentences.any { it.firstOrNull() == "!done" }) {
                     return Result.success(true)
                 }
             }
@@ -849,9 +873,9 @@ class RouterOsApiClient {
 
     private fun addUserManagerV7User(card: HotspotCard): Result<Boolean> {
         try {
-            val words = mutableListOf("/user-manager/user/add", "=name=${card.name}", "=disabled=no")
+            val words = mutableListOf("/user-manager/user/add", "=name=${card.name.trim()}")
             if (card.password.isNotBlank()) {
-                words.add("=password=${card.password}")
+                words.add("=password=${card.password.trim()}")
             }
             if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
             writeSentence(words)
@@ -866,8 +890,8 @@ class RouterOsApiClient {
             if (card.profile.isNotBlank()) {
                 val profWords = listOf(
                     "/user-manager/user-profile/add",
-                    "=user=${card.name}",
-                    "=profile=${card.profile}"
+                    "=user=${card.name.trim()}",
+                    "=profile=${card.profile.trim()}"
                 )
                 writeSentence(profWords)
                 readAllSentencesUntilDone()
@@ -883,12 +907,11 @@ class RouterOsApiClient {
             val cust = if (customer.isBlank()) "admin" else customer
             val words = mutableListOf(
                 "/tool/user-manager/user/add",
-                "=username=${card.name}",
-                "=customer=$cust",
-                "=disabled=no"
+                "=username=${card.name.trim()}",
+                "=customer=$cust"
             )
             if (card.password.isNotBlank()) {
-                words.add("=password=${card.password}")
+                words.add("=password=${card.password.trim()}")
             }
             if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
             writeSentence(words)
@@ -903,8 +926,8 @@ class RouterOsApiClient {
             if (card.profile.isNotBlank()) {
                 val actWords = listOf(
                     "/tool/user-manager/user/create-and-activate-profile",
-                    "=numbers=${card.name}",
-                    "=profile=${card.profile}",
+                    "=numbers=${card.name.trim()}",
+                    "=profile=${card.profile.trim()}",
                     "=customer=$cust"
                 )
                 writeSentence(actWords)
@@ -912,8 +935,8 @@ class RouterOsApiClient {
                 if (actSentences.none { it.firstOrNull() == "!done" }) {
                     writeSentence(listOf(
                         "/tool/user-manager/user/set",
-                        "=numbers=${card.name}",
-                        "=actual-profile=${card.profile}"
+                        "=numbers=${card.name.trim()}",
+                        "=actual-profile=${card.profile.trim()}"
                     ))
                     readAllSentencesUntilDone()
                 }
@@ -1100,7 +1123,9 @@ class RouterOsApiClient {
                 if (trapSentence != null) {
                     val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                         ?: "رفض راوتر ميكروتك إنشاء الباقة"
-                    if (trapMsg.contains("already exists", ignoreCase = true)) {
+                    if (trapMsg.contains("already exists", ignoreCase = true) ||
+                        trapMsg.contains("already have", ignoreCase = true) ||
+                        trapMsg.contains("already", ignoreCase = true)) {
                         return@withContext Result.success(true)
                     }
                     return@withContext Result.failure(Exception(trapMsg))

@@ -29,7 +29,15 @@ class ExampleRobolectricTest {
     @Test
     fun `verify batch voucher generation produces unique cards`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val db = com.google.firebase.firestore.FirebaseFirestore.getInstance("demo-project")
+        if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) {
+            val options = com.google.firebase.FirebaseOptions.Builder()
+                .setProjectId("demo-project")
+                .setApplicationId("1:1234567890:android:1234567890")
+                .setApiKey("fake-api-key")
+                .build()
+            com.google.firebase.FirebaseApp.initializeApp(context, options)
+        }
+        val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
         val database = com.example.data.local.AppDatabase.getInstance(context)
         val repository = MikrotikRepository(db)
         val config = BatchGenerationConfig(

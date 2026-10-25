@@ -262,10 +262,16 @@ fun VoucherBatchDialog(
 
     // Auto-populate router profile settings on dialog launch if router profile is available and user has no custom saved defaults
     androidx.compose.runtime.LaunchedEffect(profiles) {
-        if (!savedSettings.hasCustomDefaults) {
-            val initialMatch = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
-            if (initialMatch != null) {
-                applyRouterProfile(initialMatch)
+        if (profiles.isNotEmpty()) {
+            val exists = profiles.any { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+            if (!exists) {
+                val best = profiles.firstOrNull { !it.name.equals("default", ignoreCase = true) } ?: profiles.first()
+                applyRouterProfile(best)
+            } else if (!savedSettings.hasCustomDefaults) {
+                val initialMatch = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+                if (initialMatch != null) {
+                    applyRouterProfile(initialMatch)
+                }
             }
         }
     }
@@ -285,6 +291,8 @@ fun VoucherBatchDialog(
         }
         if (matchedProfile != null) {
             applyRouterProfile(matchedProfile)
+        } else if (profiles.isNotEmpty() && !profiles.any { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }) {
+            applyRouterProfile(profiles.first())
         }
     }
 
@@ -302,7 +310,8 @@ fun VoucherBatchDialog(
         }
     }
 
-    val isProfileValid = profiles.isEmpty() || profiles.any { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+    val matchedProfile = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+    val isProfileValid = selectedProfile.isNotBlank()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1351,12 +1360,8 @@ fun VoucherBatchDialog(
                         }
                     }
                 } else {
-                    Text("يرجى اختيار باقة صالحة من القائمة أعلاه لعرض تفاصيلها.", color = MaterialTheme.colorScheme.error)
-                }
-
-                if (!isProfileValid) {
                     Surface(
-                        color = MaterialTheme.colorScheme.errorContainer,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -1365,12 +1370,12 @@ fun VoucherBatchDialog(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Default.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                             Text(
-                                text = "⚠️ الباقة المحددة ($selectedProfile) غير موجودة في راوتر MikroTik! تم إيقاف التوليد لحماية الراوتر. يرجى اختيار باقة متوفرة أو إنشاؤها من قسم الباقات أولاً.",
+                                text = "✨ باقة ($selectedProfile) جاهزة للتوليد، وسيتم مزامنتها وتثبيتها تلقائياً على راوتر ميكروتك أثناء إنشاء الكروت فوراً.",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                fontWeight = FontWeight.Bold
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
                     }
@@ -1380,12 +1385,21 @@ fun VoucherBatchDialog(
         confirmButton = {
             val parsedCount = batchCountInput.toIntOrNull()?.coerceIn(1, 5000) ?: 20
             val parsedCodeLength = codeLengthInput.toIntOrNull()?.coerceIn(3, 16) ?: 6
-            val activeProfileObj = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+            val effectiveProfileObj = matchedProfile ?: HotspotProfile(
+                id = "",
+                name = selectedProfile.trim().ifBlank { "default" },
+                rateLimit = "غير محدد",
+                sessionTimeout = timeLimit.ifBlank { "1d" },
+                dataLimit = if (dataLimitMBInput.isNotBlank()) "${dataLimitMBInput}MB" else "مفتوح",
+                sharedUsers = 1,
+                price = price.ifBlank { "0" },
+                validity = timeLimit.ifBlank { "1d" }
+            )
 
             if (selectedTab == VoucherDialogTab.BATCH_GENERATE) {
                 Button(
                     onClick = {
-                        if (!isProfileValid || activeProfileObj == null) return@Button
+                        if (selectedProfile.isBlank()) return@Button
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
                         val config = BatchGenerationConfig(
                             count = parsedCount,
@@ -1394,9 +1408,9 @@ fun VoucherBatchDialog(
                             codeLength = parsedCodeLength,
                             characterSet = charType,
                             isSingleCode = isSingleCode,
-                            timeLimit = activeProfileObj.validity.takeIf { it.isNotBlank() && it != "غير محدد" } ?: activeProfileObj.sessionTimeout.takeIf { it.isNotBlank() && it != "غير محدد" } ?: "0s",
-                            dataLimitMB = Regex("""\d+""").find(activeProfileObj.dataLimit)?.value?.toLongOrNull() ?: 0L,
-                            price = activeProfileObj.price,
+                            timeLimit = effectiveProfileObj.validity.takeIf { it.isNotBlank() && it != "غير محدد" } ?: effectiveProfileObj.sessionTimeout.takeIf { it.isNotBlank() && it != "غير محدد" } ?: "0s",
+                            dataLimitMB = Regex("""\d+""").find(effectiveProfileObj.dataLimit)?.value?.toLongOrNull() ?: 0L,
+                            price = effectiveProfileObj.price,
                             batchComment = if (selectedAgent != null) "${batchComment} (نقطة: ${selectedAgent.name})" else batchComment,
                             posAgentId = selectedAgent?.id ?: 0L,
                             posAgentName = selectedAgent?.name.orEmpty(),
@@ -1405,10 +1419,10 @@ fun VoucherBatchDialog(
                         onGenerate(config)
                         onDismiss()
                     },
-                    enabled = isProfileValid && activeProfileObj != null,
+                    enabled = selectedProfile.isNotBlank() && parsedCount > 0,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isProfileValid) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                        containerColor = MaterialTheme.colorScheme.primary
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1418,41 +1432,39 @@ fun VoucherBatchDialog(
                     Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (isProfileValid) "توليد وحفظ ($parsedCount كرت) في الراوتر فوراً" else "يرجى اختيار باقة صالحة أولاً",
+                        text = "توليد وحفظ ($parsedCount كرت) في الراوتر فوراً",
                         fontWeight = FontWeight.Bold
                     )
                 }
             } else {
                 Button(
                     onClick = {
-                        if (!isProfileValid || activeProfileObj == null) return@Button
-                        if (singleCode.isNotBlank()) {
-                            val selectedAgent = posAgents.find { it.id == selectedAgentId }
-                            val finalPassword = if (isSingleCode) "" else singlePassword.trim()
-                            val card = HotspotCard(
-                                id = "card_${System.currentTimeMillis()}",
-                                name = singleCode.trim(),
-                                password = finalPassword,
-                                profile = selectedProfile.trim(),
-                                uptime = "0s",
-                                bytesIn = 0,
-                                bytesOut = 0,
-                                limitUptime = activeProfileObj.validity.takeIf { it.isNotBlank() && it != "غير محدد" } ?: activeProfileObj.sessionTimeout.takeIf { it.isNotBlank() && it != "غير محدد" } ?: "0s",
-                                limitBytesTotal = Regex("""\d+""").find(activeProfileObj.dataLimit)?.value?.toLongOrNull()?.let { it * 1024 * 1024L } ?: 0L,
-                                comment = if (selectedAgent != null) "${singleComment.ifBlank { "كرت فردي" }} (نقطة: ${selectedAgent.name})" else singleComment.ifBlank { "كرت فردي" },
-                                disabled = false,
-                                price = activeProfileObj.price
-                            )
-                            onAddSingleCard?.invoke(
-                                card,
-                                selectedAgent?.id ?: 0L,
-                                selectedAgent?.name.orEmpty(),
-                                selectedAgent?.discountPercent ?: 0.0
-                            )
-                            onDismiss()
-                        }
+                        if (selectedProfile.isBlank() || singleCode.isBlank()) return@Button
+                        val selectedAgent = posAgents.find { it.id == selectedAgentId }
+                        val finalPassword = if (isSingleCode) "" else singlePassword.trim()
+                        val card = HotspotCard(
+                            id = "card_${System.currentTimeMillis()}",
+                            name = singleCode.trim(),
+                            password = finalPassword,
+                            profile = selectedProfile.trim(),
+                            uptime = "0s",
+                            bytesIn = 0,
+                            bytesOut = 0,
+                            limitUptime = effectiveProfileObj.validity.takeIf { it.isNotBlank() && it != "غير محدد" } ?: effectiveProfileObj.sessionTimeout.takeIf { it.isNotBlank() && it != "غير محدد" } ?: "0s",
+                            limitBytesTotal = Regex("""\d+""").find(effectiveProfileObj.dataLimit)?.value?.toLongOrNull()?.let { it * 1024 * 1024L } ?: 0L,
+                            comment = if (selectedAgent != null) "${singleComment.ifBlank { "كرت فردي" }} (نقطة: ${selectedAgent.name})" else singleComment.ifBlank { "كرت فردي" },
+                            disabled = false,
+                            price = effectiveProfileObj.price
+                        )
+                        onAddSingleCard?.invoke(
+                            card,
+                            selectedAgent?.id ?: 0L,
+                            selectedAgent?.name.orEmpty(),
+                            selectedAgent?.discountPercent ?: 0.0
+                        )
+                        onDismiss()
                     },
-                    enabled = isProfileValid && activeProfileObj != null && singleCode.isNotBlank(),
+                    enabled = selectedProfile.isNotBlank() && singleCode.isNotBlank(),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1462,7 +1474,7 @@ fun VoucherBatchDialog(
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (isProfileValid) "إضافة وتفعيل الكرت الفردي في الراوتر" else "يرجى اختيار باقة صالحة أولاً",
+                        text = "إضافة وتفعيل الكرت الفردي في الراوتر",
                         fontWeight = FontWeight.Bold
                     )
                 }
