@@ -64,21 +64,21 @@ jobs:
             cat << 'EOF' > app/google-services.json
 {
   "project_info": {
-    "project_number": "258365159100",
-    "project_id": "gen-lang-client-0943066246",
-    "storage_bucket": "gen-lang-client-0943066246.firebasestorage.app"
+    "project_number": "89016625571",
+    "project_id": "netmanager25",
+    "storage_bucket": "netmanager25.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:258365159100:android:357dd1f5bcd26d25c582b9",
+        "mobilesdk_app_id": "1:89016625571:android:6030c4ffbfb95b42d85216",
         "android_client_info": {
-          "package_name": "com.azam.netmanager.mxrtq"
+          "package_name": "com.azamfahd.netmanager.app"
         }
       },
       "api_key": [
         {
-          "current_key": "AIzaSyARFvGdLsqas3dZBw0hTHGYHsUnBH-hS6I"
+          "current_key": "AIzaSyD2pA0c1Ec9BgwYTlkEzJTwJ2uzJPN977E"
         }
       ]
     }
