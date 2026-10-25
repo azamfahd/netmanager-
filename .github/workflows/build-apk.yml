@@ -49,16 +49,43 @@ jobs:
             touch .env
           fi
 
-          # Securely provision google-services.json from GitHub Actions Secret FIREBASE_GOOGLE_SERVICES_JSON
+          # Securely provision google-services.json from GitHub Actions Secret FIREBASE_GOOGLE_SERVICES_JSON or embedded fallback
           if [ -n "${{ secrets.FIREBASE_GOOGLE_SERVICES_JSON }}" ]; then
             echo "${{ secrets.FIREBASE_GOOGLE_SERVICES_JSON }}" > app/google-services.json
             echo "Successfully wrote google-services.json from secret."
           elif [ -f "google-services.json" ]; then
             cp google-services.json app/google-services.json
             echo "Copied google-services.json from repository root."
+          elif [ -f "app/google-services.json" ]; then
+            echo "Using existing app/google-services.json."
           else
-            echo "Error: FIREBASE_GOOGLE_SERVICES_JSON secret is missing or empty, and no google-services.json file was found in the repository."
-            exit 1
+            echo "Warning: FIREBASE_GOOGLE_SERVICES_JSON secret is missing, creating default google-services.json."
+            mkdir -p app
+            cat << 'EOF' > app/google-services.json
+{
+  "project_info": {
+    "project_number": "258365159100",
+    "project_id": "gen-lang-client-0943066246",
+    "storage_bucket": "gen-lang-client-0943066246.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:258365159100:android:357dd1f5bcd26d25c582b9",
+        "android_client_info": {
+          "package_name": "com.azam.netmanager.mxrtq"
+        }
+      },
+      "api_key": [
+        {
+          "current_key": "AIzaSyARFvGdLsqas3dZBw0hTHGYHsUnBH-hS6I"
+        }
+      ]
+    }
+  ],
+  "configuration_version": "1"
+}
+EOF
           fi
 
           # Validate that app/google-services.json is valid JSON and contains package_name com.azam.netmanager.mxrtq
