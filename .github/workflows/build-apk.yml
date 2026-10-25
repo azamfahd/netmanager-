@@ -88,18 +88,18 @@ jobs:
 EOF
           fi
 
-          # Validate that app/google-services.json is valid JSON and contains package_name com.azam.netmanager.mxrtq
+          # Validate that app/google-services.json is valid JSON and contains package_name com.azamfahd.netmanager.app
           if ! jq empty app/google-services.json 2>/dev/null; then
             echo "Error: app/google-services.json is not valid JSON."
             exit 1
           fi
 
-          if ! grep -q "com.azam.netmanager.mxrtq" app/google-services.json; then
-            echo "Error: app/google-services.json does not contain the required package_name 'com.azam.netmanager.mxrtq'."
+          if ! grep -q "com.azamfahd.netmanager.app" app/google-services.json; then
+            echo "Error: app/google-services.json does not contain the required package_name 'com.azamfahd.netmanager.app'."
             exit 1
           fi
 
-          echo "google-services.json validation passed successfully for package com.azam.netmanager.mxrtq."
+          echo "google-services.json validation passed successfully for package com.azamfahd.netmanager.app."
           
           # Restore debug.keystore from base64 if available, or generate a new one
           if [ -f "debug.keystore.base64" ]; then
