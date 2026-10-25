@@ -16,7 +16,7 @@ env:
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
   JAVA_TOOL_OPTIONS: "-Djava.awt.headless=true -Dapple.awt.UIElement=true"
-  GRADLE_OPTS: "-Djava.awt.headless=true -Dorg.gradle.jvmargs=\"-Xmx4g -Dfile.encoding=UTF-8 -Djava.awt.headless=true\""
+  GRADLE_OPTS: "-Djava.awt.headless=true"
 
 jobs:
   build:
@@ -32,7 +32,6 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
 
       - name: Accept Android SDK Licenses
         run: |
@@ -50,28 +49,35 @@ jobs:
             touch .env
           fi
           
-          # Generate debug.keystore if not present
-          if [ ! -f "debug.keystore" ]; then
+          # Restore debug.keystore from base64 if available, or generate a new one
+          if [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+            echo "Successfully restored debug.keystore from debug.keystore.base64"
+          elif [ ! -f "debug.keystore" ]; then
             keytool -genkeypair -v -keystore debug.keystore \
               -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
               -storepass android -keypass android \
               -dname "CN=Android Debug,O=Android,C=US"
+            echo "Generated new debug.keystore"
           fi
 
       - name: Build Debug APK
         run: |
-          set -o pipefail
-          ./gradlew assembleDebug --no-daemon --stacktrace -Djava.awt.headless=true 2>&1 | sed -e '/AWT-EventQueue-0/d' -e '/ksp\.com\.intellij/d'
+          ./gradlew assembleDebug --no-daemon --no-configuration-cache --no-build-cache --stacktrace -Djava.awt.headless=true
 
       - name: Locate and Rename APK
         run: |
           mkdir -p output
           APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          if [ -f "$APK_PATH" ]; then
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
+          fi
+          if [ -n "$APK_PATH" ] && [ -f "$APK_PATH" ]; then
             cp "$APK_PATH" output/NetManager-Mikrotik-Manager.apk
             echo "APK ready at output/NetManager-Mikrotik-Manager.apk"
           else
             echo "Error: APK file not found!"
+            find app/build/outputs -type f || true
             exit 1
           fi
 
