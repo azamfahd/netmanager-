@@ -1,46 +1,73 @@
-# Implementation Plan - 100% Data Retention & Hybrid Cloud-Local Sync System
+# خطة جلب وتصنيف نقاط البث والأبراج والموادم المنزلية (MikroTik Nodes Discovery)
 
-This plan outlines the transition of the application to a high-volume, professional system with zero data loss, 100% record retention, and real-time cloud synchronization.
+## 1. ملخص المشكلة والهدف
+عند الاتصال براوتر ميكروتك، كان النظام يقتصر في جلب نقاط البث على الأجهزة المكتشفة عبر بروتوكول الجيران (`/ip/neighbor/print`) أو كروت الوايرلس الداخلية للراوتر، مما يؤدي إلى حرمان المستخدم من رؤية الموادم المنزلية (TP-Link, Tenda, Huawei, D-Link, إلخ) والنقاط الفرعية وموزعات الفروع التي لا تدعم MNDP/CDP وإنما مسجلة داخل الراوتر في عقود DHCP أو حجز الآيبيهات IP-Bindings أو جدول ARP.
 
-## User Requirements Addressed
-- **100% Data Retention**: No record (session, log, payment, card) is ever automatically or manually purged from the system.
-- **Hybrid Storage Architecture**: Every local record in Room is mirrored to Firebase Firestore for permanent cloud backup and multi-device access.
-- **MicroTik Parity**: Generated cards must match router configurations perfectly and be ready for immediate sale/use.
-- **Professional Stability**: Optimized indexing for high-volume data handling without performance degradation.
-
----
-
-## Completed & Ongoing Changes
-
-### 1. Permanent Retention Policy
-- **Removal of Purge Logic**: All automatic cleanup routines, row-count limits, and "Clear/Purge" UI buttons have been removed from the application.
-- **Schema Hardening**: Entities like `SessionArchiveEntity`, `SystemEventLogEntity`, and `UserLoginHistoryEntity` are now persistent stores that only grow.
-
-### 2. Hybrid Cloud Synchronization (Firestore)
-- **Real-Time Mirroring**: `MainViewModel` now integrates `syncToCloud` across all critical operations:
-  - System Logs & Router Event Logs.
-  - Voucher Generation (Batch History & POS Assignments).
-  - POS Operations (Agent management, Payments, Card sales).
-  - Network Node Heartbeats and Performance Telemetry.
-- **Zero-Trust Security**: `firestore.rules` and `firebase-blueprint.json` configured to gate all writes behind Google Sign-In UID checks and schema validation.
-
-### 3. Authentication & Security
-- **Google Sign-In**: Mandatory authentication via Jetpack Credential Manager to secure cloud data access.
-- **Auth Gate**: A dedicated `AuthScreen` protects the main application dashboard, ensuring only authorized owners access sensitive network and financial data.
-
-### 4. Database Performance (Room)
-- **Indexing**: Added composite and single-column indexes in `AppDao` and Entity classes for `timestamp`, `username`, and `agentId` to maintain speed at high row counts.
-- **Transactions**: Bulk operations (like generating 1000+ cards) use SQLite transactions for atomic, fast execution.
+**الهدف:**
+- جلب كافة نقاط البث الرئيسية والأبراج، بالإضافة إلى نقاط التوزيع والموادم المنزلية والفروع.
+- فحص ودمج المصادر الأربعة للراوتر: **DHCP Leases** و **Hotspot IP-Bindings** و **ARP Table** و **Neighbors**.
+- تطبيق أولوية التسمية المحددة: **الملاحظة والاسم المسجل في الراوتر (`comment`) أولاً**، ثم **اسم الجهاز المرسل (`host-name`)**، ثم اسم الطراز أو الآيبي.
+- تصنيف النقاط إلى: **أبراج رئيسية (`MAIN_TOWER`)**، **نقاط توزيع (`DISTRIBUTION`)**، **موادم منزلية (`HOME_NODE`)**.
+- تحسين واجهة نقاط البث والأبراج لفرز وعرض الموادم المنزلية بوضوح مع عرض حالة الاتصال (نشط/متصل)، الآيبي، الماك، واسم المودم الدقيق.
 
 ---
 
-## Verification Plan
+## 2. التحليل التقني وتعديلات البيانات
 
-### Automated Tests
-- **Firestore Rules**: Verified via JavaScript and Robolectric tests to ensure only the authenticated owner can write/read their data.
-- **Unit Tests**: Verified data persistence and relationship integrity in Room.
+### أ. فحص ودمج مصادر البيانات في `MikrotikRepository.kt`
+حالياً يجلب التطبيق بالفعل قوائم `dhcpLeases` و `ipBindings` و `arpEntries` و `neighbors` عبر أوامر RouterOS Socket و REST API، ولكن في دالة تجميع النقاط `syncLiveSessionsAndNodes` كان يتم استخراج النقاط الفرعية فقط من `neighbors` و `wirelessInterfaces`.
 
-### Manual Verification
-- **Full Retention Check**: Verified that no "Purge" or "Clear" options exist in the System Logs or Network Reports screens.
-- **Cloud Sync Verification**: Confirmed that local actions (generating cards, recording payments) trigger corresponding Firestore writes.
-- **Professional Flow**: Verified that card generation is ready for sale and mirrors Mikrotik logic exactly.
+**الإجراء:**
+1. **استخراج الموادم المنزلية ونقاط الفروع من `dhcpLeases`:**
+   - فحص كل سجل Lease:
+     - استخراج الاسم: يبدأ بـ `comment` المسجل في الراوتر، وإذا لم يتوفر يُؤخذ `host-name` (مثل TP-Link, Tenda_F3, Archer_C6, إلخ).
+     - استخراج الـ IP والـ MAC والحالة (`status == "bound"` تعني متصل ونشط).
+     - تصنيف السجلات التي تحتوي على علامات مودم، راوتر منزلي، حزم ثابتة، أو مشتركي منازل كنقاط `HOME_NODE`.
+2. **استخراج الأجهزة الثابتة والموزعات من `ipBindings`:**
+   - أجهزة `bypassed` أو المسجلة بـ `comment` كمودم أو نقطة توزيع فرعية يتم إضافتها كـ `DISTRIBUTION` أو `HOME_NODE`.
+3. **مطابقة جدول `arpEntries`:**
+   - استكمال أسماء الملاحظات وعناوين الـ MAC للأجهزة المتصلة على منافذ الراوتر المختلفة.
+4. **منع التكرار (Deduplication):**
+   - دمج الأجهزة بناءً على عنوان الـ MAC وعنوان الـ IP بحيث لا يظهر المودم مرتين إذا وُجد في الـ DHCP والـ ARP معاً، مع إعطاء الأولوية للبيانات الأكثر اكتمالاً (الاسم المخصص من الملاحظة).
+
+---
+
+## 3. قواعد التسمية والتصنيف الذكي
+
+### أ. أولوية التسمية (حسب اختيارك):
+1. **الملاحظة (`comment`)** المسجلة في الراوتر (مثل: "مودم منزل أبو أحمد", "نقطة فرع السوق").
+2. **اسم الجهاز المضيف (`host-name`)** الصادر من المودم (مثل: "TL-WR840N", "Tenda-Nova", "Huawei-Home").
+3. **اسم الطراز / الهوية (`identity` / `model`)** من الجيران إن وُجدت.
+4. **عنوان الـ IP أو MAC** كخيار أخير إذا كان غير مسمى.
+
+### ب. التصنيف الثلاثي (`NetworkNodeType`):
+- **برج رئيسي (`MAIN_TOWER`)**: الراوتر الأساسي، قطاعات البث الرئيسية (BaseBox, NetMetal, Omni, مصفوفات البث الخارجية).
+- **نقطة توزيع (`DISTRIBUTION`)**: الموزعات الوسيطة، سويتشات الفروع، المحطات الخارجية (LiteBeam, PowerBeam, Bridge APs).
+- **مودم منزلي (`HOME_NODE`)**: الموادم المنزلية، أجهزة المشتركين المنزلية، والراوترات الفرعية في المنازل.
+
+---
+
+## 4. تحسينات واجهة المستخدم (`NetworkNodesScreen.kt`)
+1. **شريط فلترة وتبويبات سريع:**
+   - الكل (جميع النقاط والموادم).
+   - أبراج رئيسية.
+   - نقاط توزيع.
+   - موادم منزلية وفروع.
+2. **بطاقة المودم المنزلي:**
+   - إبراز اسم المودم المسجل أولاً وبخط واضح.
+   - شارة توضح نوع المودم (مودم منزلي / نقطة توزيع).
+   - مؤشر الحالة اللحظية (متصل / نشط / غير متصل).
+   - إظهار IP المودم، الـ MAC address، وواجهة الاتصال المباشرة.
+   - إحصائيات سريعة في أعلى الشاشة: إجمالي الأبراج، نقاط التوزيع، والموادم المنزلية النشطة.
+
+---
+
+## 5. خطوات التنفيذ والاختبار
+1. **تحديث `MikrotikRepository.kt`:**
+   - بناء خوارزمية تجميع مدمجة `extractNetworkNodes` تجمع بين `neighbors` و `dhcpLeases` و `ipBindings` و `arpEntries`.
+   - تطبيق فلتر الاستبعاد للمستخدمين العاديين المؤقتين مع الإبقاء على الأجهزة المعرفة بملاحظة أو أسماء أجهزة راوترات وموادم.
+2. **تحديث `NetworkNodesScreen.kt`:**
+   - دعم التبويبات الثلاثة (أبراج، توزيع، موادم منزلية).
+   - عرض العدادات والأيقونات المخصصة لكل نوع جهاز.
+3. **التحقق والتجميع (`compile_applet`):**
+   - التأكد من عدم وجود أخطاء في الـ Models والـ Enums وتكامل واجهة Compose.

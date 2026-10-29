@@ -212,15 +212,18 @@ fun VoucherBatchDialog(
     }
     var expandedAgentDropdown by remember { mutableStateOf(false) }
 
-    // Pick first non-default real router profile if available, unless savedSettings has one
+    // Pick first non-default real router profile if available, strictly matching genuine router profiles
     val initialProfile = remember(profiles, savedSettings) {
-        if (savedSettings.hasCustomDefaults && savedSettings.profile.isNotBlank() && profiles.any { it.name.trim().equals(savedSettings.profile.trim(), ignoreCase = true) }) {
-            savedSettings.profile.trim()
+        if (profiles.isNotEmpty()) {
+            val savedMatch = profiles.firstOrNull { it.name.trim().equals(savedSettings.profile.trim(), ignoreCase = true) }
+            if (savedSettings.hasCustomDefaults && savedMatch != null) {
+                savedMatch.name
+            } else {
+                profiles.firstOrNull { !it.name.equals("default", ignoreCase = true) }?.name
+                    ?: profiles.first().name
+            }
         } else {
-            profiles.firstOrNull { it.name.contains("500") }?.name
-                ?: profiles.firstOrNull { !it.name.equals("default", ignoreCase = true) }?.name
-                ?: profiles.firstOrNull()?.name
-                ?: (if (savedSettings.profile.isNotBlank()) savedSettings.profile else "default")
+            ""
         }
     }
     var selectedProfile by remember { mutableStateOf(initialProfile) }
@@ -278,21 +281,22 @@ fun VoucherBatchDialog(
 
     // Helper to apply preset category
     fun applyPreset(preset: VoucherPreset) {
-        price = preset.priceLabel
-        timeLimit = preset.timeLimit
-        dataLimitMBInput = preset.dataLimitMB.toString()
-        batchComment = "دفعة ${preset.title}"
-        singleComment = "كرت ${preset.title}"
         // Find matching real profile from router if available
         val matchedProfile = profiles.firstOrNull {
             it.name.contains(preset.priceValue.toString()) ||
                     it.name.contains(preset.timeLimit, ignoreCase = true) ||
                     it.price.contains(preset.priceValue.toString())
         }
+        
         if (matchedProfile != null) {
             applyRouterProfile(matchedProfile)
-        } else if (profiles.isNotEmpty() && !profiles.any { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }) {
-            applyRouterProfile(profiles.first())
+        } else {
+            // Only update template fields if no exact profile match found
+            price = preset.priceLabel
+            timeLimit = preset.timeLimit
+            dataLimitMBInput = preset.dataLimitMB.toString()
+            batchComment = "دفعة ${preset.title}"
+            singleComment = "كرت ${preset.title}"
         }
     }
 
@@ -659,6 +663,34 @@ fun VoucherBatchDialog(
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
+                        }
+                    }
+                }
+
+                if (profiles.isEmpty()) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Text(
+                                text = "تنبيه: لم يتم جلب أي باقة مسجلة في الراوتر. تأكد من إضافة باقة (Hotspot Profile) في راوترك من Winbox أولاً لتتمكن من إنشاء وتفعيل الكروت.",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
@@ -1400,6 +1432,10 @@ fun VoucherBatchDialog(
                 Button(
                     onClick = {
                         if (selectedProfile.isBlank()) return@Button
+                        if (profiles.none { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }) {
+                            Toast.makeText(context, "الباقة المحددة (${selectedProfile}) غير موجودة في الراوتر. يرجى اختيار باقة صحيحة من القائمة.", Toast.LENGTH_LONG).show()
+                            return@Button
+                        }
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
                         val config = BatchGenerationConfig(
                             count = parsedCount,
@@ -1419,7 +1455,7 @@ fun VoucherBatchDialog(
                         onGenerate(config)
                         onDismiss()
                     },
-                    enabled = selectedProfile.isNotBlank() && parsedCount > 0,
+                    enabled = profiles.isNotEmpty() && selectedProfile.isNotBlank() && parsedCount > 0,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary
@@ -1440,6 +1476,10 @@ fun VoucherBatchDialog(
                 Button(
                     onClick = {
                         if (selectedProfile.isBlank() || singleCode.isBlank()) return@Button
+                        if (profiles.none { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }) {
+                            Toast.makeText(context, "الباقة المحددة (${selectedProfile}) غير موجودة في الراوتر. يرجى اختيار باقة صحيحة من القائمة.", Toast.LENGTH_LONG).show()
+                            return@Button
+                        }
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
                         val finalPassword = if (isSingleCode) "" else singlePassword.trim()
                         val card = HotspotCard(
@@ -1464,7 +1504,7 @@ fun VoucherBatchDialog(
                         )
                         onDismiss()
                     },
-                    enabled = selectedProfile.isNotBlank() && singleCode.isNotBlank(),
+                    enabled = profiles.isNotEmpty() && selectedProfile.isNotBlank() && singleCode.isNotBlank(),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()

@@ -109,6 +109,7 @@ fun NetworkNodesScreen(
     val allNodes by viewModel.networkNodes.collectAsStateWithLifecycle()
     val searchQuery by viewModel.nodeSearchQuery.collectAsStateWithLifecycle()
     val currentSortOption by viewModel.nodeSortOption.collectAsStateWithLifecycle()
+    val selectedNodeTypeFilter by viewModel.nodeTypeFilter.collectAsStateWithLifecycle()
     val isHeartbeatScanning by viewModel.isHeartbeatScanning.collectAsStateWithLifecycle()
     val lastHeartbeatScanTime by viewModel.lastHeartbeatScanTime.collectAsStateWithLifecycle()
     val isClusteringEnabled by viewModel.isClusteringEnabled.collectAsStateWithLifecycle()
@@ -123,6 +124,10 @@ fun NetworkNodesScreen(
     val offlineCount = allNodes.count { it.effectiveStatus == NodeStatus.OFFLINE }
     val noInternetCount = allNodes.count { it.effectiveStatus == NodeStatus.NO_INTERNET }
     val totalUsersOnNodes = allNodes.sumOf { it.connectedUsers }
+
+    val towersCount = allNodes.count { it.nodeType == NetworkNodeType.MAIN_TOWER }
+    val distCount = allNodes.count { it.nodeType == NetworkNodeType.DISTRIBUTION }
+    val homeCount = allNodes.count { it.nodeType == NetworkNodeType.HOME_NODE }
 
     val displayedNodes = nodes
 
@@ -464,6 +469,44 @@ fun NetworkNodesScreen(
 
             // 4. Sorting & Filter Chips
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                // Category Classification Chips (أبراج، نقاط توزيع، موادم منزلية)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = selectedNodeTypeFilter == null,
+                        onClick = { viewModel.updateNodeTypeFilter(null) },
+                        label = { Text("الكل (${allNodes.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(32.dp)
+                    )
+                    FilterChip(
+                        selected = selectedNodeTypeFilter == NetworkNodeType.MAIN_TOWER,
+                        onClick = { viewModel.updateNodeTypeFilter(if (selectedNodeTypeFilter == NetworkNodeType.MAIN_TOWER) null else NetworkNodeType.MAIN_TOWER) },
+                        label = { Text("🗼 أبراج رئيسية ($towersCount)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(32.dp)
+                    )
+                    FilterChip(
+                        selected = selectedNodeTypeFilter == NetworkNodeType.DISTRIBUTION,
+                        onClick = { viewModel.updateNodeTypeFilter(if (selectedNodeTypeFilter == NetworkNodeType.DISTRIBUTION) null else NetworkNodeType.DISTRIBUTION) },
+                        label = { Text("📡 نقاط توزيع ($distCount)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(32.dp)
+                    )
+                    FilterChip(
+                        selected = selectedNodeTypeFilter == NetworkNodeType.HOME_NODE,
+                        onClick = { viewModel.updateNodeTypeFilter(if (selectedNodeTypeFilter == NetworkNodeType.HOME_NODE) null else NetworkNodeType.HOME_NODE) },
+                        label = { Text("🏠 موادم منزلية وفروع ($homeCount)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(32.dp)
+                    )
+                }
+
                 // Sorting Options Row
                 Row(
                     modifier = Modifier
@@ -856,17 +899,25 @@ fun NetworkNodeItem(
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1
                             )
-                            // Node Type Pill (برج رئيسي، نقطة توزيع، نقطة منزلية)
+                            // Node Type Pill (برج رئيسي، نقطة توزيع، مودم منزلي)
                             Surface(
-                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                color = when (node.nodeType) {
+                                    NetworkNodeType.MAIN_TOWER -> Color(0xFF1565C0).copy(alpha = 0.15f)
+                                    NetworkNodeType.DISTRIBUTION -> Color(0xFF00897B).copy(alpha = 0.15f)
+                                    NetworkNodeType.HOME_NODE -> Color(0xFFE65100).copy(alpha = 0.15f)
+                                },
                                 shape = RoundedCornerShape(6.dp)
                             ) {
                                 Text(
-                                    text = node.nodeType.titleAr,
+                                    text = if (node.nodeType == NetworkNodeType.HOME_NODE) "مودم منزلي / فرع" else node.nodeType.titleAr,
                                     fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                    color = when (node.nodeType) {
+                                        NetworkNodeType.MAIN_TOWER -> Color(0xFF0D47A1)
+                                        NetworkNodeType.DISTRIBUTION -> Color(0xFF004D40)
+                                        NetworkNodeType.HOME_NODE -> Color(0xFFBF360C)
+                                    },
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                 )
                             }
                         }
@@ -889,6 +940,16 @@ fun NetworkNodeItem(
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
+                        }
+
+                        // Device Model and MAC Address
+                        if (node.model.isNotBlank()) {
+                            Text(
+                                text = "الجهاز: ${node.model}${if (node.macAddress.isNotBlank()) " • MAC: ${node.macAddress}" else ""}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                maxLines = 1
+                            )
                         }
                     }
                 }

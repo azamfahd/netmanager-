@@ -58,13 +58,15 @@ object RouterCacheManager {
         servers: List<HotspotServerInfo>,
         nodes: List<NetworkNode>,
         logs: List<SystemLogEntry>,
-        ipBindings: List<IpBinding> = emptyList()
+        ipBindings: List<IpBinding> = emptyList(),
+        isDemo: Boolean = false
     ) {
         try {
             val root = JSONObject().apply {
                 put("ipAddress", ipAddress)
                 put("routerName", routerName)
                 put("timestamp", System.currentTimeMillis())
+                put("isDemo", isDemo)
                 
                 put("resource", JSONObject().apply {
                     put("uptime", resource.uptime)
@@ -84,18 +86,8 @@ object RouterCacheManager {
                     put("routerboard", routerBoard.routerboard)
                 })
 
-                val currentCardNames = cards.map { it.name }.toSet()
-                val existingCards = try { loadSnapshot(context, ipAddress)?.cards ?: emptyList() } catch (_: Exception) { emptyList() }
-                val allCombinedCards = mutableListOf<HotspotCard>()
-                allCombinedCards.addAll(cards)
-                existingCards.filter { it.isExpired || it.bytesIn > 0L || it.bytesOut > 0L }.forEach { prevCard ->
-                    if (!currentCardNames.contains(prevCard.name)) {
-                        allCombinedCards.add(prevCard)
-                    }
-                }
-
                 put("cards", JSONArray().apply {
-                    allCombinedCards.forEach { c ->
+                    cards.forEach { c ->
                         put(JSONObject().apply {
                             put("id", c.id)
                             put("name", c.name)
@@ -235,6 +227,13 @@ object RouterCacheManager {
             if (!file.exists()) return null
             val root = JSONObject(file.readText())
 
+            val isDemoSnapshot = root.optBoolean("isDemo", false)
+            if (!ipAddress.equals("demo", ignoreCase = true) && isDemoSnapshot) {
+                // Do not return demo snapshot for a real router IP
+                try { file.delete() } catch (_: Exception) {}
+                return null
+            }
+
             val ip = root.optString("ipAddress", ipAddress)
             val rName = root.optString("routerName", "")
             val time = root.optLong("timestamp", System.currentTimeMillis())
@@ -259,14 +258,22 @@ object RouterCacheManager {
                 routerboard = rbObj?.optBoolean("routerboard", true) ?: true
             )
 
+            val legacyDemoCards = setOf("784912", "319405", "849201", "651829", "492018", "910283", "182940", "502914", "390124")
+            val legacyDemoProfiles = setOf("1 Hour - 500MB", "Daily - 2000MB", "Weekly - 10GB", "Monthly - VIP 30GB")
+            val legacyDemoNodes = setOf("node_ap_main", "node_ap_east", "node_home_modem_1", "node_home_modem_2")
+
             val cardsList = mutableListOf<HotspotCard>()
             val cArr = root.optJSONArray("cards") ?: JSONArray()
             for (i in 0 until cArr.length()) {
                 val o = cArr.getJSONObject(i)
+                val cardName = o.optString("name", "")
+                if (!isDemoSnapshot && legacyDemoCards.contains(cardName)) {
+                    continue
+                }
                 cardsList.add(
                     HotspotCard(
                         id = o.optString("id", ""),
-                        name = o.optString("name", ""),
+                        name = cardName,
                         password = o.optString("password", ""),
                         profile = o.optString("profile", ""),
                         uptime = o.optString("uptime", ""),
@@ -285,10 +292,14 @@ object RouterCacheManager {
             val pArr = root.optJSONArray("profiles") ?: JSONArray()
             for (i in 0 until pArr.length()) {
                 val o = pArr.getJSONObject(i)
+                val profName = o.optString("name", "")
+                if (!isDemoSnapshot && legacyDemoProfiles.contains(profName)) {
+                    continue
+                }
                 profList.add(
                     HotspotProfile(
                         id = o.optString("id", ""),
-                        name = o.optString("name", ""),
+                        name = profName,
                         sharedUsers = o.optInt("sharedUsers", 1),
                         rateLimit = o.optString("rateLimit", ""),
                         validity = o.optString("validity", ""),
@@ -340,6 +351,10 @@ object RouterCacheManager {
             val nArr = root.optJSONArray("nodes") ?: JSONArray()
             for (i in 0 until nArr.length()) {
                 val o = nArr.getJSONObject(i)
+                val nodeId = o.optString("id", "")
+                if (!isDemoSnapshot && legacyDemoNodes.contains(nodeId)) {
+                    continue
+                }
                 val nRole = o.optString("role", "")
                 val nTypeStr = o.optString("nodeType", "")
                 val nodeType = try {

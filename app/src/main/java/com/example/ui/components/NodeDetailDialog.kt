@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Laptop
 import androidx.compose.material.icons.filled.Memory
@@ -138,7 +139,11 @@ fun NodeDetailDialog(
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = if (node.role.contains("Starlink")) Icons.Default.WifiTethering else Icons.Default.CellTower,
+                                imageVector = when (node.nodeType) {
+                                    com.example.data.model.NetworkNodeType.MAIN_TOWER -> Icons.Default.CellTower
+                                    com.example.data.model.NetworkNodeType.DISTRIBUTION -> Icons.Default.WifiTethering
+                                    com.example.data.model.NetworkNodeType.HOME_NODE -> Icons.Default.Home
+                                },
                                 contentDescription = null,
                                 tint = if (node.isOnline) StatusActiveGreen else StatusErrorRed,
                                 modifier = Modifier.size(24.dp)

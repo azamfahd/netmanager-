@@ -725,58 +725,42 @@ class RouterOsApiClient {
             try {
                 ensureConnected()
                 val profileName = card.profile.trim()
-                if (profileName.isNotBlank() && !profileName.equals("default", ignoreCase = true)) {
-                    try {
-                        addProfile(HotspotProfile(id = "", name = profileName, rateLimit = "غير محدد"))
-                    } catch (_: Exception) {}
+
+                // Refresh cachedProfiles if empty to ensure we know the router's exact profile catalog
+                var currentProfiles = synchronized(cachedProfiles) { cachedProfiles.toList() }
+                if (currentProfiles.isEmpty()) {
+                    val freshProfiles = getHotspotProfiles().getOrDefault(emptyList())
+                    currentProfiles = freshProfiles
                 }
 
-                val targetProfile = synchronized(cachedProfiles) {
-                    cachedProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) }
-                }
+                val targetProfile = currentProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) }
+                val exactProfileName = targetProfile?.name ?: profileName
                 val source = targetProfile?.source ?: ""
+
+                val cardWithExactProfile = card.copy(profile = exactProfileName)
 
                 // 1. If it is User-Manager v7
                 if (source == "usermanager_v7") {
-                    val umResult = addUserManagerV7User(card)
+                    val umResult = addUserManagerV7User(cardWithExactProfile)
                     if (umResult.isSuccess) return@withContext umResult
                 }
 
                 // 2. If it is User-Manager v6 (/tool/user-manager)
                 if (source == "usermanager_v6") {
                     val customer = targetProfile?.comment?.takeIf { it.isNotBlank() } ?: "admin"
-                    val umResult = addUserManagerV6User(card, customer)
+                    val umResult = addUserManagerV6User(cardWithExactProfile, customer)
                     if (umResult.isSuccess) return@withContext umResult
                 }
 
                 // 3. Try Native Hotspot /ip/hotspot/user/add
-                val hsResult = addHotspotNativeUser(card)
+                val hsResult = addHotspotNativeUser(cardWithExactProfile)
                 if (hsResult.isSuccess) {
                     return@withContext hsResult
                 }
 
                 val errMsg = hsResult.exceptionOrNull()?.message.orEmpty()
-                // If failed because profile is not found or parameter issue on the router, auto-create it or retry
                 if (errMsg.contains("profile", ignoreCase = true) || errMsg.contains("not found", ignoreCase = true) || errMsg.contains("unknown", ignoreCase = true)) {
-                    val profileToCreate = targetProfile ?: HotspotProfile(
-                        id = "",
-                        name = card.profile,
-                        rateLimit = "غير محدد",
-                        sessionTimeout = formatRouterOsTime(card.limitUptime) ?: "1d"
-                    )
-                    addProfile(profileToCreate)
-                    val retryHs = addHotspotNativeUser(card)
-                    if (retryHs.isSuccess) {
-                        return@withContext retryHs
-                    }
-
-                    // Fallback to User Manager v7 then v6 if profile might be there
-                    if (source.isBlank()) {
-                        val tryV7 = addUserManagerV7User(card)
-                        if (tryV7.isSuccess) return@withContext tryV7
-                        val tryV6 = addUserManagerV6User(card, "admin")
-                        if (tryV6.isSuccess) return@withContext tryV6
-                    }
+                    return@withContext Result.failure(Exception("الباقة المحددة (${profileName}) غير موجودة في الراوتر. يرجى التأكد من وجودها أولاً."))
                 }
 
                 return@withContext hsResult
@@ -790,7 +774,8 @@ class RouterOsApiClient {
         val cleanProfile = card.profile.trim()
         val words = mutableListOf(
             "/ip/hotspot/user/add",
-            "=name=${card.name.trim()}"
+            "=name=${card.name.trim()}",
+            "=disabled=no"
         )
         if (card.password.isNotBlank()) {
             words.add("=password=${card.password.trim()}")
@@ -821,15 +806,14 @@ class RouterOsApiClient {
                 trapMsg.contains("unknown", ignoreCase = true) ||
                 trapMsg.contains("limit", ignoreCase = true) ||
                 trapMsg.contains("invalid", ignoreCase = true) ||
-                trapMsg.contains("value", ignoreCase = true) ||
-                trapMsg.contains("disabled", ignoreCase = true) ||
-                trapMsg.contains("profile", ignoreCase = true)
+                trapMsg.contains("value", ignoreCase = true)
 
             if (isParamOrVersionTrap) {
-                // First retry: clean minimal command with name and profile only (and password if non-blank)
+                // First retry: clean minimal command with name and profile and disabled=no
                 val simpleWords = mutableListOf(
                     "/ip/hotspot/user/add",
-                    "=name=${card.name.trim()}"
+                    "=name=${card.name.trim()}",
+                    "=disabled=no"
                 )
                 if (card.password.isNotBlank()) {
                     simpleWords.add("=password=${card.password.trim()}")
@@ -844,21 +828,18 @@ class RouterOsApiClient {
                 val retrySentences = readAllSentencesUntilDone()
                 val retryTrap = retrySentences.firstOrNull { it.firstOrNull() == "!trap" }
                 if (retryTrap == null && retrySentences.any { it.firstOrNull() == "!done" }) {
-                    return Result.success(true)
-                }
-
-                // Second retry: if profile name had issues or version mismatch, retry with default profile
-                val fallbackWords = mutableListOf(
-                    "/ip/hotspot/user/add",
-                    "=name=${card.name.trim()}"
-                )
-                if (card.password.isNotBlank()) {
-                    fallbackWords.add("=password=${card.password.trim()}")
-                }
-                fallbackWords.add("=profile=default")
-                writeSentence(fallbackWords)
-                val fallbackSentences = readAllSentencesUntilDone()
-                if (fallbackSentences.none { it.firstOrNull() == "!trap" } && fallbackSentences.any { it.firstOrNull() == "!done" }) {
+                    // Enforce profile assignment explicitly
+                    if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
+                        try {
+                            writeSentence(listOf(
+                                "/ip/hotspot/user/set",
+                                "=numbers=${card.name.trim()}",
+                                "=profile=$cleanProfile",
+                                "=disabled=no"
+                            ))
+                            readAllSentencesUntilDone()
+                        } catch (_: Exception) {}
+                    }
                     return Result.success(true)
                 }
             }
@@ -868,6 +849,20 @@ class RouterOsApiClient {
         if (!isDone) {
             return Result.failure(Exception("لم يؤكد الراوتر إضافة الكرت"))
         }
+
+        // Post-verification: ensure profile is indeed bound properly on router
+        if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
+            try {
+                writeSentence(listOf(
+                    "/ip/hotspot/user/set",
+                    "=numbers=${card.name.trim()}",
+                    "=profile=$cleanProfile",
+                    "=disabled=no"
+                ))
+                readAllSentencesUntilDone()
+            } catch (_: Exception) {}
+        }
+
         return Result.success(true)
     }
 
@@ -894,7 +889,13 @@ class RouterOsApiClient {
                     "=profile=${card.profile.trim()}"
                 )
                 writeSentence(profWords)
-                readAllSentencesUntilDone()
+                val profSentences = readAllSentencesUntilDone()
+                val profTrap = profSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (profTrap != null) {
+                    val profMsg = profTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                        ?: "فشل ربط المستخدم بالباقة في يوزرمانجر"
+                    return Result.failure(Exception(profMsg))
+                }
             }
             return Result.success(true)
         } catch (e: Exception) {

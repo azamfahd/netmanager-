@@ -83,7 +83,8 @@ class MainViewModel(
                         servers = snapshot.servers,
                         nodes = snapshot.nodes,
                         logs = snapshot.logs,
-                        ipBindings = snapshot.ipBindings
+                        ipBindings = snapshot.ipBindings,
+                        isDemo = (_connectionState.value as? ConnectionState.Connected)?.isDemo == true || snapshot.ipAddress.equals("demo", ignoreCase = true)
                     )
                     
                     // Persist logs to Room
@@ -1405,16 +1406,25 @@ class MainViewModel(
     private val _nodeSortOption = MutableStateFlow(com.example.data.model.NodeSortOption.MOST_USERS)
     val nodeSortOption: StateFlow<com.example.data.model.NodeSortOption> = _nodeSortOption.asStateFlow()
 
+    private val _nodeTypeFilter = MutableStateFlow<com.example.data.model.NetworkNodeType?>(null)
+    val nodeTypeFilter: StateFlow<com.example.data.model.NetworkNodeType?> = _nodeTypeFilter.asStateFlow()
+
     val filteredNetworkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = combine(
-        networkNodes, _nodeSearchQuery, _nodeSortOption
-    ) { nodes, query, sortOption ->
-        val filtered = if (query.isBlank()) nodes else {
+        networkNodes, _nodeSearchQuery, _nodeSortOption, _nodeTypeFilter
+    ) { nodes, query, sortOption, typeFilter ->
+        var filtered = if (query.isBlank()) nodes else {
             nodes.filter {
                 it.name.contains(query, ignoreCase = true) ||
                         it.ipAddress.contains(query, ignoreCase = true) ||
+                        it.macAddress.contains(query, ignoreCase = true) ||
                         it.location.contains(query, ignoreCase = true) ||
-                        it.model.contains(query, ignoreCase = true)
+                        it.model.contains(query, ignoreCase = true) ||
+                        it.role.contains(query, ignoreCase = true) ||
+                        it.ssid.contains(query, ignoreCase = true)
             }
+        }
+        if (typeFilter != null) {
+            filtered = filtered.filter { it.nodeType == typeFilter }
         }
 
         when (sortOption) {
@@ -1430,6 +1440,10 @@ class MainViewModel(
 
     fun updateNodeSortOption(sortOption: com.example.data.model.NodeSortOption) {
         _nodeSortOption.value = sortOption
+    }
+
+    fun updateNodeTypeFilter(type: com.example.data.model.NetworkNodeType?) {
+        _nodeTypeFilter.value = type
     }
 
     // Filtering & Search
@@ -1605,7 +1619,8 @@ class MainViewModel(
                     servers = snapshot.servers,
                     nodes = snapshot.nodes,
                     logs = snapshot.logs,
-                    ipBindings = snapshot.ipBindings
+                    ipBindings = snapshot.ipBindings,
+                    isDemo = currentConn.isDemo
                 )
                 refreshCachedSnapshot(context)
                 _toastEvent.emit("✓ تم حفظ وتحديث قاعدة البيانات المحلية للراوتر بنجاح!")
@@ -1724,7 +1739,8 @@ class MainViewModel(
                             servers = snapshot.servers,
                             nodes = snapshot.nodes,
                             logs = snapshot.logs,
-                            ipBindings = snapshot.ipBindings
+                            ipBindings = snapshot.ipBindings,
+                            isDemo = config.isDemoMode
                         )
                     }
                 }

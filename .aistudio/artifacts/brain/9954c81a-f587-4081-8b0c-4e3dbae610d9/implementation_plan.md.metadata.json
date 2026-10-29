@@ -1,6 +1,6 @@
 {
-  "summary":  "Updated implementation plan to reflect the shift from database cleanup/purging to 100% data retention and hybrid local-cloud sync as requested by the user.",
-  "updatedAt":  "2026-10-24T20:39:00.199494926Z",
+  "summary":  "خطة شاملة لجلب وتصنيف كافة نقاط البث والأبراج والموادم المنزلية والفروع من راوتر ميكروتك (عبر DHCP Leases و IP-Bindings و ARP و Neighbors)، مع تطبيق أولوية التسمية (الملاحظة أولاً ثم اسم الجهاز) وتصنيفها بدقة في واجهة نقاط البث.",
+  "updatedAt":  "2026-10-29T18:48:05.229544218Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
