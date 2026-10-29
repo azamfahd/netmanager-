@@ -1704,10 +1704,32 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
 
     private fun isModemOrNetworkDevice(nameOrHost: String, comment: String): Boolean {
         val text = "$nameOrHost $comment".lowercase()
+        
+        // Exclude smartphones and personal client devices
+        val phoneOrClientKeywords = listOf(
+            "phone", "galaxy", "iphone", "android", "ios", "redmi", "nova", "honor",
+            "oppo", "vivo", "realme", "infinix", "tecno", "pixel", "miui", "hyperos",
+            "oneui", "pad", "tablet", "watch", "smart tv", "tv", "laptop", "pc", "desktop",
+            "samsung", "huawei", "xiaomi", "oppo", "vivo" // phone manufacturers in generic hostnames without router models
+        )
+        // If it explicitly mentions phone model or client keywords without router/modem keywords, it's a phone
+        val hasPhoneKeyword = phoneOrClientKeywords.any { text.contains(it) }
+        val hasRouterKeyword = listOf(
+            "مودم", "راوتر", "نقطة", "فرع", "برج", "موزع", "tp-link", "tplink", "archer", 
+            "tenda", "mercusys", "d-link", "dlink", "totolink", "netgear", "linksys", 
+            "cisco", "draytek", "mikrotik", "router", "modem", "access point", "ap-", 
+            "ap_", "cpe", "station", "bridge", "openwrt", "dd-wrt", "repeater", "extender", 
+            "wlan", "nanostation", "litebeam", "powerbeam", "unifi", "airmax", "ubnt"
+        ).any { text.contains(it) }
+
+        if (hasPhoneKeyword && !hasRouterKeyword) {
+            return false
+        }
+
         val modemKeywords = listOf(
             "مودم", "راوتر", "نقطة", "فرع", "برج", "منزل", "بيت", "شقة", "محل", "مكتب", "موزع", "شبكة",
-            "tp-link", "tplink", "archer", "tenda", "mercusys", "huawei", "d-link", "dlink",
-            "zte", "xiaomi", "redmi", "totolink", "netgear", "linksys", "cisco", "draytek", "mikrotik",
+            "tp-link", "tplink", "archer", "tenda", "mercusys", "d-link", "dlink",
+            "zte", "totolink", "netgear", "linksys", "cisco", "draytek", "mikrotik",
             "router", "modem", "access point", "ap-", "ap_", "cpe", "station", "bridge",
             "openwrt", "dd-wrt", "repeater", "extender", "wlan", "nanostation", "litebeam", "powerbeam",
             "unifi", "airmax", "ubnt"
@@ -1853,7 +1875,7 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
             val isDynamic = l["dynamic"] != "false"
             val disabled = l["disabled"] == "true"
 
-            val isCandidate = comment.isNotBlank() || isModemOrNetworkDevice(hostName, comment) || !isDynamic
+            val isCandidate = (comment.isNotBlank() && isModemOrNetworkDevice("", comment)) || isModemOrNetworkDevice(hostName, comment)
 
             if (isCandidate && (mac.isNotBlank() || ip.isNotBlank())) {
                 val isAlreadyPresent = (mac.isNotBlank() && addedMacs.contains(mac)) || (ip.isNotBlank() && addedIps.contains(ip))
