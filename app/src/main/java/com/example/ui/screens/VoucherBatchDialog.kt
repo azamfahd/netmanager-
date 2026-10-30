@@ -212,18 +212,15 @@ fun VoucherBatchDialog(
     }
     var expandedAgentDropdown by remember { mutableStateOf(false) }
 
-    // Pick first non-default real router profile if available, strictly matching genuine router profiles
+    // Pick first non-default real router profile if available, unless savedSettings has one
     val initialProfile = remember(profiles, savedSettings) {
-        if (profiles.isNotEmpty()) {
-            val savedMatch = profiles.firstOrNull { it.name.trim().equals(savedSettings.profile.trim(), ignoreCase = true) }
-            if (savedSettings.hasCustomDefaults && savedMatch != null) {
-                savedMatch.name
-            } else {
-                profiles.firstOrNull { !it.name.equals("default", ignoreCase = true) }?.name
-                    ?: profiles.first().name
-            }
+        if (savedSettings.hasCustomDefaults && savedSettings.profile.isNotBlank() && profiles.any { it.name.trim().equals(savedSettings.profile.trim(), ignoreCase = true) }) {
+            savedSettings.profile.trim()
         } else {
-            ""
+            profiles.firstOrNull { it.name.contains("500") }?.name
+                ?: profiles.firstOrNull { !it.name.equals("default", ignoreCase = true) }?.name
+                ?: profiles.firstOrNull()?.name
+                ?: (if (savedSettings.profile.isNotBlank()) savedSettings.profile else "default")
         }
     }
     var selectedProfile by remember { mutableStateOf(initialProfile) }
@@ -244,11 +241,14 @@ fun VoucherBatchDialog(
     var singlePassword by remember { mutableStateOf("") }
     var singleComment by remember { mutableStateOf("كرت فردي") }
 
+    var targetSystem by remember { mutableStateOf("hotspot") }
+
     var expandedDropdown by remember { mutableStateOf(false) }
 
     // Helper to apply real router profile settings
     fun applyRouterProfile(profile: HotspotProfile) {
         selectedProfile = profile.name
+        targetSystem = if (profile.isUserManager) "usermanager" else "hotspot"
         if (profile.price.isNotBlank() && profile.price != "0 ر.ي") {
             price = profile.price
         }
@@ -314,7 +314,10 @@ fun VoucherBatchDialog(
         }
     }
 
-    val matchedProfile = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+    val matchedProfile = profiles.firstOrNull { 
+        it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) && 
+        (if (targetSystem == "usermanager") it.isUserManager else it.isHotspot) 
+    } ?: profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
     val isProfileValid = selectedProfile.isNotBlank()
 
     AlertDialog(
@@ -667,31 +670,32 @@ fun VoucherBatchDialog(
                     }
                 }
 
-                if (profiles.isEmpty()) {
-                    Card(
+                // System Target Selector (Hotspot vs User Manager)
+                Column {
+                    Text(
+                        text = "نظام وجهة إنشاء الكروت في الراوتر:",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.errorContainer
-                        ),
-                        shape = RoundedCornerShape(12.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Clear,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                            Text(
-                                text = "تنبيه: لم يتم جلب أي باقة مسجلة في الراوتر. تأكد من إضافة باقة (Hotspot Profile) في راوترك من Winbox أولاً لتتمكن من إنشاء وتفعيل الكروت.",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                        FilterChip(
+                            selected = targetSystem == "hotspot",
+                            onClick = { targetSystem = "hotspot" },
+                            label = { Text("🌐 سيرفر الهوتسبوت (Hotspot)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = targetSystem == "usermanager",
+                            onClick = { targetSystem = "usermanager" },
+                            label = { Text("👤 يوزرمانجر (User Manager)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
 
@@ -707,6 +711,7 @@ fun VoucherBatchDialog(
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             items(profiles, key = { "${it.id}_${it.name}_${it.source}" }) { prof ->
                                 val isSelected = selectedProfile.trim().equals(prof.name.trim(), ignoreCase = true)
+                                val isUm = prof.isUserManager
                                 Surface(
                                     onClick = { applyRouterProfile(prof) },
                                     shape = RoundedCornerShape(10.dp),
@@ -719,7 +724,7 @@ fun VoucherBatchDialog(
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         Text(
-                                            text = prof.name,
+                                            text = if (isUm) "👤 ${prof.name}" else "🌐 ${prof.name}",
                                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
                                             fontSize = 12.sp,
                                             color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
@@ -881,6 +886,36 @@ fun VoucherBatchDialog(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+                        }
+                    }
+
+                    // System reassurance banner
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        color = (if (targetSystem == "hotspot") Color(0xFF1976D2) else Color(0xFF00897B)).copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                tint = if (targetSystem == "hotspot") Color(0xFF1976D2) else Color(0xFF00897B),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = if (targetSystem == "hotspot")
+                                    "🌐 سيتم تفعيل الكرت في سيرفر الهوتسبوت الأساسي (/ip/hotspot/user) والتأكد التلقائي من توافق الباقة مع السيرفر وتنشيط الكرت فوراً (=disabled=no) للعمل على صفحة الدخول."
+                                else
+                                    "👤 سيتم تفعيل الكرت في نظام يوزرمانجر (/user-manager/user) وربطه بالباقة المحددة في الراوتر بنجاح.",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
                         }
                     }
                 }
@@ -1437,6 +1472,8 @@ fun VoucherBatchDialog(
                             return@Button
                         }
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
+                        val userLimitMB = dataLimitMBInput.trim().toLongOrNull() ?: 0L
+                        val userTimeLimit = timeLimit.trim()
                         val config = BatchGenerationConfig(
                             count = parsedCount,
                             profile = selectedProfile.trim(),
@@ -1444,18 +1481,20 @@ fun VoucherBatchDialog(
                             codeLength = parsedCodeLength,
                             characterSet = charType,
                             isSingleCode = isSingleCode,
-                            timeLimit = effectiveProfileObj.validity.takeIf { it.isNotBlank() && it != "غير محدد" } ?: effectiveProfileObj.sessionTimeout.takeIf { it.isNotBlank() && it != "غير محدد" } ?: "0s",
-                            dataLimitMB = Regex("""\d+""").find(effectiveProfileObj.dataLimit)?.value?.toLongOrNull() ?: 0L,
-                            price = effectiveProfileObj.price,
+                            timeLimit = userTimeLimit,
+                            dataLimitMB = userLimitMB,
+                            price = price.ifBlank { effectiveProfileObj.price },
                             batchComment = if (selectedAgent != null) "${batchComment} (نقطة: ${selectedAgent.name})" else batchComment,
                             posAgentId = selectedAgent?.id ?: 0L,
                             posAgentName = selectedAgent?.name.orEmpty(),
-                            discountPercent = selectedAgent?.discountPercent ?: 0.0
+                            discountPercent = selectedAgent?.discountPercent ?: 0.0,
+                            targetSystem = targetSystem,
+                            profileSource = effectiveProfileObj.source
                         )
                         onGenerate(config)
                         onDismiss()
                     },
-                    enabled = profiles.isNotEmpty() && selectedProfile.isNotBlank() && parsedCount > 0,
+                    enabled = selectedProfile.isNotBlank() && parsedCount > 0,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary
@@ -1481,6 +1520,8 @@ fun VoucherBatchDialog(
                             return@Button
                         }
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
+                        val userLimitMB = dataLimitMBInput.trim().toLongOrNull() ?: 0L
+                        val userTimeLimit = timeLimit.trim()
                         val finalPassword = if (isSingleCode) "" else singlePassword.trim()
                         val card = HotspotCard(
                             id = "card_${System.currentTimeMillis()}",
@@ -1490,11 +1531,12 @@ fun VoucherBatchDialog(
                             uptime = "0s",
                             bytesIn = 0,
                             bytesOut = 0,
-                            limitUptime = effectiveProfileObj.validity.takeIf { it.isNotBlank() && it != "غير محدد" } ?: effectiveProfileObj.sessionTimeout.takeIf { it.isNotBlank() && it != "غير محدد" } ?: "0s",
-                            limitBytesTotal = Regex("""\d+""").find(effectiveProfileObj.dataLimit)?.value?.toLongOrNull()?.let { it * 1024 * 1024L } ?: 0L,
+                            limitUptime = userTimeLimit,
+                            limitBytesTotal = if (userLimitMB > 0L) userLimitMB * 1024 * 1024L else 0L,
                             comment = if (selectedAgent != null) "${singleComment.ifBlank { "كرت فردي" }} (نقطة: ${selectedAgent.name})" else singleComment.ifBlank { "كرت فردي" },
                             disabled = false,
-                            price = effectiveProfileObj.price
+                            price = price.ifBlank { effectiveProfileObj.price },
+                            cardType = targetSystem
                         )
                         onAddSingleCard?.invoke(
                             card,
@@ -1504,7 +1546,7 @@ fun VoucherBatchDialog(
                         )
                         onDismiss()
                     },
-                    enabled = profiles.isNotEmpty() && selectedProfile.isNotBlank() && singleCode.isNotBlank(),
+                    enabled = selectedProfile.isNotBlank() && singleCode.isNotBlank(),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()

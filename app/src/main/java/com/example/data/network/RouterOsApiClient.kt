@@ -38,14 +38,16 @@ class RouterOsApiClient {
 
     fun getCachedProfiles(): List<HotspotProfile> = synchronized(cachedProfiles) { cachedProfiles.toList() }
 
-    suspend fun ensureConnected(): Boolean {
-        if (socket != null && socket?.isClosed == false && socket?.isConnected == true) {
-            return true
+    suspend fun ensureConnected(): Boolean = withContext(Dispatchers.IO) {
+        synchronized(socketLock) {
+            if (socket != null && socket?.isClosed == false && socket?.isConnected == true) {
+                return@synchronized true
+            }
+            if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
+                return@synchronized reconnectInternal()
+            }
+            false
         }
-        if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
-            return connectAndLogin(lastHost, lastPort, lastUsername, lastPassword).isSuccess
-        }
-        return false
     }
 
     suspend fun connectAndLogin(
@@ -130,7 +132,9 @@ class RouterOsApiClient {
     suspend fun getSystemResource(): Result<RouterResource> {
         return withContext(Dispatchers.IO) {
             try {
-                ensureConnected()
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
+                }
                 writeSentence(listOf("/system/resource/print"))
                 val sentences = readAllSentencesUntilDone()
                 val re = sentences.firstOrNull { it.firstOrNull() == "!re" }
@@ -168,7 +172,9 @@ class RouterOsApiClient {
     suspend fun getActiveHotspotUsers(): Result<List<HotspotActiveUser>> {
         return withContext(Dispatchers.IO) {
             try {
-                ensureConnected()
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
+                }
                 writeSentence(listOf("/ip/hotspot/active/print"))
                 val sentences = readAllSentencesUntilDone()
                 val list = mutableListOf<HotspotActiveUser>()
@@ -201,7 +207,9 @@ class RouterOsApiClient {
     suspend fun getHotspotUsers(): Result<List<HotspotCard>> {
         return withContext(Dispatchers.IO) {
             try {
-                ensureConnected()
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
+                }
                 writeSentence(listOf("/ip/hotspot/user/print"))
                 val sentences = readAllSentencesUntilDone()
                 val list = mutableListOf<HotspotCard>()
@@ -225,7 +233,8 @@ class RouterOsApiClient {
                                 limitBytesTotal = map["limit-bytes-total"]?.toLongOrNull() ?: 0L,
                                 comment = comment,
                                 disabled = map["disabled"] == "true" || map["disabled"] == "yes",
-                                price = parsedPrice
+                                price = parsedPrice,
+                                cardType = "hotspot"
                             )
                         )
                     }
@@ -240,7 +249,9 @@ class RouterOsApiClient {
     suspend fun getHotspotProfiles(): Result<List<HotspotProfile>> {
         return withContext(Dispatchers.IO) {
             try {
-                ensureConnected()
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("فشل الاتصال براوتر ميكروتك عبر منفذ API ($lastPort)"))
+                }
                 val list = mutableListOf<HotspotProfile>()
 
                 // 1. Fetch Hotspot User Profiles (/ip/hotspot/user/profile)
@@ -289,7 +300,7 @@ class RouterOsApiClient {
                         if (s.firstOrNull() == "!re") {
                             val map = parseSentenceToMap(s)
                             val name = map["name"] ?: continue
-                            if (list.any { it.name.equals(name, ignoreCase = true) }) continue
+                            if (list.any { it.name.equals(name, ignoreCase = true) && it.source == "usermanager_v7" }) continue
 
                             val rawPrice = map["price"]?.takeIf { it.isNotBlank() && it != "0" }
                             val priceStr = if (rawPrice != null) "$rawPrice ر.ي" else extractPriceFromText(map["comment"].orEmpty(), name, "")
@@ -326,7 +337,7 @@ class RouterOsApiClient {
                         if (s.firstOrNull() == "!re") {
                             val map = parseSentenceToMap(s)
                             val name = map["name"] ?: continue
-                            if (list.any { it.name.equals(name, ignoreCase = true) }) continue
+                            if (list.any { it.name.equals(name, ignoreCase = true) && it.source.startsWith("usermanager") }) continue
                             val rawPrice = map["price"]?.takeIf { it.isNotBlank() && it != "0" }
                             val priceStr = if (rawPrice != null) "$rawPrice ر.ي" else extractPriceFromText(map["comment"].orEmpty(), name, "")
                             val customer = map["customer"]?.takeIf { it.isNotBlank() } ?: "admin"
@@ -720,47 +731,76 @@ class RouterOsApiClient {
         }
     }
 
-    suspend fun addCard(card: HotspotCard): Result<Boolean> {
+    suspend fun addCard(
+        card: HotspotCard,
+        preferredSystem: String = "",
+        profileSource: String = ""
+    ): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                ensureConnected()
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("فشل الاتصال براوتر ميكروتك عبر منفذ API ($lastPort)"))
+                }
                 val profileName = card.profile.trim()
 
-                // Refresh cachedProfiles if empty to ensure we know the router's exact profile catalog
-                var currentProfiles = synchronized(cachedProfiles) { cachedProfiles.toList() }
-                if (currentProfiles.isEmpty()) {
-                    val freshProfiles = getHotspotProfiles().getOrDefault(emptyList())
-                    currentProfiles = freshProfiles
+                // Precise profile lookup with source disambiguation
+                val targetProfile = synchronized(cachedProfiles) {
+                    if (profileSource.isNotBlank()) {
+                        cachedProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) && it.source == profileSource }
+                    } else if (preferredSystem == "usermanager" || card.isUserManagerCard) {
+                        cachedProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) && it.isUserManager }
+                    } else if (preferredSystem == "hotspot" || card.isHotspotCard) {
+                        cachedProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) && it.isHotspot }
+                    } else {
+                        null
+                    } ?: cachedProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) }
                 }
 
-                val targetProfile = currentProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) }
-                val exactProfileName = targetProfile?.name ?: profileName
-                val source = targetProfile?.source ?: ""
+                val shouldBeUserManager = preferredSystem == "usermanager" ||
+                    (card.isUserManagerCard && preferredSystem != "hotspot") ||
+                    (targetProfile?.isUserManager == true && preferredSystem != "hotspot") ||
+                    (profileSource.startsWith("usermanager") && preferredSystem != "hotspot")
 
-                val cardWithExactProfile = card.copy(profile = exactProfileName)
+                // 1. If destination is User Manager: NEVER fallback silently to Hotspot!
+                if (shouldBeUserManager) {
+                    // Make sure profile exists in User Manager
+                    if (profileName.isNotBlank() && !profileName.equals("default", ignoreCase = true)) {
+                        ensureUserManagerProfileExists(profileName, targetProfile)
+                    }
 
-                // 1. If it is User-Manager v7
-                if (source == "usermanager_v7") {
-                    val umResult = addUserManagerV7User(cardWithExactProfile)
-                    if (umResult.isSuccess) return@withContext umResult
+                    val isV6 = targetProfile?.source == "usermanager_v6" || profileSource == "usermanager_v6"
+                    val umResult = if (isV6) {
+                        val customer = targetProfile?.comment?.takeIf { it.isNotBlank() } ?: "admin"
+                        addUserManagerV6User(card, customer)
+                    } else {
+                        addUserManagerV7User(card)
+                    }
+
+                    // Strict boundary: User Manager cards must succeed or fail in User Manager with explicit error
+                    if (umResult.isSuccess) {
+                        return@withContext umResult
+                    } else {
+                        val umError = umResult.exceptionOrNull()?.message ?: "فشل إنشاء كرت يوزرمانجر"
+                        return@withContext Result.failure(Exception("خطأ في نظام يوزرمانجر: $umError"))
+                    }
                 }
 
-                // 2. If it is User-Manager v6 (/tool/user-manager)
-                if (source == "usermanager_v6") {
-                    val customer = targetProfile?.comment?.takeIf { it.isNotBlank() } ?: "admin"
-                    val umResult = addUserManagerV6User(cardWithExactProfile, customer)
-                    if (umResult.isSuccess) return@withContext umResult
+                // 2. Native Hotspot (/ip/hotspot/user/add)
+                if (profileName.isNotBlank() && !profileName.equals("default", ignoreCase = true)) {
+                    ensureHotspotProfileExists(profileName, targetProfile)
                 }
 
-                // 3. Try Native Hotspot /ip/hotspot/user/add
-                val hsResult = addHotspotNativeUser(cardWithExactProfile)
+                val hsResult = addHotspotNativeUser(card)
                 if (hsResult.isSuccess) {
                     return@withContext hsResult
                 }
 
                 val errMsg = hsResult.exceptionOrNull()?.message.orEmpty()
-                if (errMsg.contains("profile", ignoreCase = true) || errMsg.contains("not found", ignoreCase = true) || errMsg.contains("unknown", ignoreCase = true)) {
-                    return@withContext Result.failure(Exception("الباقة المحددة (${profileName}) غير موجودة في الراوتر. يرجى التأكد من وجودها أولاً."))
+                // If failed because profile was not found on the router, auto-create it now and retry
+                if (errMsg.contains("profile", ignoreCase = true) || errMsg.contains("not found", ignoreCase = true)) {
+                    createHotspotProfileSimple(profileName)
+                    val retryResult = addHotspotNativeUser(card)
+                    if (retryResult.isSuccess) return@withContext retryResult
                 }
 
                 return@withContext hsResult
@@ -770,12 +810,69 @@ class RouterOsApiClient {
         }
     }
 
+    private fun ensureHotspotProfileExists(profileName: String, targetProfile: HotspotProfile?) {
+        try {
+            writeSentence(listOf("/ip/hotspot/user/profile/print", "?name=$profileName"))
+            val sentences = readAllSentencesUntilDone()
+            val exists = sentences.any { it.firstOrNull() == "!re" }
+            if (!exists) {
+                val words = mutableListOf(
+                    "/ip/hotspot/user/profile/add",
+                    "=name=$profileName",
+                    "=shared-users=${targetProfile?.sharedUsers?.coerceAtLeast(1) ?: 1}"
+                )
+                val rate = targetProfile?.rateLimit?.takeIf { it.isNotBlank() && it != "غير محدد" && it != "مفتوح" }
+                if (rate != null) words.add("=rate-limit=$rate")
+                val timeout = targetProfile?.sessionTimeout?.let { formatRouterOsTime(it) }
+                if (timeout != null) words.add("=session-timeout=$timeout")
+                if (!targetProfile?.price.isNullOrBlank()) words.add("=comment=price=${targetProfile.price}")
+                writeSentence(words)
+                readAllSentencesUntilDone()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun createHotspotProfileSimple(profileName: String) {
+        try {
+            writeSentence(listOf("/ip/hotspot/user/profile/add", "=name=$profileName", "=shared-users=1"))
+            readAllSentencesUntilDone()
+        } catch (_: Exception) {}
+    }
+
+    private fun ensureUserManagerProfileExists(profileName: String, targetProfile: HotspotProfile?) {
+        try {
+            // Check v7
+            writeSentence(listOf("/user-manager/profile/print", "?name=$profileName"))
+            val v7Sentences = readAllSentencesUntilDone()
+            if (v7Sentences.none { it.firstOrNull() == "!re" }) {
+                val v7Words = mutableListOf("/user-manager/profile/add", "=name=$profileName")
+                val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
+                v7Words.add("=validity=$valTime")
+                val priceNum = targetProfile?.priceNumber?.takeIf { it > 0 } ?: 0.0
+                if (priceNum > 0) v7Words.add("=price=${priceNum.toInt()}")
+                writeSentence(v7Words)
+                readAllSentencesUntilDone()
+            }
+        } catch (_: Exception) {}
+        try {
+            // Check v6
+            writeSentence(listOf("/tool/user-manager/profile/print", "?name=$profileName"))
+            val v6Sentences = readAllSentencesUntilDone()
+            if (v6Sentences.none { it.firstOrNull() == "!re" }) {
+                val v6Words = mutableListOf("/tool/user-manager/profile/add", "=name=$profileName", "=customer=admin")
+                val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
+                v6Words.add("=validity=$valTime")
+                writeSentence(v6Words)
+                readAllSentencesUntilDone()
+            }
+        } catch (_: Exception) {}
+    }
+
     private fun addHotspotNativeUser(card: HotspotCard): Result<Boolean> {
         val cleanProfile = card.profile.trim()
         val words = mutableListOf(
             "/ip/hotspot/user/add",
-            "=name=${card.name.trim()}",
-            "=disabled=no"
+            "=name=${card.name.trim()}"
         )
         if (card.password.isNotBlank()) {
             words.add("=password=${card.password.trim()}")
@@ -783,6 +880,9 @@ class RouterOsApiClient {
         if (cleanProfile.isNotBlank()) {
             words.add("=profile=$cleanProfile")
         }
+        words.add("=disabled=no")
+        words.add("=server=all")
+
         val validUptime = formatRouterOsTime(card.limitUptime)
         if (!validUptime.isNullOrBlank()) {
             words.add("=limit-uptime=$validUptime")
@@ -801,15 +901,33 @@ class RouterOsApiClient {
             val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                 ?: "رفض راوتر ميكروتك إضافة الكرت"
             
+            // If already exists on router, ensure it's enabled and active
+            if (trapMsg.contains("already exists", ignoreCase = true) || trapMsg.contains("already have", ignoreCase = true)) {
+                writeSentence(listOf("/ip/hotspot/user/set", "=numbers=${card.name.trim()}", "=disabled=no"))
+                readAllSentencesUntilDone()
+                return Result.success(true)
+            }
+
+            // If server parameter was rejected (some v6 firmware)
+            if (trapMsg.contains("server", ignoreCase = true) || trapMsg.contains("unknown parameter", ignoreCase = true)) {
+                val simpleWords = words.filter { !it.startsWith("=server=") }
+                writeSentence(simpleWords)
+                val retrySentences = readAllSentencesUntilDone()
+                if (retrySentences.any { it.firstOrNull() == "!done" } && retrySentences.none { it.firstOrNull() == "!trap" }) {
+                    return Result.success(true)
+                }
+            }
+
             val isParamOrVersionTrap = trapMsg.contains("argument", ignoreCase = true) ||
                 trapMsg.contains("parameter", ignoreCase = true) ||
                 trapMsg.contains("unknown", ignoreCase = true) ||
                 trapMsg.contains("limit", ignoreCase = true) ||
                 trapMsg.contains("invalid", ignoreCase = true) ||
-                trapMsg.contains("value", ignoreCase = true)
+                trapMsg.contains("value", ignoreCase = true) ||
+                trapMsg.contains("profile", ignoreCase = true)
 
             if (isParamOrVersionTrap) {
-                // First retry: clean minimal command with name and profile and disabled=no
+                // Retry with clean minimal command: name, password, profile, disabled=no
                 val simpleWords = mutableListOf(
                     "/ip/hotspot/user/add",
                     "=name=${card.name.trim()}",
@@ -828,18 +946,6 @@ class RouterOsApiClient {
                 val retrySentences = readAllSentencesUntilDone()
                 val retryTrap = retrySentences.firstOrNull { it.firstOrNull() == "!trap" }
                 if (retryTrap == null && retrySentences.any { it.firstOrNull() == "!done" }) {
-                    // Enforce profile assignment explicitly
-                    if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
-                        try {
-                            writeSentence(listOf(
-                                "/ip/hotspot/user/set",
-                                "=numbers=${card.name.trim()}",
-                                "=profile=$cleanProfile",
-                                "=disabled=no"
-                            ))
-                            readAllSentencesUntilDone()
-                        } catch (_: Exception) {}
-                    }
                     return Result.success(true)
                 }
             }
@@ -849,26 +955,19 @@ class RouterOsApiClient {
         if (!isDone) {
             return Result.failure(Exception("لم يؤكد الراوتر إضافة الكرت"))
         }
-
-        // Post-verification: ensure profile is indeed bound properly on router
-        if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
-            try {
-                writeSentence(listOf(
-                    "/ip/hotspot/user/set",
-                    "=numbers=${card.name.trim()}",
-                    "=profile=$cleanProfile",
-                    "=disabled=no"
-                ))
-                readAllSentencesUntilDone()
-            } catch (_: Exception) {}
-        }
-
         return Result.success(true)
     }
 
     private fun addUserManagerV7User(card: HotspotCard): Result<Boolean> {
+        val cardName = card.name.trim()
+        val cleanProfile = card.profile.trim()
         try {
-            val words = mutableListOf("/user-manager/user/add", "=name=${card.name.trim()}")
+            // Phase 1: Create user in User Manager v7
+            val words = mutableListOf(
+                "/user-manager/user/add",
+                "=name=$cardName",
+                "=disabled=no"
+            )
             if (card.password.isNotBlank()) {
                 words.add("=password=${card.password.trim()}")
             }
@@ -882,11 +981,13 @@ class RouterOsApiClient {
                     return Result.failure(Exception(msg))
                 }
             }
-            if (card.profile.isNotBlank()) {
+
+            // Phase 2: Bind profile transactionally
+            if (cleanProfile.isNotBlank()) {
                 val profWords = listOf(
                     "/user-manager/user-profile/add",
-                    "=user=${card.name.trim()}",
-                    "=profile=${card.profile.trim()}"
+                    "=user=$cardName",
+                    "=profile=$cleanProfile"
                 )
                 writeSentence(profWords)
                 val profSentences = readAllSentencesUntilDone()
@@ -894,22 +995,58 @@ class RouterOsApiClient {
                 if (profTrap != null) {
                     val profMsg = profTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                         ?: "فشل ربط المستخدم بالباقة في يوزرمانجر"
-                    return Result.failure(Exception(profMsg))
+                    
+                    // Transactional Rollback: Remove the user if profile assignment failed
+                    try {
+                        writeSentence(listOf("/user-manager/user/remove", "=numbers=$cardName"))
+                        readAllSentencesUntilDone()
+                    } catch (_: Exception) {}
+
+                    return Result.failure(Exception("فشل تفعيل باقة اليوزرمانجر ($cleanProfile) للمستخدم $cardName: $profMsg (تم التراجع عن إنشاء الكرت)"))
                 }
             }
+
+            // Phase 3: Ensure enabled in UM v7
+            writeSentence(listOf("/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
+            readAllSentencesUntilDone()
+
+            // Phase 4: Post-creation verification
+            if (cleanProfile.isNotBlank()) {
+                writeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
+                val verifySentences = readAllSentencesUntilDone()
+                val isProfileAssigned = verifySentences.any { it.firstOrNull() == "!re" }
+                if (!isProfileAssigned) {
+                    // Check if user itself exists
+                    writeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
+                    val userCheck = readAllSentencesUntilDone()
+                    if (userCheck.none { it.firstOrNull() == "!re" }) {
+                        return Result.failure(Exception("لم يؤكد الراوتر حفظ الكرت $cardName في يوزرمانجر"))
+                    }
+                }
+            }
+
             return Result.success(true)
         } catch (e: Exception) {
+            // Rollback on unexpected exception
+            try {
+                writeSentence(listOf("/user-manager/user/remove", "=numbers=$cardName"))
+                readAllSentencesUntilDone()
+            } catch (_: Exception) {}
             return Result.failure(e)
         }
     }
 
     private fun addUserManagerV6User(card: HotspotCard, customer: String): Result<Boolean> {
+        val cardName = card.name.trim()
+        val cleanProfile = card.profile.trim()
+        val cust = if (customer.isBlank()) "admin" else customer
         try {
-            val cust = if (customer.isBlank()) "admin" else customer
+            // Phase 1: Add user in User Manager v6
             val words = mutableListOf(
                 "/tool/user-manager/user/add",
-                "=username=${card.name.trim()}",
-                "=customer=$cust"
+                "=username=$cardName",
+                "=customer=$cust",
+                "=disabled=no"
             )
             if (card.password.isNotBlank()) {
                 words.add("=password=${card.password.trim()}")
@@ -924,27 +1061,159 @@ class RouterOsApiClient {
                     return Result.failure(Exception(msg))
                 }
             }
-            if (card.profile.isNotBlank()) {
+
+            // Phase 2: Assign & activate profile
+            if (cleanProfile.isNotBlank()) {
                 val actWords = listOf(
                     "/tool/user-manager/user/create-and-activate-profile",
-                    "=numbers=${card.name.trim()}",
-                    "=profile=${card.profile.trim()}",
+                    "=numbers=$cardName",
+                    "=profile=$cleanProfile",
                     "=customer=$cust"
                 )
                 writeSentence(actWords)
                 val actSentences = readAllSentencesUntilDone()
-                if (actSentences.none { it.firstOrNull() == "!done" }) {
+                val actTrap = actSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                val actDone = actSentences.any { it.firstOrNull() == "!done" }
+                var profileAssigned = (actTrap == null && actDone)
+
+                if (!profileAssigned) {
                     writeSentence(listOf(
                         "/tool/user-manager/user/set",
-                        "=numbers=${card.name.trim()}",
-                        "=actual-profile=${card.profile.trim()}"
+                        "=numbers=$cardName",
+                        "=actual-profile=$cleanProfile",
+                        "=disabled=no"
                     ))
-                    readAllSentencesUntilDone()
+                    val setSentences = readAllSentencesUntilDone()
+                    val setTrap = setSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                    val setDone = setSentences.any { it.firstOrNull() == "!done" }
+                    profileAssigned = (setTrap == null && setDone)
+                }
+
+                if (!profileAssigned) {
+                    val errMsg = actTrap?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                        ?: "فشل تعيين وتفعيل الباقة في User Manager v6"
+                    
+                    // Transactional Rollback: Remove the user if profile assignment failed
+                    try {
+                        writeSentence(listOf("/tool/user-manager/user/remove", "=numbers=$cardName"))
+                        readAllSentencesUntilDone()
+                    } catch (_: Exception) {}
+
+                    return Result.failure(Exception("فشل تفعيل باقة User Manager v6 ($cleanProfile): $errMsg (تم التراجع عن إنشاء الكرت)"))
                 }
             }
             return Result.success(true)
         } catch (e: Exception) {
+            // Rollback on unexpected exception
+            try {
+                writeSentence(listOf("/tool/user-manager/user/remove", "=numbers=$cardName"))
+                readAllSentencesUntilDone()
+            } catch (_: Exception) {}
             return Result.failure(e)
+        }
+    }
+
+    suspend fun syncProfileToUserManager(profile: HotspotProfile): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            try {
+                ensureConnected()
+                val cleanName = profile.name.trim()
+                if (cleanName.isBlank()) return@withContext Result.failure(Exception("اسم الباقة فارغ"))
+                
+                // Try v7 user-manager profile add
+                val v7Words = mutableListOf(
+                    "/user-manager/profile/add",
+                    "=name=$cleanName"
+                )
+                if (profile.validity.isNotBlank() && profile.validity != "غير محدد") {
+                    val validTime = formatRouterOsTime(profile.validity)
+                    if (validTime != null) v7Words.add("=validity=$validTime")
+                }
+                val priceNum = profile.priceNumber.takeIf { it > 0 } ?: Regex("""\d+""").find(profile.price)?.value?.toDoubleOrNull()
+                if (priceNum != null && priceNum > 0) {
+                    v7Words.add("=price=${priceNum.toInt()}")
+                }
+                writeSentence(v7Words)
+                val v7Sentences = readAllSentencesUntilDone()
+                val v7Trap = v7Sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (v7Trap == null && v7Sentences.any { it.firstOrNull() == "!done" }) {
+                    return@withContext Result.success(true)
+                }
+
+                // Try v6 tool user-manager profile add
+                val v6Words = mutableListOf(
+                    "/tool/user-manager/profile/add",
+                    "=name=$cleanName",
+                    "=customer=admin"
+                )
+                if (priceNum != null && priceNum > 0) {
+                    v6Words.add("=price=${priceNum.toInt()}")
+                }
+                if (profile.validity.isNotBlank() && profile.validity != "غير محدد") {
+                    val validTime = formatRouterOsTime(profile.validity)
+                    if (validTime != null) v6Words.add("=validity=$validTime")
+                }
+                writeSentence(v6Words)
+                val v6Sentences = readAllSentencesUntilDone()
+                if (v6Sentences.any { it.firstOrNull() == "!done" }) {
+                    return@withContext Result.success(true)
+                }
+
+                Result.success(true)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun syncProfileToHotspot(profile: HotspotProfile): Result<Boolean> {
+        return addProfile(profile)
+    }
+
+    suspend fun verifyAndActivateCard(card: HotspotCard): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            try {
+                ensureConnected()
+                val targetName = card.name.trim()
+                if (targetName.isBlank()) return@withContext Result.failure(Exception("اسم الكرت فارغ"))
+
+                val cleanProfile = card.profile.trim().ifBlank { "default" }
+                if (!cleanProfile.equals("default", ignoreCase = true)) {
+                    ensureHotspotProfileExists(cleanProfile, null)
+                }
+
+                // Ensure Hotspot user is present and active
+                writeSentence(listOf("/ip/hotspot/user/print", "?name=$targetName"))
+                val hsSentences = readAllSentencesUntilDone()
+                val hsExists = hsSentences.any { it.firstOrNull() == "!re" }
+
+                if (hsExists) {
+                    writeSentence(listOf(
+                        "/ip/hotspot/user/set",
+                        "=numbers=$targetName",
+                        "=disabled=no",
+                        "=profile=$cleanProfile",
+                        "=server=all"
+                    ))
+                    readAllSentencesUntilDone()
+                } else {
+                    addHotspotNativeUser(card.copy(profile = cleanProfile))
+                }
+
+                // Also check and enable in User Manager if user exists there
+                try {
+                    writeSentence(listOf("/user-manager/user/set", "=numbers=$targetName", "=disabled=no"))
+                    readAllSentencesUntilDone()
+                } catch (_: Exception) {}
+                try {
+                    writeSentence(listOf("/tool/user-manager/user/set", "=numbers=$targetName", "=disabled=no"))
+                    readAllSentencesUntilDone()
+                } catch (_: Exception) {}
+
+                Result.success(true)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
         }
     }
 
@@ -1409,7 +1678,8 @@ class RouterOsApiClient {
                                     limitBytesTotal = map["download-limit"]?.toLongOrNull() ?: 0L,
                                     comment = comment,
                                     disabled = map["disabled"] == "true" || map["disabled"] == "yes",
-                                    price = price
+                                    price = price,
+                                    cardType = "usermanager"
                                 )
                             )
                         }
@@ -1456,40 +1726,48 @@ class RouterOsApiClient {
         return map
     }
 
-    private fun reconnectInternal() {
+    private fun reconnectInternal(): Boolean {
         close()
         val cleanHost = lastHost.trim()
         val cleanUser = lastUsername.trim()
-        if (cleanHost.isBlank() || cleanUser.isBlank()) return
+        if (cleanHost.isBlank() || cleanUser.isBlank()) return false
 
-        val sock = Socket()
-        sock.connect(InetSocketAddress(cleanHost, lastPort), 5000)
-        sock.soTimeout = 8000
-        socket = sock
-        inStream = sock.getInputStream()
-        outStream = sock.getOutputStream()
+        return try {
+            val sock = Socket()
+            sock.connect(InetSocketAddress(cleanHost, lastPort), 5000)
+            sock.soTimeout = 8000
+            socket = sock
+            inStream = sock.getInputStream()
+            outStream = sock.getOutputStream()
 
-        writeSentenceWithoutRetry(listOf("/login", "=name=$cleanUser", "=password=$lastPassword"))
-        val response = readSentenceWithoutRetry()
-        val replyType = response.firstOrNull() ?: ""
+            writeSentenceWithoutRetry(listOf("/login", "=name=$cleanUser", "=password=$lastPassword"))
+            val response = readSentenceWithoutRetry()
+            val replyType = response.firstOrNull() ?: ""
 
-        if (replyType == "!done" && response.none { it.startsWith("=ret=") }) {
-            return
-        }
+            if (replyType == "!done" && response.none { it.startsWith("=ret=") }) {
+                true
+            } else {
+                val challengeParam = response.firstOrNull { it.startsWith("=ret=") }
+                if (replyType == "!done" && challengeParam != null) {
+                    val challengeHex = challengeParam.removePrefix("=ret=")
+                    val challengeBytes = hexStringToByteArray(challengeHex)
+                    val md5 = MessageDigest.getInstance("MD5")
+                    md5.update(0.toByte())
+                    md5.update(lastPassword.toByteArray(Charsets.UTF_8))
+                    md5.update(challengeBytes)
+                    val digestHex = byteArrayToHexString(md5.digest())
+                    val responseHash = "00$digestHex"
 
-        val challengeParam = response.firstOrNull { it.startsWith("=ret=") }
-        if (replyType == "!done" && challengeParam != null) {
-            val challengeHex = challengeParam.removePrefix("=ret=")
-            val challengeBytes = hexStringToByteArray(challengeHex)
-            val md5 = MessageDigest.getInstance("MD5")
-            md5.update(0.toByte())
-            md5.update(lastPassword.toByteArray(Charsets.UTF_8))
-            md5.update(challengeBytes)
-            val digestHex = byteArrayToHexString(md5.digest())
-            val responseHash = "00$digestHex"
-
-            writeSentenceWithoutRetry(listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
-            readSentenceWithoutRetry()
+                    writeSentenceWithoutRetry(listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
+                    val resp2 = readSentenceWithoutRetry()
+                    resp2.firstOrNull() == "!done"
+                } else {
+                    false
+                }
+            }
+        } catch (_: Exception) {
+            close()
+            false
         }
     }
 
@@ -1500,7 +1778,10 @@ class RouterOsApiClient {
             try {
                 if (socket == null || socket?.isClosed == true || socket?.isConnected != true) {
                     if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
-                        reconnectInternal()
+                        val reconnected = reconnectInternal()
+                        if (!reconnected) {
+                            throw IllegalStateException("تعذر إعادة الاتصال براوتر ميكروتك عبر منفذ API ($lastPort)")
+                        }
                     }
                 }
                 val out = outStream ?: throw IllegalStateException("Socket is not connected")
@@ -1559,14 +1840,12 @@ class RouterOsApiClient {
         return words
     }
 
-    @Synchronized
-    private fun writeSentence(words: List<String>) {
+    private fun writeSentence(words: List<String>): List<List<String>> = synchronized(socketLock) {
         executeSentence(words)
     }
 
-    @Synchronized
-    private fun readSentence(): List<String> {
-        return if (lastExecutionSentences.isNotEmpty()) {
+    private fun readSentence(): List<String> = synchronized(socketLock) {
+        if (lastExecutionSentences.isNotEmpty()) {
             val s = lastExecutionSentences.first()
             lastExecutionSentences = lastExecutionSentences.drop(1)
             s
@@ -1575,11 +1854,10 @@ class RouterOsApiClient {
         }
     }
 
-    @Synchronized
-    private fun readAllSentencesUntilDone(): List<List<String>> {
+    private fun readAllSentencesUntilDone(): List<List<String>> = synchronized(socketLock) {
         val res = lastExecutionSentences
         lastExecutionSentences = emptyList()
-        return res
+        res
     }
 
     private fun writeWord(out: OutputStream, word: String) {

@@ -110,6 +110,7 @@ import com.example.ui.theme.CyberGreenPrimary
 import com.example.ui.theme.NetworkCyan
 import com.example.ui.theme.StatusActiveGreen
 import com.example.ui.viewmodel.CardFilter
+import com.example.ui.viewmodel.CardSystemFilter
 import com.example.ui.viewmodel.MainViewModel
 
 @Composable
@@ -127,6 +128,7 @@ fun CardsScreen(
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val searchQuery by viewModel.cardSearchQuery.collectAsStateWithLifecycle()
     val currentFilter by viewModel.cardFilter.collectAsStateWithLifecycle()
+    val currentSystemFilter by viewModel.cardSystemFilter.collectAsStateWithLifecycle()
 
     var cardToDelete by remember { mutableStateOf<HotspotCard?>(null) }
     var cardToEdit by remember { mutableStateOf<HotspotCard?>(null) }
@@ -253,6 +255,40 @@ fun CardsScreen(
             }
 
             Spacer(modifier = Modifier.height(8.dp))
+
+            // System Subsystem Filter (الكل / هوتسبوت / يوزرمانجر)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val countHotspotCards = remember(distinctCards) { distinctCards.count { it.isHotspotCard } }
+                val countUmCards = remember(distinctCards) { distinctCards.count { it.isUserManagerCard } }
+
+                FilterChip(
+                    selected = currentSystemFilter == CardSystemFilter.ALL,
+                    onClick = { viewModel.updateCardSystemFilter(CardSystemFilter.ALL) },
+                    label = { Text("الكل (${distinctCards.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.height(34.dp)
+                )
+                FilterChip(
+                    selected = currentSystemFilter == CardSystemFilter.HOTSPOT,
+                    onClick = { viewModel.updateCardSystemFilter(CardSystemFilter.HOTSPOT) },
+                    label = { Text("🌐 هوتسبوت ($countHotspotCards)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.height(34.dp)
+                )
+                FilterChip(
+                    selected = currentSystemFilter == CardSystemFilter.USER_MANAGER,
+                    onClick = { viewModel.updateCardSystemFilter(CardSystemFilter.USER_MANAGER) },
+                    label = { Text("👤 يوزرمانجر ($countUmCards)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.height(34.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Filter Chips (Scrollable & Uniform compact height)
             Row(
@@ -510,7 +546,8 @@ fun CardsScreen(
                                                 onEdit = { cardToEdit = card },
                                                 onReactivate = { cardToReactivate = card },
                                                 onToggleDisabled = { viewModel.toggleCardDisabled(card.id, card.disabled) },
-                                                onDelete = { cardToDelete = card }
+                                                onDelete = { cardToDelete = card },
+                                                onVerifyAndActivate = { viewModel.verifyAndActivateCard(card) }
                                             )
                                         }
                                     }
@@ -580,7 +617,8 @@ fun CardsScreen(
                                     onEdit = { cardToEdit = card },
                                     onReactivate = { cardToReactivate = card },
                                     onToggleDisabled = { viewModel.toggleCardDisabled(card.id, card.disabled) },
-                                    onDelete = { cardToDelete = card }
+                                    onDelete = { cardToDelete = card },
+                                    onVerifyAndActivate = { viewModel.verifyAndActivateCard(card) }
                                 )
                             }
                         } else if (readySubFilter == ReadyCardsSubFilter.INDIVIDUAL) {
@@ -613,7 +651,8 @@ fun CardsScreen(
                             onToggleDisabled = {
                                 viewModel.toggleCardDisabled(card.id, card.disabled)
                             },
-                            onDelete = { cardToDelete = card }
+                            onDelete = { cardToDelete = card },
+                            onVerifyAndActivate = { viewModel.verifyAndActivateCard(card) }
                         )
                     }
                     item {
@@ -746,7 +785,8 @@ fun HotspotCardItem(
     onEdit: () -> Unit,
     onReactivate: () -> Unit,
     onToggleDisabled: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onVerifyAndActivate: (() -> Unit)? = null
 ) {
     Card(
         modifier = Modifier
@@ -787,13 +827,30 @@ fun HotspotCardItem(
                     }
 
                     Column {
-                        Text(
-                            text = card.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = card.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                            Surface(
+                                color = (if (card.isUserManagerCard) Color(0xFF00897B) else Color(0xFF1976D2)).copy(alpha = 0.15f),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = card.systemLabelAr,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (card.isUserManagerCard) Color(0xFF00897B) else Color(0xFF1976D2),
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                         if (card.password != card.name && card.password.isNotBlank()) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -1025,6 +1082,23 @@ fun HotspotCardItem(
                             text = "تفاصيل",
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                // Verify & Activate in Router Button
+                if (onVerifyAndActivate != null) {
+                    IconButton(
+                        onClick = onVerifyAndActivate,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .testTag("verify_activate_btn_${card.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "تحقق وتنشيط في الراوتر",
+                            tint = StatusActiveGreen,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }

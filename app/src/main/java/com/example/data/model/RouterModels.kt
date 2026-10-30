@@ -120,8 +120,18 @@ data class HotspotCard(
     val comment: String = "",
     val disabled: Boolean = false,
     val price: String = "",
-    val posAgent: String = ""
+    val posAgent: String = "",
+    val cardType: String = "hotspot" // "hotspot" or "usermanager"
 ) {
+    val isUserManagerCard: Boolean
+        get() = cardType.contains("usermanager", ignoreCase = true) || id.startsWith("um_")
+
+    val isHotspotCard: Boolean
+        get() = !isUserManagerCard
+
+    val systemLabelAr: String
+        get() = if (isUserManagerCard) "يوزرمانجر" else "هوتسبوت"
+
     val isExpiredQuota: Boolean
         get() {
             if (limitBytesTotal > 0L && (bytesIn + bytesOut) >= limitBytesTotal) return true
@@ -193,11 +203,20 @@ data class HotspotProfile(
     val downloadLimit: String = "",
     val validity: String = "",
     val dataLimit: String = "",
-    val source: String = "hotspot", // "hotspot" or "usermanager"
+    val source: String = "hotspot", // "hotspot", "usermanager_v7", or "usermanager_v6"
     val comment: String = "",
     val priceNumber: Double = 0.0,
     val costPrice: Double = 0.0
-)
+) {
+    val isHotspot: Boolean
+        get() = source.equals("hotspot", ignoreCase = true)
+
+    val isUserManager: Boolean
+        get() = source.contains("usermanager", ignoreCase = true)
+
+    val systemTitleAr: String
+        get() = if (isUserManager) "يوزرمانجر" else "هوتسبوت ميكروتك"
+}
 
 data class LocalNetworkInfo(
     val isConnectedToWifi: Boolean = false,
@@ -225,8 +244,21 @@ data class BatchGenerationConfig(
     val batchComment: String = "دفعة اليوم",
     val posAgentId: Long = 0L,
     val posAgentName: String = "",
-    val discountPercent: Double = 0.0
+    val discountPercent: Double = 0.0,
+    val targetSystem: String = "hotspot", // "hotspot" or "usermanager"
+    val profileSource: String = "" // "hotspot", "usermanager_v7", "usermanager_v6"
 )
+
+data class BatchCardGenerationResult(
+    val totalRequested: Int,
+    val successfulCards: List<HotspotCard>,
+    val failedCards: List<HotspotCard> = emptyList(),
+    val failureReasons: List<String> = emptyList()
+) {
+    val isCompleteSuccess: Boolean get() = failedCards.isEmpty() && successfulCards.size == totalRequested
+    val isPartialSuccess: Boolean get() = successfulCards.isNotEmpty() && failedCards.isNotEmpty()
+    val isTotalFailure: Boolean get() = successfulCards.isEmpty()
+}
 
 data class IpBinding(
     val id: String,

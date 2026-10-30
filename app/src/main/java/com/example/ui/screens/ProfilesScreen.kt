@@ -71,6 +71,8 @@ import com.example.ui.theme.CyberGreenBright
 import com.example.ui.theme.CyberGreenPrimary
 import com.example.ui.theme.NetworkCyan
 import com.example.ui.viewmodel.MainViewModel
+import com.example.ui.viewmodel.ProfileSystemFilter
+import androidx.compose.material3.FilterChip
 
 data class ProfileDisplayStats(
     val totalCount: Int = 0,
@@ -91,6 +93,8 @@ fun ProfilesScreen(
     modifier: Modifier = Modifier
 ) {
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
+    val filteredProfiles by viewModel.filteredProfiles.collectAsStateWithLifecycle()
+    val currentProfileFilter by viewModel.profileSystemFilter.collectAsStateWithLifecycle()
     val cards by viewModel.cards.collectAsStateWithLifecycle()
     val packagePricings by viewModel.packagePricings.collectAsStateWithLifecycle()
     var showAddDialog by remember { mutableStateOf(false) }
@@ -253,31 +257,61 @@ fun ProfilesScreen(
                 }
 
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "الباقات الحالية في السيرفر (${profiles.size})",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "الباقات الحالية في السيرفر (${filteredProfiles.size} من ${profiles.size})",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        // Filter Chips by subsystem
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            val countHotspot = profiles.count { it.isHotspot }
+                            val countUserManager = profiles.count { it.isUserManager }
+
+                            FilterChip(
+                                selected = currentProfileFilter == ProfileSystemFilter.ALL,
+                                onClick = { viewModel.updateProfileSystemFilter(ProfileSystemFilter.ALL) },
+                                label = { Text("الكل (${profiles.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            FilterChip(
+                                selected = currentProfileFilter == ProfileSystemFilter.HOTSPOT,
+                                onClick = { viewModel.updateProfileSystemFilter(ProfileSystemFilter.HOTSPOT) },
+                                label = { Text("🌐 هوتسبوت ($countHotspot)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            FilterChip(
+                                selected = currentProfileFilter == ProfileSystemFilter.USER_MANAGER,
+                                onClick = { viewModel.updateProfileSystemFilter(ProfileSystemFilter.USER_MANAGER) },
+                                label = { Text("👤 يوزرمانجر ($countUserManager)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                        }
                     }
                 }
 
-                if (profiles.isEmpty()) {
+                if (filteredProfiles.isEmpty()) {
                     item {
                         EmptyStateComponent(
                             icon = Icons.Default.Tune,
-                            title = "لا توجد باقات في سيرفر الميكروتك حالياً",
-                            description = "يتم قراءة الباقات مباشرة وحصرياً من راوتر الميكروتك المتصل (/ip/hotspot/user/profile). يمكنك إضافة باقة جديدة الآن أو استخدام أحد القوالب الجاهزة بالأعلى.",
+                            title = if (profiles.isEmpty()) "لا توجد باقات في سيرفر الميكروتك حالياً" else "لا توجد باقات في هذا القسم",
+                            description = "يمكنك إضافة باقة جديدة الآن أو تغيير قسم التصفية، أو مزامنة الباقات بين الهوتسبوت ويوزرمانجر بضغطة زر.",
                             modifier = Modifier.padding(vertical = 8.dp)
                         )
                     }
                 } else {
-                    items(profiles, key = { "${it.id}_${it.name}_${it.source}" }) { profile ->
+                    items(filteredProfiles, key = { "${it.id}_${it.name}_${it.source}" }) { profile ->
                         val pricing = packagePricings.find { it.profileName.equals(profile.name, ignoreCase = true) }
                         val stats = profileStatsMap[profile.name] ?: ProfileDisplayStats()
                         ProfileCardItem(
@@ -286,6 +320,10 @@ fun ProfilesScreen(
                             pricing = pricing,
                             onViewDetailsClick = { profileToViewDetails = profile },
                             onDeleteClick = { profileToDelete = profile },
+                            onSyncClick = {
+                                val target = if (profile.isUserManager) "hotspot" else "usermanager"
+                                viewModel.syncProfileBetweenSystems(profile, target)
+                            },
                             onEditPricing = { cost, sale ->
                                 viewModel.updatePackageCostAndPrice(profile.name, cost, sale)
                             }
@@ -382,6 +420,7 @@ fun ProfileCardItem(
     pricing: com.example.data.local.PackagePricingEntity? = null,
     onViewDetailsClick: () -> Unit,
     onDeleteClick: (() -> Unit)? = null,
+    onSyncClick: (() -> Unit)? = null,
     onEditPricing: ((cost: Double, sale: Double) -> Unit)? = null
 ) {
     val totalCount = stats.totalCount
@@ -439,26 +478,22 @@ fun ProfileCardItem(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
+                            val isUm = profile.isUserManager
+                            val badgeColor = if (isUm) Color(0xFF00897B) else Color(0xFF1976D2)
                             Surface(
-                                color = CyberGreenPrimary.copy(alpha = 0.15f),
+                                color = badgeColor.copy(alpha = 0.15f),
                                 shape = RoundedCornerShape(4.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(2.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Lock,
-                                        contentDescription = null,
-                                        tint = CyberGreenPrimary,
-                                        modifier = Modifier.size(10.dp)
-                                    )
                                     Text(
-                                        text = "معتمدة بالسيرفر",
-                                        fontSize = 9.sp,
+                                        text = if (isUm) "👤 يوزرمانجر" else "🌐 هوتسبوت",
+                                        fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = CyberGreenPrimary
+                                        color = badgeColor
                                     )
                                 }
                             }
@@ -662,6 +697,33 @@ fun ProfileCardItem(
                             fontWeight = FontWeight.Bold,
                             color = CyberGreenBright
                         )
+                    }
+
+                    if (onSyncClick != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedButton(
+                            onClick = onSyncClick,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(38.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = if (profile.isUserManager) Color(0xFF1976D2) else Color(0xFF00897B)
+                            ),
+                            border = BorderStroke(1.dp, (if (profile.isUserManager) Color(0xFF1976D2) else Color(0xFF00897B)).copy(alpha = 0.5f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (profile.isUserManager) "🔄 مزامنة وتثبيت الباقة في الهوتسبوت (Hotspot)" else "🔄 مزامنة وتثبيت الباقة في يوزرمانجر (User Manager)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -979,6 +1041,7 @@ fun AddProfileDialog(
     var sessionTimeout by remember(initialTemplate) { mutableStateOf(initialTemplate?.defaultSessionTimeout ?: "1d") }
     var price by remember(initialTemplate) { mutableStateOf(initialTemplate?.defaultPrice ?: "500 ر.ي") }
     var dataLimit by remember(initialTemplate) { mutableStateOf(initialTemplate?.defaultDataQuota ?: "") }
+    var targetSystem by remember { mutableStateOf("hotspot") }
 
     val quickPrices = listOf("100 ر.ي", "200 ر.ي", "300 ر.ي", "500 ر.ي", "1000 ر.ي", "2000 ر.ي", "5000 ر.ي")
     val quickTimes = listOf("30m", "1h", "2h", "3h", "6h", "12h", "1d", "3d", "7d", "30d")
@@ -1034,6 +1097,43 @@ fun AddProfileDialog(
                                 style = MaterialTheme.typography.labelSmall
                             )
                         }
+                    }
+                }
+
+                // System Destination Selector
+                Column {
+                    Text(
+                        text = "وجهة حفظ الباقة في الراوتر:",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        FilterChip(
+                            selected = targetSystem == "hotspot",
+                            onClick = { targetSystem = "hotspot" },
+                            label = { Text("🌐 هوتسبوت", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = targetSystem == "usermanager",
+                            onClick = { targetSystem = "usermanager" },
+                            label = { Text("👤 يوزرمانجر", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = targetSystem == "both",
+                            onClick = { targetSystem = "both" },
+                            label = { Text("✨ كلاهما", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
 
@@ -1186,7 +1286,8 @@ fun AddProfileDialog(
                                 sessionTimeout = sessionTimeout.trim(),
                                 price = price.trim(),
                                 dataLimit = dataLimit.trim(),
-                                comment = if (initialTemplate != null) "Template: ${initialTemplate.badge}" else ""
+                                comment = if (initialTemplate != null) "Template: ${initialTemplate.badge}" else "",
+                                source = targetSystem
                             )
                         )
                     }

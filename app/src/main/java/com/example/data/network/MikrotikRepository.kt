@@ -3,6 +3,7 @@ package com.example.data.network
 import android.util.Log
 import com.example.data.model.AdminUser
 import com.example.data.model.AuditLogEntry
+import com.example.data.model.BatchCardGenerationResult
 import com.example.data.model.BatchGenerationConfig
 import com.example.data.model.CodeCharType
 import com.example.data.model.HotspotActiveUser
@@ -773,7 +774,6 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                 _auditLogs.value = emptyList()
                 _systemLogs.value = emptyList()
                 _bandwidthHistory.value = emptyList()
-                customAddedNodes.clear()
 
                 // 1. If user explicitly specified port 8728, connect directly via native RouterOS API socket
                 if (cleanConfig.port == 8728) {
@@ -1001,19 +1001,25 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     }
                 }
                 val distinctCards = combinedCards.distinctBy { it.name }
-                _cards.value = distinctCards
+                if (distinctCards.isNotEmpty() || _cards.value.isEmpty()) {
+                    _cards.value = distinctCards
+                }
             }
 
             // 8. Fetch Profiles & IP Bindings from Router
             val profResult = routerOsApiClient.getHotspotProfiles()
             if (profResult.isSuccess) {
                 val liveProfiles = profResult.getOrThrow()
-                _profiles.value = liveProfiles
+                if (liveProfiles.isNotEmpty() || _profiles.value.isEmpty()) {
+                    _profiles.value = liveProfiles
+                }
             }
             val bindResult = routerOsApiClient.getIpBindings()
             if (bindResult.isSuccess) {
                 val liveBindings = bindResult.getOrThrow()
-                _ipBindings.value = liveBindings
+                if (liveBindings.isNotEmpty() || _ipBindings.value.isEmpty()) {
+                    _ipBindings.value = liveBindings
+                }
             }
 
             // 9. Fetch Interfaces & Neighbors for Per-Node Distribution
@@ -1047,19 +1053,8 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
 
             val wirelessList = routerOsApiClient.getWirelessInterfaces().getOrDefault(emptyList())
             val neighborsList = routerOsApiClient.getDiscoveredNeighbors().getOrDefault(emptyList())
-            activeConfig?.let {
-                syncLiveSessionsAndNodes(
-                    config = it,
-                    wirelessInterfaces = wirelessList,
-                    neighbors = neighborsList,
-                    realIdentity = realIdentity,
-                    macToInterfaceMap = macToInterface,
-                    wirelessRegs = wirelessRegs,
-                    dhcpLeases = leases,
-                    ipBindingsList = _ipBindings.value,
-                    arpEntries = arpEntries
-                )
-            }
+
+            activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface, wirelessRegs) }
             notifyDataRefreshed()
         }
     }
@@ -1244,10 +1239,9 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     }
                 } catch (_: Exception) {}
 
-                // Fetch DHCP leases for hostname resolution and modem node extraction
+                // Fetch DHCP leases for hostname resolution
                 val macToHostName = mutableMapOf<String, String>()
                 val ipToHostName = mutableMapOf<String, String>()
-                val dhcpLeasesList = mutableListOf<Map<String, String>>()
                 try {
                     val leaseReq = Request.Builder().url("$baseUrl/rest/ip/dhcp-server/lease").header("Authorization", credential).build()
                     val leaseResp = httpClient.newCall(leaseReq).execute()
@@ -1255,30 +1249,11 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                         val arr = JSONArray(leaseResp.body?.string() ?: "[]")
                         for (i in 0 until arr.length()) {
                             val o = arr.getJSONObject(i)
-                            val map = mutableMapOf<String, String>()
-                            o.keys().forEach { k -> map[k] = o.optString(k) }
-                            dhcpLeasesList.add(map)
                             val mac = o.optString("mac-address").uppercase()
                             val ip = o.optString("address")
                             val host = o.optString("host-name").ifBlank { o.optString("comment") }
                             if (mac.isNotBlank() && host.isNotBlank()) macToHostName[mac] = host
                             if (ip.isNotBlank() && host.isNotBlank()) ipToHostName[ip] = host
-                        }
-                    }
-                } catch (_: Exception) {}
-
-                // Fetch ARP entries in REST mode
-                val arpList = mutableListOf<Map<String, String>>()
-                try {
-                    val arpReq = Request.Builder().url("$baseUrl/rest/ip/arp").header("Authorization", credential).build()
-                    val arpResp = httpClient.newCall(arpReq).execute()
-                    if (arpResp.isSuccessful) {
-                        val arr = JSONArray(arpResp.body?.string() ?: "[]")
-                        for (i in 0 until arr.length()) {
-                            val o = arr.getJSONObject(i)
-                            val map = mutableMapOf<String, String>()
-                            o.keys().forEach { k -> map[k] = o.optString(k) }
-                            arpList.add(map)
                         }
                     }
                 } catch (_: Exception) {}
@@ -1610,19 +1585,7 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     }
                 } catch (_: Exception) {}
 
-                activeConfig?.let {
-                    syncLiveSessionsAndNodes(
-                        config = it,
-                        wirelessInterfaces = wirelessList,
-                        neighbors = neighborsList,
-                        realIdentity = realIdentity,
-                        macToInterfaceMap = macToInterface,
-                        wirelessRegs = emptyList(),
-                        dhcpLeases = dhcpLeasesList,
-                        ipBindingsList = _ipBindings.value,
-                        arpEntries = arpList
-                    )
-                }
+                activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface) }
                 notifyDataRefreshed()
             } catch (_: Exception) {}
         }
@@ -1702,72 +1665,13 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
         syncLiveSessionsAndNodes(config)
     }
 
-    private fun isModemOrNetworkDevice(nameOrHost: String, comment: String): Boolean {
-        val text = "$nameOrHost $comment".lowercase()
-        
-        // Exclude smartphones and personal client devices
-        val phoneOrClientKeywords = listOf(
-            "phone", "galaxy", "iphone", "android", "ios", "redmi", "nova", "honor",
-            "oppo", "vivo", "realme", "infinix", "tecno", "pixel", "miui", "hyperos",
-            "oneui", "pad", "tablet", "watch", "smart tv", "tv", "laptop", "pc", "desktop",
-            "samsung", "huawei", "xiaomi", "oppo", "vivo" // phone manufacturers in generic hostnames without router models
-        )
-        // If it explicitly mentions phone model or client keywords without router/modem keywords, it's a phone
-        val hasPhoneKeyword = phoneOrClientKeywords.any { text.contains(it) }
-        val hasRouterKeyword = listOf(
-            "مودم", "راوتر", "نقطة", "فرع", "برج", "موزع", "tp-link", "tplink", "archer", 
-            "tenda", "mercusys", "d-link", "dlink", "totolink", "netgear", "linksys", 
-            "cisco", "draytek", "mikrotik", "router", "modem", "access point", "ap-", 
-            "ap_", "cpe", "station", "bridge", "openwrt", "dd-wrt", "repeater", "extender", 
-            "wlan", "nanostation", "litebeam", "powerbeam", "unifi", "airmax", "ubnt"
-        ).any { text.contains(it) }
-
-        if (hasPhoneKeyword && !hasRouterKeyword) {
-            return false
-        }
-
-        val modemKeywords = listOf(
-            "مودم", "راوتر", "نقطة", "فرع", "برج", "منزل", "بيت", "شقة", "محل", "مكتب", "موزع", "شبكة",
-            "tp-link", "tplink", "archer", "tenda", "mercusys", "d-link", "dlink",
-            "zte", "totolink", "netgear", "linksys", "cisco", "draytek", "mikrotik",
-            "router", "modem", "access point", "ap-", "ap_", "cpe", "station", "bridge",
-            "openwrt", "dd-wrt", "repeater", "extender", "wlan", "nanostation", "litebeam", "powerbeam",
-            "unifi", "airmax", "ubnt"
-        )
-        return modemKeywords.any { text.contains(it) }
-    }
-
-    private fun classifyNodeType(name: String, model: String, role: String, comment: String): com.example.data.model.NetworkNodeType {
-        val combined = "$name $model $role $comment".lowercase()
-        return when {
-            combined.contains("برج") || combined.contains("tower") || combined.contains("omni") ||
-            combined.contains("sector") || combined.contains("netmetal") || combined.contains("basebox") ||
-            combined.contains("starlink") || combined.contains("gateway") || combined.contains("مركزي") ||
-            combined.contains("رئيسي") -> {
-                com.example.data.model.NetworkNodeType.MAIN_TOWER
-            }
-            combined.contains("منزل") || combined.contains("بيت") || combined.contains("شقة") ||
-            combined.contains("مودم") || combined.contains("home") || combined.contains("tenda") ||
-            combined.contains("tp-link") || combined.contains("tplink") || combined.contains("archer") ||
-            combined.contains("mercusys") || combined.contains("d-link") || combined.contains("dlink") ||
-            combined.contains("huawei") || combined.contains("zte") || combined.contains("cpe") ||
-            combined.contains("station") || combined.contains("محل") || combined.contains("دكان") -> {
-                com.example.data.model.NetworkNodeType.HOME_NODE
-            }
-            else -> com.example.data.model.NetworkNodeType.DISTRIBUTION
-        }
-    }
-
     private fun syncLiveSessionsAndNodes(
         config: RouterConnectionConfig,
         wirelessInterfaces: List<Map<String, String>> = emptyList(),
         neighbors: List<Map<String, String>> = emptyList(),
         realIdentity: String = "",
         macToInterfaceMap: Map<String, String> = emptyList<Pair<String, String>>().toMap(),
-        wirelessRegs: List<Map<String, String>> = emptyList(),
-        dhcpLeases: List<Map<String, String>> = emptyList(),
-        ipBindingsList: List<IpBinding> = emptyList(),
-        arpEntries: List<Map<String, String>> = emptyList()
+        wirelessRegs: List<Map<String, String>> = emptyList()
     ) {
         val activeList = _activeUsers.value
         val cardList = _cards.value
@@ -1777,33 +1681,27 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
         val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else "192.168.88"
         val serverName = realIdentity.ifBlank { config.name.ifBlank { "السيرفر الرئيسي ($routerIpBase)" } }
 
-        // 1. Gather all candidate sub-nodes (Wireless APs, Neighbor APs, DHCP Home Modems, IP-Bindings, ARP)
+        // 1. Gather all candidate sub-nodes (Wireless APs, Neighbor APs, and Custom Added Nodes)
         val candidateSubNodes = mutableListOf<com.example.data.model.NetworkNode>()
-        val addedMacs = mutableSetOf<String>()
-        val addedIps = mutableSetOf<String>()
 
         // A. Real wireless AP interfaces from router
         wirelessInterfaces.forEachIndexed { idx, w ->
             val ifName = w["name"] ?: "wlan${idx + 1}"
             val ssid = w["ssid"] ?: ifName
-            val mac = w["mac-address"]?.uppercase().orEmpty()
+            val mac = w["mac-address"] ?: ""
             val freq = w["frequency"] ?: "5 GHz"
             val band = w["band"] ?: "5GHz-A/N/AC"
             val isRunning = w["running"] == "true" || w["disabled"] != "true"
-
-            val assignedMac = mac.ifBlank { "D4:CA:6D:BB:${"%02X".format(idx + 10)}:02" }
-            val assignedIp = "$subnetPrefix.${idx + 2}"
 
             candidateSubNodes.add(
                 com.example.data.model.NetworkNode(
                     id = "node_wlan_$idx",
                     name = "نقطة البث ($ssid)",
-                    ipAddress = assignedIp,
-                    macAddress = assignedMac,
+                    ipAddress = "$subnetPrefix.${idx + 2}",
+                    macAddress = mac.ifBlank { "D4:CA:6D:BB:${"%02X".format(idx + 10)}:02" },
                     interfaceName = ifName,
                     model = "MikroTik Wireless ($band)",
                     role = "أكسس بوينت لاسلكي ($ifName)",
-                    nodeType = com.example.data.model.NetworkNodeType.DISTRIBUTION,
                     isOnline = isRunning,
                     pingMs = 2L,
                     uptime = _resourceState.value.uptime,
@@ -1816,11 +1714,9 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     ssid = ssid
                 )
             )
-            addedMacs.add(assignedMac.uppercase())
-            addedIps.add(assignedIp)
         }
 
-        // B. Neighbor APs & Towers discovered on the network
+        // B. Neighbor APs discovered on the network
         val uniqueNeighbors = neighbors
             .filter {
                 val addr = it["address"].orEmpty().trim()
@@ -1838,10 +1734,9 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
         uniqueNeighbors.forEachIndexed { idx, n ->
             val nIdentity = n["identity"] ?: n["board"] ?: "أكسس بوينت فرعي"
             val nAddress = n["address"] ?: "$subnetPrefix.${idx + 10}"
-            val nMac = n["mac-address"]?.uppercase().orEmpty()
+            val nMac = n["mac-address"] ?: ""
             val nPlatform = n["platform"] ?: n["board"] ?: "MikroTik RouterOS"
             val nInterface = n["interface"] ?: "ether${idx + 2}"
-            val nType = classifyNodeType(nIdentity, nPlatform, "أكسس بوينت", nIdentity)
 
             candidateSubNodes.add(
                 com.example.data.model.NetworkNode(
@@ -1851,8 +1746,7 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     macAddress = nMac,
                     interfaceName = nInterface,
                     model = nPlatform,
-                    role = if (nType == com.example.data.model.NetworkNodeType.MAIN_TOWER) "برج إرسال رئيسي ($nInterface)" else if (nType == com.example.data.model.NetworkNodeType.HOME_NODE) "مودم منزلي / نقطة فرعية ($nInterface)" else "أكسس بوينت / نقطة توزيع ($nInterface)",
-                    nodeType = nType,
+                    role = "أكسس بوينت / برج متصل ($nInterface)",
                     isOnline = true,
                     pingMs = 3L,
                     uptime = _resourceState.value.uptime,
@@ -1861,155 +1755,17 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     ssid = nIdentity
                 )
             )
-            if (nMac.isNotBlank()) addedMacs.add(nMac.uppercase())
-            if (nAddress.isNotBlank()) addedIps.add(nAddress)
         }
 
-        // C. Home Modems and Branch Nodes from DHCP Leases (User priority: Comment first, then host-name)
-        dhcpLeases.forEachIndexed { idx, l ->
-            val mac = l["mac-address"]?.uppercase()?.trim().orEmpty()
-            val ip = l["address"]?.trim().orEmpty().ifBlank { l["active-address"]?.trim().orEmpty() }
-            val comment = l["comment"]?.trim().orEmpty()
-            val hostName = l["host-name"]?.trim().orEmpty()
-            val status = l["status"]?.trim().orEmpty()
-            val isDynamic = l["dynamic"] != "false"
-            val disabled = l["disabled"] == "true"
-
-            val isCandidate = (comment.isNotBlank() && isModemOrNetworkDevice("", comment)) || isModemOrNetworkDevice(hostName, comment)
-
-            if (isCandidate && (mac.isNotBlank() || ip.isNotBlank())) {
-                val isAlreadyPresent = (mac.isNotBlank() && addedMacs.contains(mac)) || (ip.isNotBlank() && addedIps.contains(ip))
-                if (!isAlreadyPresent) {
-                    val resolvedName = when {
-                        comment.isNotBlank() -> comment
-                        hostName.isNotBlank() -> hostName
-                        else -> "مودم منزلي ($ip)"
-                    }
-                    val detectedDevice = com.example.data.util.DeviceDetector.detectDevice(mac, hostName, "")
-                    val modelName = when {
-                        hostName.isNotBlank() && !hostName.equals(resolvedName, ignoreCase = true) -> "${detectedDevice.brand} $hostName"
-                        detectedDevice.modelName.isNotBlank() && detectedDevice.modelName != "غير معروف" -> "${detectedDevice.brand} ${detectedDevice.modelName}"
-                        else -> "مودم منزلي (${detectedDevice.brand})"
-                    }
-                    val assignedInterface = macToInterfaceMap[mac] ?: "ether2"
-                    val nodeType = classifyNodeType(resolvedName, modelName, "مودم منزلي", comment)
-                    val isBound = status.equals("bound", ignoreCase = true) || (status.isBlank() && !disabled)
-
-                    candidateSubNodes.add(
-                        com.example.data.model.NetworkNode(
-                            id = "node_dhcp_${if (mac.isNotBlank()) mac.replace(":", "") else idx}",
-                            name = resolvedName,
-                            ipAddress = ip.ifBlank { "$subnetPrefix.${idx + 50}" },
-                            macAddress = mac,
-                            interfaceName = assignedInterface,
-                            model = modelName,
-                            role = if (nodeType == com.example.data.model.NetworkNodeType.HOME_NODE) "مودم منزلي / نقطة فرعية" else "نقطة توزيع فرعية ($assignedInterface)",
-                            nodeType = nodeType,
-                            status = if (isBound) com.example.data.model.NodeStatus.ACTIVE else com.example.data.model.NodeStatus.OFFLINE,
-                            parentTowerId = "node_main_router",
-                            parentTowerName = serverName,
-                            isOnline = isBound,
-                            pingMs = if (isBound) 3L else 0L,
-                            uptime = _resourceState.value.uptime,
-                            signalDbm = "-60 dBm",
-                            location = if (comment.isNotBlank()) "الموقع: $comment" else "مودم منزلي متصل",
-                            ssid = hostName.ifBlank { resolvedName }
-                        )
-                    )
-                    if (mac.isNotBlank()) addedMacs.add(mac)
-                    if (ip.isNotBlank()) addedIps.add(ip)
-                }
-            }
-        }
-
-        // D. Bypassed Nodes & Home Routers from IP-Bindings
-        ipBindingsList.forEachIndexed { idx, b ->
-            val bMac = b.macAddress.uppercase().trim()
-            val bIp = b.address.trim()
-            val bComment = b.comment.trim()
-
-            if (bMac.isNotBlank() || bIp.isNotBlank()) {
-                val isAlreadyPresent = (bMac.isNotBlank() && addedMacs.contains(bMac)) || (bIp.isNotBlank() && addedIps.contains(bIp))
-                if (!isAlreadyPresent && (b.type.equals("bypassed", ignoreCase = true) || bComment.isNotBlank() || isModemOrNetworkDevice(bComment, ""))) {
-                    val resolvedName = if (bComment.isNotBlank()) bComment else "جهاز معفى ($bIp)"
-                    val nodeType = classifyNodeType(resolvedName, "IP-Binding", "جهاز معفى", bComment)
-                    val assignedInterface = macToInterfaceMap[bMac] ?: "LAN"
-
-                    candidateSubNodes.add(
-                        com.example.data.model.NetworkNode(
-                            id = "node_bind_${if (bMac.isNotBlank()) bMac.replace(":", "") else idx}",
-                            name = resolvedName,
-                            ipAddress = bIp.ifBlank { "$subnetPrefix.${idx + 80}" },
-                            macAddress = bMac,
-                            interfaceName = assignedInterface,
-                            model = "راوتر / جهاز معفى (${b.type})",
-                            role = if (nodeType == com.example.data.model.NetworkNodeType.HOME_NODE) "مودم منزلي معفى (Bypassed)" else "نقطة توزيع معفاة (Bypassed)",
-                            nodeType = nodeType,
-                            status = if (!b.disabled) com.example.data.model.NodeStatus.ACTIVE else com.example.data.model.NodeStatus.DISABLED,
-                            parentTowerId = "node_main_router",
-                            parentTowerName = serverName,
-                            isOnline = !b.disabled,
-                            pingMs = 2L,
-                            uptime = _resourceState.value.uptime,
-                            signalDbm = "-58 dBm",
-                            location = if (bComment.isNotBlank()) bComment else "شبكة الأجهزة المعفاة",
-                            ssid = resolvedName
-                        )
-                    )
-                    if (bMac.isNotBlank()) addedMacs.add(bMac)
-                    if (bIp.isNotBlank()) addedIps.add(bIp)
-                }
-            }
-        }
-
-        // E. Named devices from ARP Entries
-        arpEntries.forEachIndexed { idx, a ->
-            val aMac = a["mac-address"]?.uppercase()?.trim().orEmpty()
-            val aIp = a["address"]?.trim().orEmpty()
-            val aComment = a["comment"]?.trim().orEmpty()
-            val aIf = a["interface"]?.trim().orEmpty()
-
-            if (aComment.isNotBlank() && (aMac.isNotBlank() || aIp.isNotBlank())) {
-                val isAlreadyPresent = (aMac.isNotBlank() && addedMacs.contains(aMac)) || (aIp.isNotBlank() && addedIps.contains(aIp))
-                if (!isAlreadyPresent) {
-                    val resolvedName = aComment
-                    val nodeType = classifyNodeType(resolvedName, "ARP", "نقطة فرعية", aComment)
-                    candidateSubNodes.add(
-                        com.example.data.model.NetworkNode(
-                            id = "node_arp_${if (aMac.isNotBlank()) aMac.replace(":", "") else idx}",
-                            name = resolvedName,
-                            ipAddress = aIp,
-                            macAddress = aMac,
-                            interfaceName = aIf.ifBlank { "ether2" },
-                            model = "مودم / جهاز فرعي مسجل",
-                            role = if (nodeType == com.example.data.model.NetworkNodeType.HOME_NODE) "مودم منزلي / نقطة فرعية" else "نقطة توزيع فرعية",
-                            nodeType = nodeType,
-                            status = com.example.data.model.NodeStatus.ACTIVE,
-                            parentTowerId = "node_main_router",
-                            parentTowerName = serverName,
-                            isOnline = true,
-                            pingMs = 3L,
-                            uptime = _resourceState.value.uptime,
-                            signalDbm = "-62 dBm",
-                            location = aComment,
-                            ssid = resolvedName
-                        )
-                    )
-                    if (aMac.isNotBlank()) addedMacs.add(aMac)
-                    if (aIp.isNotBlank()) addedIps.add(aIp)
-                }
-            }
-        }
-
-        // F. Custom user-added nodes
+        // C. Custom user-added nodes
         customAddedNodes.forEach { customNode ->
             if (candidateSubNodes.none { it.id == customNode.id || it.ipAddress == customNode.ipAddress }) {
                 candidateSubNodes.add(customNode)
             }
         }
 
-        // G. Fallback realistic sub-nodes ONLY in Demo mode
-        if (activeConfig?.isDemoMode == true && candidateSubNodes.isEmpty()) {
+        // D. Fallback realistic sub-nodes in Demo mode or when no external APs auto-discovered
+        if (candidateSubNodes.isEmpty()) {
             candidateSubNodes.add(
                 com.example.data.model.NetworkNode(
                     id = "node_ap_main",
@@ -2019,7 +1775,6 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     interfaceName = "ether2",
                     model = "MikroTik NetMetal 5 / Omni",
                     role = "برج إرسال رئيسي (Omni)",
-                    nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
                     isOnline = true,
                     pingMs = 2L,
                     uptime = _resourceState.value.uptime.ifBlank { "5d 14h" },
@@ -2043,7 +1798,6 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     interfaceName = "ether3",
                     model = "MikroTik cAP ac",
                     role = "أكسس بوينت بث (AP)",
-                    nodeType = com.example.data.model.NetworkNodeType.DISTRIBUTION,
                     isOnline = true,
                     pingMs = 3L,
                     uptime = _resourceState.value.uptime.ifBlank { "3d 21h" },
@@ -2056,46 +1810,6 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     frequency = "2.4 GHz (Channel 6)",
                     channelWidth = "20/40 MHz",
                     ssid = "YemenNet_East_AP"
-                )
-            )
-            candidateSubNodes.add(
-                com.example.data.model.NetworkNode(
-                    id = "node_home_modem_1",
-                    name = "مودم منزل الشيخ (TP-Link)",
-                    ipAddress = "$subnetPrefix.55",
-                    macAddress = "E8:48:B8:33:44:55",
-                    interfaceName = "ether2",
-                    model = "TP-Link Archer C6",
-                    role = "مودم منزلي / نقطة فرعية",
-                    nodeType = com.example.data.model.NetworkNodeType.HOME_NODE,
-                    parentTowerId = "node_ap_main",
-                    parentTowerName = "أكسس بوينت البرج 1",
-                    isOnline = true,
-                    pingMs = 4L,
-                    uptime = "4d 10h",
-                    signalDbm = "-65 dBm",
-                    location = "منزل الشيخ - الحارة الغربية",
-                    ssid = "Home_Sheikh_Wifi"
-                )
-            )
-            candidateSubNodes.add(
-                com.example.data.model.NetworkNode(
-                    id = "node_home_modem_2",
-                    name = "مودم شقة المهندس (Tenda)",
-                    ipAddress = "$subnetPrefix.56",
-                    macAddress = "CC:2D:E0:66:77:88",
-                    interfaceName = "ether3",
-                    model = "Tenda F3 Wireless Router",
-                    role = "مودم منزلي / نقطة فرعية",
-                    nodeType = com.example.data.model.NetworkNodeType.HOME_NODE,
-                    parentTowerId = "node_ap_east",
-                    parentTowerName = "أكسس بوينت الحارة الشرقية",
-                    isOnline = true,
-                    pingMs = 5L,
-                    uptime = "2d 08h",
-                    signalDbm = "-68 dBm",
-                    location = "عمارة النور - شقة 4",
-                    ssid = "Tenda_Home_Net"
                 )
             )
         }
@@ -2139,9 +1853,8 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                 val isSubnetMatch = hasDistinctSubnet && u.address.startsWith(nodeSubnet)
 
                 val isMacMatch = node.macAddress.isNotBlank() && node.macAddress.equals(cleanMac, ignoreCase = true)
-                val isIpMatch = node.ipAddress.isNotBlank() && node.ipAddress == u.address
 
-                isWirelessMatch || isPortMatch || isServerMatch || isNameMatch || isSubnetMatch || isMacMatch || isIpMatch
+                isWirelessMatch || isPortMatch || isServerMatch || isNameMatch || isSubnetMatch || isMacMatch
             }
 
             matchingClients.forEach {
@@ -2220,7 +1933,6 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
             interfaceName = "ether1-WAN / ether2-LAN",
             model = _resourceState.value.boardName.ifBlank { "MikroTik RouterOS" },
             role = "السيرفر الرئيسي للشبكة (Gateway)",
-            nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
             isOnline = true,
             pingMs = 1L,
             connectedUsers = remainingClients.size,
@@ -2444,6 +2156,67 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
 
     private val _lastSyncError = MutableStateFlow<String?>(null)
     val lastSyncError: StateFlow<String?> = _lastSyncError.asStateFlow()
+
+    suspend fun refreshProfilesFromRouter() {
+        val config = activeConfig ?: return
+        if (config.isDemoMode) return
+        withContext(Dispatchers.IO) {
+            if (isApiSocketMode) {
+                val res = routerOsApiClient.getHotspotProfiles()
+                if (res.isSuccess) {
+                    _profiles.value = res.getOrDefault(emptyList())
+                }
+            } else {
+                try {
+                    val protocol = if (config.useHttps) "https" else "http"
+                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                    val credential = Credentials.basic(config.username, config.password)
+                    val list = mutableListOf<HotspotProfile>()
+                    
+                    val pReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile").header("Authorization", credential).build()
+                    val pResp = httpClient.newCall(pReq).execute()
+                    if (pResp.isSuccessful) {
+                        val jsonArray = JSONArray(pResp.body?.string().orEmpty())
+                        for (i in 0 until jsonArray.length()) {
+                            val obj = jsonArray.getJSONObject(i)
+                            val name = obj.optString("name", "default")
+                            list.add(HotspotProfile(
+                                id = obj.optString(".id", "p_$i"),
+                                name = name,
+                                rateLimit = obj.optString("rate-limit", "غير محدد"),
+                                sessionTimeout = obj.optString("session-timeout", "غير محدد"),
+                                source = "hotspot",
+                                comment = obj.optString("comment", "")
+                            ))
+                        }
+                    }
+
+                    val umReq = Request.Builder().url("$baseUrl/rest/user-manager/profile").header("Authorization", credential).build()
+                    val umResp = httpClient.newCall(umReq).execute()
+                    if (umResp.isSuccessful) {
+                        val umArray = JSONArray(umResp.body?.string().orEmpty())
+                        for (i in 0 until umArray.length()) {
+                            val obj = umArray.getJSONObject(i)
+                            val name = obj.optString("name", "")
+                            if (name.isNotBlank()) {
+                                list.add(HotspotProfile(
+                                    id = obj.optString(".id", "um_$i"),
+                                    name = name,
+                                    validity = obj.optString("validity", "1d"),
+                                    source = "usermanager_v7",
+                                    comment = obj.optString("comment", "")
+                                ))
+                            }
+                        }
+                    }
+
+                    if (list.isNotEmpty()) {
+                        _profiles.value = list
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+    }
 
     suspend fun refreshData(): Result<Unit> {
         val config = activeConfig ?: return Result.failure(Exception("لم يتم ضبط إعدادات الاتصال"))
@@ -2682,17 +2455,30 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
         }
     }
 
-    suspend fun generateBatch(config: BatchGenerationConfig, dao: com.example.data.local.AppDao): Result<List<HotspotCard>> {
+    suspend fun generateBatch(config: BatchGenerationConfig, dao: com.example.data.local.AppDao): Result<BatchCardGenerationResult> {
         return withContext(Dispatchers.Default) {
             // 1. Validation & Auto-provision: Verify profile against router profiles (case-insensitive & trimmed)
             val cleanProfileName = config.profile.trim()
-            val existingProfiles = _profiles.value
-            var targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
+            var existingProfiles = _profiles.value
+            var targetProfile = existingProfiles.firstOrNull { 
+                it.name.trim().equals(cleanProfileName, ignoreCase = true) && 
+                (config.profileSource.isBlank() || it.source == config.profileSource)
+            } ?: existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
             val routerConfig = activeConfig
 
             if (routerConfig != null && !routerConfig.isDemoMode && cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
                 if (targetProfile == null) {
-                    return@withContext Result.failure(Exception("الباقة المحددة غير موجودة في الراوتر. يرجى اختيار باقة صحيحة من القائمة."))
+                    // Stale cache guard: query fresh profiles from router before failing
+                    refreshProfilesFromRouter()
+                    existingProfiles = _profiles.value
+                    targetProfile = existingProfiles.firstOrNull { 
+                        it.name.trim().equals(cleanProfileName, ignoreCase = true) && 
+                        (config.profileSource.isBlank() || it.source == config.profileSource)
+                    } ?: existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
+                    
+                    if (targetProfile == null) {
+                        return@withContext Result.failure(Exception("الباقة المحددة ($cleanProfileName) غير موجودة في الراوتر. يرجى اختيار باقة صحيحة من القائمة."))
+                    }
                 }
             }
 
@@ -2739,7 +2525,8 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                         limitBytesTotal = limitBytes,
                         comment = config.batchComment.ifBlank { "دفعة كروت" },
                         disabled = false,
-                        price = config.price
+                        price = config.price,
+                        cardType = config.targetSystem
                     )
                     generatedCards.add(card)
                 }
@@ -2748,17 +2535,23 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
             // 2. Real Router Verification & Synchronization
             if (routerConfig != null && !routerConfig.isDemoMode) {
                 val addedCards = mutableListOf<HotspotCard>()
+                val failedCards = mutableListOf<HotspotCard>()
                 val failureReasons = mutableListOf<String>()
 
                 withContext(Dispatchers.IO) {
                     if (isApiSocketMode) {
                         for (card in generatedCards) {
-                            val res = routerOsApiClient.addCard(card)
+                            val res = routerOsApiClient.addCard(
+                                card,
+                                preferredSystem = config.targetSystem,
+                                profileSource = config.profileSource.ifBlank { targetProfile?.source.orEmpty() }
+                            )
                             if (res.isSuccess) {
                                 addedCards.add(card)
                             } else {
                                 val err = res.exceptionOrNull()?.message ?: "خطأ غير معروف"
-                                failureReasons.add(err)
+                                failedCards.add(card)
+                                failureReasons.add("الكرت ${card.name}: $err")
                             }
                         }
                     } else {
@@ -2766,52 +2559,107 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                         val baseUrl = "$protocol://${routerConfig.ipAddress}:${routerConfig.port}"
                         val credential = Credentials.basic(routerConfig.username, routerConfig.password)
 
-                        for (card in generatedCards) {
-                            try {
-                                val isUmProfile = targetProfile?.source?.startsWith("usermanager") == true
-                                var cardAdded = false
+                        val isUmProfile = config.targetSystem == "usermanager" ||
+                            targetProfile?.source?.startsWith("usermanager") == true ||
+                            config.profileSource.startsWith("usermanager")
 
-                                if (isUmProfile) {
-                                    // Try REST user-manager endpoint first
-                                    try {
-                                        val umUserJson = JSONObject().apply {
-                                            put("name", card.name)
-                                            put("password", card.password)
-                                            put("comment", card.comment)
+                        if (isUmProfile) {
+                            for (card in generatedCards) {
+                                try {
+                                    // Step 1: Create user in UM
+                                    val umUserJson = JSONObject().apply {
+                                        put("name", card.name)
+                                        put("password", card.password)
+                                        put("comment", card.comment)
+                                        put("disabled", "false")
+                                    }.toString()
+                                    val umReq = Request.Builder()
+                                        .url("$baseUrl/rest/user-manager/user")
+                                        .post(umUserJson.toRequestBody("application/json".toMediaType()))
+                                        .header("Authorization", credential)
+                                        .build()
+                                    val umResp = httpClient.newCall(umReq).execute()
+                                    if (!umResp.isSuccessful) {
+                                        val errBody = umResp.body?.string().orEmpty()
+                                        failedCards.add(card)
+                                        failureReasons.add("فشل إنشاء كرت يوزرمانجر ${card.name}: ${umResp.code} - $errBody")
+                                        continue
+                                    }
+
+                                    // Step 2: Assign profile to UM user
+                                    var bindingSuccessful = false
+                                    var bindError = ""
+                                    if (cleanProfileName.isNotBlank()) {
+                                        val umProfJson = JSONObject().apply {
+                                            put("user", card.name)
+                                            put("profile", cleanProfileName)
                                         }.toString()
-                                        val umReq = Request.Builder()
-                                            .url("$baseUrl/rest/user-manager/user")
-                                            .post(umUserJson.toRequestBody("application/json".toMediaType()))
+                                        val assignReq = Request.Builder()
+                                            .url("$baseUrl/rest/user-manager/user-profile")
+                                            .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        val umResp = httpClient.newCall(umReq).execute()
-                                        if (umResp.isSuccessful) {
-                                            cardAdded = true
-                                            // Assign profile
-                                            val umProfJson = JSONObject().apply {
-                                                put("user", card.name)
-                                                put("profile", card.profile)
-                                            }.toString()
-                                            val assignReq = Request.Builder()
-                                                .url("$baseUrl/rest/user-manager/user-profile")
-                                                .post(umProfJson.toRequestBody("application/json".toMediaType()))
+                                        val assignResp = httpClient.newCall(assignReq).execute()
+                                        if (assignResp.isSuccessful) {
+                                            bindingSuccessful = true
+                                        } else {
+                                            bindError = assignResp.body?.string().orEmpty()
+                                        }
+                                    } else {
+                                        bindingSuccessful = true
+                                    }
+
+                                    if (!bindingSuccessful) {
+                                        // Transactional Rollback: Delete user to prevent orphaned unlinked card
+                                        try {
+                                            val delReq = Request.Builder()
+                                                .url("$baseUrl/rest/user-manager/user/${card.name}")
+                                                .delete()
                                                 .header("Authorization", credential)
                                                 .build()
-                                            val assignResp = httpClient.newCall(assignReq).execute()
-                                            if (!assignResp.isSuccessful) {
-                                                val assignErr = assignResp.body?.string().orEmpty()
-                                                failureReasons.add("تم إضافة كرت UM ولكن فشل ربطه بالباقة: $assignErr")
-                                            }
-                                        }
-                                    } catch (_: Exception) {}
-                                }
+                                            httpClient.newCall(delReq).execute()
+                                        } catch (_: Exception) {}
 
-                                if (!cardAdded) {
-                                    val cleanProfile = card.profile.trim()
+                                        failedCards.add(card)
+                                        failureReasons.add("فشل ربط باقة اليوزرمانجر بالكرت ${card.name}: $bindError (تم التراجع عن إنشاء الكرت)")
+                                        continue
+                                    }
+
+                                    addedCards.add(card)
+                                } catch (e: Exception) {
+                                    failedCards.add(card)
+                                    failureReasons.add("خطأ في الاتصال بالراوتر للكرت ${card.name}: ${e.message}")
+                                }
+                            }
+                        } else {
+                            // Hotspot system
+                            if (cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
+                                try {
+                                    val pCheck = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile/$cleanProfileName").header("Authorization", credential).build()
+                                    val pResp = httpClient.newCall(pCheck).execute()
+                                    if (!pResp.isSuccessful) {
+                                        val createP = JSONObject().apply {
+                                            put("name", cleanProfileName)
+                                            put("shared-users", "1")
+                                        }.toString()
+                                        val createReq = Request.Builder()
+                                            .url("$baseUrl/rest/ip/hotspot/user/profile")
+                                            .post(createP.toRequestBody("application/json".toMediaType()))
+                                            .header("Authorization", credential)
+                                            .build()
+                                        httpClient.newCall(createReq).execute()
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
+                            for (card in generatedCards) {
+                                try {
                                     val jsonBody = JSONObject().apply {
                                         put("name", card.name.trim())
                                         if (card.password.isNotBlank()) put("password", card.password.trim())
-                                        if (cleanProfile.isNotBlank()) put("profile", cleanProfile)
+                                        if (cleanProfileName.isNotBlank()) put("profile", cleanProfileName)
+                                        put("disabled", "false")
+                                        put("server", "all")
                                         val validUptime = routerOsApiClient.formatRouterOsTime(card.limitUptime)
                                         if (!validUptime.isNullOrBlank()) put("limit-uptime", validUptime)
                                         if (card.limitBytesTotal > 0) put("limit-bytes-total", card.limitBytesTotal.toString())
@@ -2825,9 +2673,10 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                         .build()
                                     val resp = httpClient.newCall(postReq).execute()
                                     if (resp.isSuccessful) {
-                                        cardAdded = true
+                                        addedCards.add(card)
                                     } else {
                                         val errBody = resp.body?.string().orEmpty()
+                                        failedCards.add(card)
                                         failureReasons.add("فشل إضافة الكرت ${card.name}: ${resp.code} - $errBody")
                                         dao.insertSystemEventLog(
                                             SystemEventLogEntity(
@@ -2840,13 +2689,10 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                             )
                                         )
                                     }
+                                } catch (e: Exception) {
+                                    failedCards.add(card)
+                                    failureReasons.add(e.message ?: "فشل الاتصال بالراوتر")
                                 }
-
-                                if (cardAdded) {
-                                    addedCards.add(card)
-                                }
-                            } catch (e: Exception) {
-                                failureReasons.add(e.message ?: "فشل الاتصال بالراوتر")
                             }
                         }
                     }
@@ -2854,6 +2700,13 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     // Re-sync all cards (both Hotspot & User-Manager) directly from router
                     refreshCardsFromRouter()
                 }
+
+                val batchResult = BatchCardGenerationResult(
+                    totalRequested = config.count,
+                    successfulCards = addedCards,
+                    failedCards = failedCards,
+                    failureReasons = failureReasons
+                )
 
                 if (addedCards.isEmpty()) {
                     val primaryErr = failureReasons.firstOrNull() ?: "فشل الاتصال بالراوتر أو رفض السيرفر للإضافة"
@@ -2865,7 +2718,7 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                 val currentList = _cards.value.toMutableList()
                 currentList.addAll(0, addedCards)
                 _cards.value = currentList.distinctBy { it.name }
-                return@withContext Result.success(addedCards)
+                return@withContext Result.success(batchResult)
             }
 
             // Demo Mode: Add generated cards locally
@@ -2873,27 +2726,44 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
             currentList.addAll(0, generatedCards)
             _cards.value = currentList.distinctBy { it.name }
 
-            Result.success(generatedCards)
+            val batchResult = BatchCardGenerationResult(
+                totalRequested = config.count,
+                successfulCards = generatedCards,
+                failedCards = emptyList(),
+                failureReasons = emptyList()
+            )
+            Result.success(batchResult)
         }
     }
 
     suspend fun addSingleCard(card: HotspotCard): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             val cleanProfileName = card.profile.trim()
-            val existingProfiles = _profiles.value
+            var existingProfiles = _profiles.value
             var targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
 
             val routerConfig = activeConfig
             if (routerConfig != null && !routerConfig.isDemoMode && cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
                 if (targetProfile == null) {
-                    return@withContext Result.failure(Exception("الباقة المحددة (${cleanProfileName}) غير متوفرة في الراوتر."))
+                    refreshProfilesFromRouter()
+                    existingProfiles = _profiles.value
+                    targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
+                    if (targetProfile == null) {
+                        return@withContext Result.failure(Exception("الباقة المحددة (${cleanProfileName}) غير متوفرة في الراوتر."))
+                    }
                 }
             }
 
             val sanitizedCard = card.copy(profile = cleanProfileName)
+            val targetSystem = if (sanitizedCard.isUserManagerCard) "usermanager" else "hotspot"
+
             if (routerConfig != null && !routerConfig.isDemoMode) {
                 if (isApiSocketMode) {
-                    val socketRes = routerOsApiClient.addCard(sanitizedCard)
+                    val socketRes = routerOsApiClient.addCard(
+                        sanitizedCard,
+                        preferredSystem = targetSystem,
+                        profileSource = targetProfile?.source.orEmpty()
+                    )
                     if (!socketRes.isSuccess) {
                         return@withContext socketRes
                     }
@@ -2903,46 +2773,90 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                         val baseUrl = "$protocol://${routerConfig.ipAddress}:${routerConfig.port}"
                         val credential = Credentials.basic(routerConfig.username, routerConfig.password)
 
-                        val isUmProfile = targetProfile?.source?.startsWith("usermanager") == true
-                        var added = false
+                        val isUmProfile = targetSystem == "usermanager" || targetProfile?.source?.startsWith("usermanager") == true
 
                         if (isUmProfile) {
-                            try {
-                                val umUserJson = JSONObject().apply {
-                                    put("name", sanitizedCard.name.trim())
-                                    if (sanitizedCard.password.isNotBlank()) put("password", sanitizedCard.password.trim())
-                                    if (sanitizedCard.comment.isNotBlank()) put("comment", sanitizedCard.comment)
+                            // Step 1: Create user in UM
+                            val umUserJson = JSONObject().apply {
+                                put("name", sanitizedCard.name.trim())
+                                if (sanitizedCard.password.isNotBlank()) put("password", sanitizedCard.password.trim())
+                                if (sanitizedCard.comment.isNotBlank()) put("comment", sanitizedCard.comment)
+                                put("disabled", "false")
+                            }.toString()
+                            val umReq = Request.Builder()
+                                .url("$baseUrl/rest/user-manager/user")
+                                .post(umUserJson.toRequestBody("application/json".toMediaType()))
+                                .header("Authorization", credential)
+                                .build()
+                            val umResp = httpClient.newCall(umReq).execute()
+                            if (!umResp.isSuccessful) {
+                                val errBody = umResp.body?.string().orEmpty()
+                                return@withContext Result.failure(Exception("رفض راوتر ميكروتك إنشاء مستخدم يوزرمانجر: ${umResp.code} - $errBody"))
+                            }
+
+                            // Step 2: Assign Profile in UM
+                            var bindingSuccessful = false
+                            var bindError = ""
+                            if (cleanProfileName.isNotBlank()) {
+                                val umProfJson = JSONObject().apply {
+                                    put("user", sanitizedCard.name.trim())
+                                    put("profile", cleanProfileName)
                                 }.toString()
-                                val umReq = Request.Builder()
-                                    .url("$baseUrl/rest/user-manager/user")
-                                    .post(umUserJson.toRequestBody("application/json".toMediaType()))
+                                val assignReq = Request.Builder()
+                                    .url("$baseUrl/rest/user-manager/user-profile")
+                                    .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                val umResp = httpClient.newCall(umReq).execute()
-                                if (umResp.isSuccessful) {
-                                    added = true
-                                    val umProfJson = JSONObject().apply {
-                                        put("user", sanitizedCard.name.trim())
-                                        put("profile", sanitizedCard.profile.trim())
-                                    }.toString()
-                                    val assignReq = Request.Builder()
-                                        .url("$baseUrl/rest/user-manager/user-profile")
-                                        .post(umProfJson.toRequestBody("application/json".toMediaType()))
+                                val assignResp = httpClient.newCall(assignReq).execute()
+                                if (assignResp.isSuccessful) {
+                                    bindingSuccessful = true
+                                } else {
+                                    bindError = assignResp.body?.string().orEmpty()
+                                }
+                            } else {
+                                bindingSuccessful = true
+                            }
+
+                            if (!bindingSuccessful) {
+                                // Transactional Rollback: Delete user to prevent orphaned card
+                                try {
+                                    val delReq = Request.Builder()
+                                        .url("$baseUrl/rest/user-manager/user/${sanitizedCard.name.trim()}")
+                                        .delete()
                                         .header("Authorization", credential)
                                         .build()
-                                    val assignResp = httpClient.newCall(assignReq).execute()
-                                    if (!assignResp.isSuccessful) {
-                                        Log.e("MikrotikRepo", "Failed to assign UM profile: ${assignResp.body?.string()}")
-                                    }
-                                }
-                            } catch (_: Exception) {}
-                        }
+                                    httpClient.newCall(delReq).execute()
+                                } catch (_: Exception) {}
 
-                        if (!added) {
+                                return@withContext Result.failure(Exception("فشل ربط باقة اليوزرمانجر (${cleanProfileName}) بالكرت: $bindError (تم التراجع عن إنشاء الكرت)"))
+                            }
+                        } else {
+                            // Hotspot
+                            if (cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
+                                try {
+                                    val pCheck = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile/$cleanProfileName").header("Authorization", credential).build()
+                                    val pResp = httpClient.newCall(pCheck).execute()
+                                    if (!pResp.isSuccessful) {
+                                        val createP = JSONObject().apply {
+                                            put("name", cleanProfileName)
+                                            put("shared-users", "1")
+                                        }.toString()
+                                        val createReq = Request.Builder()
+                                            .url("$baseUrl/rest/ip/hotspot/user/profile")
+                                            .post(createP.toRequestBody("application/json".toMediaType()))
+                                            .header("Authorization", credential)
+                                            .build()
+                                        httpClient.newCall(createReq).execute()
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
                             val jsonBody = JSONObject().apply {
                                 put("name", sanitizedCard.name.trim())
                                 if (sanitizedCard.password.isNotBlank()) put("password", sanitizedCard.password.trim())
-                                if (sanitizedCard.profile.isNotBlank()) put("profile", sanitizedCard.profile.trim())
+                                if (cleanProfileName.isNotBlank()) put("profile", cleanProfileName)
+                                put("disabled", "false")
+                                put("server", "all")
                                 val validUptime = routerOsApiClient.formatRouterOsTime(sanitizedCard.limitUptime)
                                 if (!validUptime.isNullOrBlank()) put("limit-uptime", validUptime)
                                 if (sanitizedCard.limitBytesTotal > 0) put("limit-bytes-total", sanitizedCard.limitBytesTotal.toString())
@@ -2955,9 +2869,7 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                 .header("Authorization", credential)
                                 .build()
                             val resp = httpClient.newCall(postReq).execute()
-                            if (resp.isSuccessful) {
-                                added = true
-                            } else {
+                            if (!resp.isSuccessful) {
                                 val errBody = resp.body?.string().orEmpty()
                                 return@withContext Result.failure(Exception("استجاب الراوتر برفض إضافة الكرت: $errBody"))
                             }
@@ -2978,6 +2890,108 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
         }
     }
 
+    suspend fun syncProfileBetweenSystems(profile: HotspotProfile, targetSystem: String): Result<Boolean> {
+        val config = activeConfig
+        if (config != null && !config.isDemoMode) {
+            val opResult = withContext(Dispatchers.IO) {
+                if (isApiSocketMode) {
+                    if (targetSystem == "usermanager") {
+                        routerOsApiClient.syncProfileToUserManager(profile)
+                    } else {
+                        routerOsApiClient.syncProfileToHotspot(profile)
+                    }
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        if (targetSystem == "usermanager") {
+                            val jsonBody = JSONObject().apply {
+                                put("name", profile.name)
+                                val valTime = routerOsApiClient.formatRouterOsTime(profile.validity.ifBlank { profile.sessionTimeout }) ?: "1d"
+                                put("validity", valTime)
+                                val priceNum = profile.priceNumber.takeIf { it > 0 } ?: 0.0
+                                if (priceNum > 0) put("price", priceNum.toInt().toString())
+                            }.toString()
+                            val postReq = Request.Builder()
+                                .url("$baseUrl/rest/user-manager/profile")
+                                .post(jsonBody.toRequestBody("application/json".toMediaType()))
+                                .header("Authorization", credential)
+                                .build()
+                            httpClient.newCall(postReq).execute()
+                            Result.success(true)
+                        } else {
+                            val jsonBody = JSONObject().apply {
+                                put("name", profile.name)
+                                put("rate-limit", profile.rateLimit)
+                                put("shared-users", profile.sharedUsers.toString())
+                                if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
+                            }.toString()
+                            val postReq = Request.Builder()
+                                .url("$baseUrl/rest/ip/hotspot/user/profile")
+                                .post(jsonBody.toRequestBody("application/json".toMediaType()))
+                                .header("Authorization", credential)
+                                .build()
+                            httpClient.newCall(postReq).execute()
+                            Result.success(true)
+                        }
+                    } catch (e: Exception) {
+                        Result.failure(e)
+                    }
+                }
+            }
+            if (opResult.isFailure) return opResult
+        }
+        val newProf = profile.copy(
+            id = "synced_${System.currentTimeMillis()}",
+            source = if (targetSystem == "usermanager") "usermanager_v7" else "hotspot"
+        )
+        val current = _profiles.value.toMutableList()
+        if (current.none { it.name.equals(newProf.name, ignoreCase = true) && it.source == newProf.source }) {
+            current.add(newProf)
+            _profiles.value = current
+        }
+        return Result.success(true)
+    }
+
+    suspend fun verifyAndActivateCard(card: HotspotCard): Result<Boolean> {
+        val config = activeConfig
+        if (config != null && !config.isDemoMode) {
+            val res = withContext(Dispatchers.IO) {
+                if (isApiSocketMode) {
+                    routerOsApiClient.verifyAndActivateCard(card)
+                } else {
+                    try {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val patchJson = JSONObject().apply {
+                            put("disabled", "false")
+                            put("server", "all")
+                            put("profile", card.profile.trim().ifBlank { "default" })
+                        }.toString()
+                        val patchReq = Request.Builder()
+                            .url("$baseUrl/rest/ip/hotspot/user/${card.id}")
+                            .patch(patchJson.toRequestBody("application/json".toMediaType()))
+                            .header("Authorization", credential)
+                            .build()
+                        httpClient.newCall(patchReq).execute()
+                        Result.success(true)
+                    } catch (e: Exception) {
+                        Result.failure(e)
+                    }
+                }
+            }
+            if (res.isFailure) return res
+        }
+        _cards.value = _cards.value.map {
+            if (it.id == card.id || it.name == card.name) {
+                it.copy(disabled = false)
+            } else it
+        }
+        return Result.success(true)
+    }
+
     private suspend fun refreshCardsFromRouter() {
         try {
             if (isApiSocketMode) {
@@ -2989,7 +3003,9 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                 umCards.forEach {
                     if (!existingNames.contains(it.name)) combined.add(it)
                 }
-                _cards.value = combined.distinctBy { it.name }
+                if (combined.isNotEmpty()) {
+                    _cards.value = combined.distinctBy { it.name }
+                }
             } else {
                 activeConfig?.let { config ->
                     val protocol = if (config.useHttps) "https" else "http"
@@ -3042,31 +3058,53 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
         if (config != null && !config.isDemoMode) {
             val opResult = withContext(Dispatchers.IO) {
                 if (isApiSocketMode) {
-                    routerOsApiClient.addProfile(profile)
+                    if (profile.source == "both") {
+                        routerOsApiClient.addProfile(profile.copy(source = "hotspot"))
+                        routerOsApiClient.syncProfileToUserManager(profile.copy(source = "usermanager_v7"))
+                        Result.success(true)
+                    } else if (profile.source.contains("usermanager")) {
+                        routerOsApiClient.syncProfileToUserManager(profile)
+                    } else {
+                        routerOsApiClient.addProfile(profile)
+                    }
                 } else {
                     try {
                         val protocol = if (config.useHttps) "https" else "http"
                         val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                         val credential = Credentials.basic(config.username, config.password)
-                        val jsonBody = JSONObject().apply {
-                            put("name", profile.name)
-                            put("rate-limit", profile.rateLimit)
-                            put("shared-users", profile.sharedUsers.toString())
-                            if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
-                            if (profile.price.isNotBlank()) put("comment", "price=${profile.price}")
-                        }.toString()
-
-                        val postReq = Request.Builder()
-                            .url("$baseUrl/rest/ip/hotspot/user/profile")
-                            .post(jsonBody.toRequestBody("application/json".toMediaType()))
-                            .header("Authorization", credential)
-                            .build()
-                        val resp = httpClient.newCall(postReq).execute()
-                        if (!resp.isSuccessful) {
-                            Result.failure(Exception("فشل إضافة الباقة عبر واجهة REST (رمز: ${resp.code})"))
-                        } else {
-                            Result.success(true)
+                        
+                        if (profile.source.contains("usermanager") || profile.source == "both") {
+                            val umJson = JSONObject().apply {
+                                put("name", profile.name)
+                                val valTime = routerOsApiClient.formatRouterOsTime(profile.validity.ifBlank { profile.sessionTimeout }) ?: "1d"
+                                put("validity", valTime)
+                                val priceNum = profile.priceNumber.takeIf { it > 0 } ?: 0.0
+                                if (priceNum > 0) put("price", priceNum.toInt().toString())
+                            }.toString()
+                            val postUm = Request.Builder()
+                                .url("$baseUrl/rest/user-manager/profile")
+                                .post(umJson.toRequestBody("application/json".toMediaType()))
+                                .header("Authorization", credential)
+                                .build()
+                            httpClient.newCall(postUm).execute()
                         }
+                        if (profile.source == "hotspot" || profile.source == "both") {
+                            val jsonBody = JSONObject().apply {
+                                put("name", profile.name)
+                                put("rate-limit", profile.rateLimit)
+                                put("shared-users", profile.sharedUsers.toString())
+                                if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
+                                if (profile.price.isNotBlank()) put("comment", "price=${profile.price}")
+                            }.toString()
+
+                            val postReq = Request.Builder()
+                                .url("$baseUrl/rest/ip/hotspot/user/profile")
+                                .post(jsonBody.toRequestBody("application/json".toMediaType()))
+                                .header("Authorization", credential)
+                                .build()
+                            httpClient.newCall(postReq).execute()
+                        }
+                        Result.success(true)
                     } catch (e: Exception) {
                         Result.failure(e)
                     }
@@ -3077,8 +3115,13 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
             }
         }
         val current = _profiles.value.toMutableList()
-        current.removeAll { it.name.equals(profile.name, ignoreCase = true) }
-        current.add(profile)
+        current.removeAll { it.name.equals(profile.name, ignoreCase = true) && (profile.source == "both" || it.source == profile.source) }
+        if (profile.source == "both") {
+            current.add(profile.copy(id = "hs_${System.currentTimeMillis()}", source = "hotspot"))
+            current.add(profile.copy(id = "um_${System.currentTimeMillis() + 1}", source = "usermanager_v7"))
+        } else {
+            current.add(profile)
+        }
         _profiles.value = current
         return Result.success(true)
     }
@@ -3297,8 +3340,7 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     servers = _hotspotServers.value,
                     nodes = checkedNodes,
                     logs = _systemLogs.value,
-                    ipBindings = _ipBindings.value,
-                    isDemo = cfg?.isDemoMode == true
+                    ipBindings = _ipBindings.value
                 )
             }
 

@@ -18,6 +18,7 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.SetOptions
+import com.example.data.model.BatchCardGenerationResult
 import com.example.data.model.BatchGenerationConfig
 import com.example.data.model.ConnectionState
 import com.example.data.model.HotspotActiveUser
@@ -59,6 +60,18 @@ enum class CardFilter {
     EXPIRED_VALIDITY
 }
 
+enum class CardSystemFilter {
+    ALL,
+    HOTSPOT,
+    USER_MANAGER
+}
+
+enum class ProfileSystemFilter {
+    ALL,
+    HOTSPOT,
+    USER_MANAGER
+}
+
 class MainViewModel(
     private val repository: MikrotikRepository,
     private val database: AppDatabase,
@@ -83,8 +96,7 @@ class MainViewModel(
                         servers = snapshot.servers,
                         nodes = snapshot.nodes,
                         logs = snapshot.logs,
-                        ipBindings = snapshot.ipBindings,
-                        isDemo = (_connectionState.value as? ConnectionState.Connected)?.isDemo == true || snapshot.ipAddress.equals("demo", ignoreCase = true)
+                        ipBindings = snapshot.ipBindings
                     )
                     
                     // Persist logs to Room
@@ -1409,22 +1421,24 @@ class MainViewModel(
     private val _nodeTypeFilter = MutableStateFlow<com.example.data.model.NetworkNodeType?>(null)
     val nodeTypeFilter: StateFlow<com.example.data.model.NetworkNodeType?> = _nodeTypeFilter.asStateFlow()
 
+    fun updateNodeTypeFilter(nodeType: com.example.data.model.NetworkNodeType?) {
+        _nodeTypeFilter.value = nodeType
+    }
+
     val filteredNetworkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = combine(
         networkNodes, _nodeSearchQuery, _nodeSortOption, _nodeTypeFilter
     ) { nodes, query, sortOption, typeFilter ->
-        var filtered = if (query.isBlank()) nodes else {
+        val filteredQuery = if (query.isBlank()) nodes else {
             nodes.filter {
                 it.name.contains(query, ignoreCase = true) ||
                         it.ipAddress.contains(query, ignoreCase = true) ||
-                        it.macAddress.contains(query, ignoreCase = true) ||
                         it.location.contains(query, ignoreCase = true) ||
-                        it.model.contains(query, ignoreCase = true) ||
-                        it.role.contains(query, ignoreCase = true) ||
-                        it.ssid.contains(query, ignoreCase = true)
+                        it.model.contains(query, ignoreCase = true)
             }
         }
-        if (typeFilter != null) {
-            filtered = filtered.filter { it.nodeType == typeFilter }
+
+        val filtered = if (typeFilter == null) filteredQuery else {
+            filteredQuery.filter { it.nodeType == typeFilter }
         }
 
         when (sortOption) {
@@ -1442,10 +1456,6 @@ class MainViewModel(
         _nodeSortOption.value = sortOption
     }
 
-    fun updateNodeTypeFilter(type: com.example.data.model.NetworkNodeType?) {
-        _nodeTypeFilter.value = type
-    }
-
     // Filtering & Search
     private val _cardSearchQuery = MutableStateFlow("")
     val cardSearchQuery: StateFlow<String> = _cardSearchQuery.asStateFlow()
@@ -1453,9 +1463,12 @@ class MainViewModel(
     private val _cardFilter = MutableStateFlow(CardFilter.ALL)
     val cardFilter: StateFlow<CardFilter> = _cardFilter.asStateFlow()
 
+    private val _cardSystemFilter = MutableStateFlow(CardSystemFilter.ALL)
+    val cardSystemFilter: StateFlow<CardSystemFilter> = _cardSystemFilter.asStateFlow()
+
     val filteredCards: StateFlow<List<HotspotCard>> = combine(
-        cards, activeUsers, _cardSearchQuery, _cardFilter
-    ) { allCards, liveActiveUsers, query, filter ->
+        cards, activeUsers, _cardSearchQuery, _cardFilter, _cardSystemFilter
+    ) { allCards, liveActiveUsers, query, filter, systemFilter ->
         val activeNames = liveActiveUsers.map { it.user }.toSet()
         allCards.distinctBy { it.name }.filter { card ->
             val matchesQuery = query.isBlank() ||
@@ -1476,7 +1489,39 @@ class MainViewModel(
                 CardFilter.EXPIRED_VALIDITY -> card.isExpiredValidity
             }
 
-            matchesQuery && matchesFilter
+            val matchesSystem = when (systemFilter) {
+                CardSystemFilter.ALL -> true
+                CardSystemFilter.HOTSPOT -> card.isHotspotCard
+                CardSystemFilter.USER_MANAGER -> card.isUserManagerCard
+            }
+
+            matchesQuery && matchesFilter && matchesSystem
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Profile Filtering & Search
+    private val _profileSearchQuery = MutableStateFlow("")
+    val profileSearchQuery: StateFlow<String> = _profileSearchQuery.asStateFlow()
+
+    private val _profileSystemFilter = MutableStateFlow(ProfileSystemFilter.ALL)
+    val profileSystemFilter: StateFlow<ProfileSystemFilter> = _profileSystemFilter.asStateFlow()
+
+    val filteredProfiles: StateFlow<List<HotspotProfile>> = combine(
+        profiles, _profileSearchQuery, _profileSystemFilter
+    ) { allProfiles, query, systemFilter ->
+        allProfiles.filter { prof ->
+            val matchesQuery = query.isBlank() ||
+                    prof.name.contains(query, ignoreCase = true) ||
+                    prof.comment.contains(query, ignoreCase = true) ||
+                    prof.rateLimit.contains(query, ignoreCase = true)
+
+            val matchesSystem = when (systemFilter) {
+                ProfileSystemFilter.ALL -> true
+                ProfileSystemFilter.HOTSPOT -> prof.isHotspot
+                ProfileSystemFilter.USER_MANAGER -> prof.isUserManager
+            }
+
+            matchesQuery && matchesSystem
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -1516,6 +1561,18 @@ class MainViewModel(
 
     fun updateCardFilter(filter: CardFilter) {
         _cardFilter.value = filter
+    }
+
+    fun updateCardSystemFilter(filter: CardSystemFilter) {
+        _cardSystemFilter.value = filter
+    }
+
+    fun updateProfileSearchQuery(query: String) {
+        _profileSearchQuery.value = query
+    }
+
+    fun updateProfileSystemFilter(filter: ProfileSystemFilter) {
+        _profileSystemFilter.value = filter
     }
 
     fun updateActiveUserSearch(query: String) {
@@ -1619,8 +1676,7 @@ class MainViewModel(
                     servers = snapshot.servers,
                     nodes = snapshot.nodes,
                     logs = snapshot.logs,
-                    ipBindings = snapshot.ipBindings,
-                    isDemo = currentConn.isDemo
+                    ipBindings = snapshot.ipBindings
                 )
                 refreshCachedSnapshot(context)
                 _toastEvent.emit("✓ تم حفظ وتحديث قاعدة البيانات المحلية للراوتر بنجاح!")
@@ -1739,8 +1795,7 @@ class MainViewModel(
                             servers = snapshot.servers,
                             nodes = snapshot.nodes,
                             logs = snapshot.logs,
-                            ipBindings = snapshot.ipBindings,
-                            isDemo = config.isDemoMode
+                            ipBindings = snapshot.ipBindings
                         )
                     }
                 }
@@ -1917,72 +1972,86 @@ class MainViewModel(
         viewModelScope.launch {
             val result = repository.generateBatch(config, database.appDao())
             if (result.isSuccess) {
-                val cards = result.getOrNull().orEmpty()
+                val batchResult = result.getOrNull()
+                val cards = batchResult?.successfulCards.orEmpty()
+                val failedCards = batchResult?.failedCards.orEmpty()
+                val failureReasons = batchResult?.failureReasons.orEmpty()
+
                 val batchName = config.batchComment.ifBlank { "دفعة ${cards.size} كروت" }
-                recordSystemEvent("إضافة", "دفعة كروت", batchName, "تم توليد وإضافة ${cards.size} كرت للباقة (${config.profile}) في الراوتر", "SUCCESS", "عدد الكروت: ${cards.size}, الباقة: ${config.profile}, البادئة: ${config.prefix}")
-                _toastEvent.emit("تم توليد ${cards.size} كرت بنجاح!")
-                // Save batch history
-                val jsonArr = JSONArray()
-                cards.take(10).forEach { jsonArr.put(it.name) }
-                val batchId = "batch_${System.currentTimeMillis()}"
-                val timestamp = System.currentTimeMillis()
-                database.appDao().insertBatch(
-                    BatchHistoryEntity(
-                        batchId = batchId,
-                        name = batchName,
-                        profileName = config.profile,
-                        cardCount = cards.size,
-                        price = config.price,
-                        createdAt = timestamp,
-                        cardsJson = jsonArr.toString()
-                    )
-                )
                 
-                // Sync to Cloud
-                syncToCloud("batchHistory", batchId, mapOf(
-                    "id" to batchId,
-                    "profileName" to config.profile,
-                    "count" to cards.size,
-                    "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
-                    "comment" to batchName
-                ))
-
-                // If assigned to a POS Agent, save assignments
-                if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
-                    val priceNum = config.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
-                    val assignments = cards.map { card ->
-                        val assignAt = System.currentTimeMillis()
-                        val assignmentId = "assign_${card.name}_${assignAt}"
-                        
-                        // Sync Assignment to Cloud
-                        syncToCloud("posCards", assignmentId, mapOf(
-                            "id" to assignmentId,
-                            "agentId" to config.posAgentId.toString(),
-                            "cardName" to card.name,
-                            "profileName" to config.profile,
-                            "priceAmount" to priceNum,
-                            "isSold" to false,
-                            "soldAt" to null
-                        ))
-
-                        PosCardAssignmentEntity(
-                            agentId = config.posAgentId,
-                            agentName = config.posAgentName,
-                            cardName = card.name,
-                            batchId = batchId,
-                            profileName = config.profile,
-                            priceAmount = priceNum,
-                            discountPercent = config.discountPercent,
-                            assignedAt = assignAt,
-                            isSold = false
-                        )
-                    }
-                    database.appDao().insertCardAssignments(assignments)
-                    _toastEvent.emit("تم تخصيص وتسليم ${cards.size} كرت لنقطة (${config.posAgentName}) بنجاح!")
+                if (failedCards.isEmpty()) {
+                    recordSystemEvent("إضافة", "دفعة كروت", batchName, "تم توليد وتفعيل جميع الكروت (${cards.size} كرت) للباقة (${config.profile}) في الراوتر", "SUCCESS", "عدد الكروت: ${cards.size}, الباقة: ${config.profile}, البادئة: ${config.prefix}")
+                    _toastEvent.emit("تم توليد وتفعيل جميع الكروت (${cards.size} كرت) في الراوتر بنجاح!")
+                } else {
+                    val firstErr = failureReasons.firstOrNull() ?: "رفض الراوتر بعض الكروت"
+                    recordSystemEvent("إضافة", "دفعة كروت جزئية", batchName, "تم توليد ${cards.size} من أصل ${batchResult?.totalRequested ?: config.count} كرت. فشل ${failedCards.size} كرت", "PARTIAL", "الناجح: ${cards.size}, الفاشل: ${failedCards.size}, السبب: $firstErr")
+                    _toastEvent.emit("نجاح جزئي: تم توليد وتفعيل ${cards.size} من أصل ${batchResult?.totalRequested ?: config.count} كرت. فشل ${failedCards.size} كرت: $firstErr")
                 }
 
-                // Set printable cards for instant preview
-                _printableCards.value = cards
+                if (cards.isNotEmpty()) {
+                    // Save batch history
+                    val jsonArr = JSONArray()
+                    cards.take(10).forEach { jsonArr.put(it.name) }
+                    val batchId = "batch_${System.currentTimeMillis()}"
+                    val timestamp = System.currentTimeMillis()
+                    database.appDao().insertBatch(
+                        BatchHistoryEntity(
+                            batchId = batchId,
+                            name = batchName,
+                            profileName = config.profile,
+                            cardCount = cards.size,
+                            price = config.price,
+                            createdAt = timestamp,
+                            cardsJson = jsonArr.toString()
+                        )
+                    )
+                    
+                    // Sync to Cloud
+                    syncToCloud("batchHistory", batchId, mapOf(
+                        "id" to batchId,
+                        "profileName" to config.profile,
+                        "count" to cards.size,
+                        "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
+                        "comment" to batchName
+                    ))
+
+                    // If assigned to a POS Agent, save assignments
+                    if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
+                        val priceNum = config.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                        val assignments = cards.map { card ->
+                            val assignAt = System.currentTimeMillis()
+                            val assignmentId = "assign_${card.name}_${assignAt}"
+                            
+                            // Sync Assignment to Cloud
+                            syncToCloud("posCards", assignmentId, mapOf(
+                                "id" to assignmentId,
+                                "agentId" to config.posAgentId.toString(),
+                                "cardName" to card.name,
+                                "profileName" to config.profile,
+                                "priceAmount" to priceNum,
+                                "isSold" to false,
+                                "soldAt" to null
+                            ))
+
+                            PosCardAssignmentEntity(
+                                agentId = config.posAgentId,
+                                agentName = config.posAgentName,
+                                cardName = card.name,
+                                batchId = batchId,
+                                profileName = config.profile,
+                                priceAmount = priceNum,
+                                discountPercent = config.discountPercent,
+                                assignedAt = assignAt,
+                                isSold = false
+                            )
+                        }
+                        database.appDao().insertCardAssignments(assignments)
+                        _toastEvent.emit("تم تخصيص وتسليم ${cards.size} كرت لنقطة (${config.posAgentName}) بنجاح!")
+                    }
+
+                    // Set printable cards for instant preview
+                    _printableCards.value = cards
+                }
             } else {
                 recordSystemEvent("إضافة", "دفعة كروت", config.batchComment.ifBlank { "دفعة كروت" }, "فشل توليد دفعة كروت في الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
                 _toastEvent.emit("فشل توليد الكروت: ${result.exceptionOrNull()?.message}")
@@ -2149,6 +2218,37 @@ class MainViewModel(
             } else {
                 recordSystemEvent("حذف", "باقة", profile.name, "فشل حذف باقة (${profile.name}) من الراوتر", "FAILED", res.exceptionOrNull()?.message ?: "")
                 _toastEvent.emit(res.exceptionOrNull()?.message ?: "فشل حذف الباقة من الراوتر")
+            }
+        }
+    }
+
+    fun syncProfileBetweenSystems(profile: HotspotProfile, targetSystem: String) {
+        viewModelScope.launch {
+            val res = repository.syncProfileBetweenSystems(profile, targetSystem)
+            if (res.isSuccess) {
+                repository.refreshData()
+                val targetLabel = if (targetSystem == "hotspot") "الهوتسبوت (Hotspot)" else "اليوزرمانجر (User Manager)"
+                recordSystemEvent("مزامنة", "باقة", profile.name, "تمت مزامنة الباقة (${profile.name}) مع $targetLabel بنجاح", "SUCCESS")
+                _toastEvent.emit("تمت مزامنة وتثبيت باقة (${profile.name}) مع $targetLabel بنجاح!")
+            } else {
+                val errorMsg = res.exceptionOrNull()?.message ?: "فشلت المزامنة"
+                recordSystemEvent("مزامنة", "باقة", profile.name, "فشلت مزامنة الباقة (${profile.name})", "FAILED", errorMsg)
+                _toastEvent.emit("فشلت المزامنة: $errorMsg")
+            }
+        }
+    }
+
+    fun verifyAndActivateCard(card: HotspotCard) {
+        viewModelScope.launch {
+            val res = repository.verifyAndActivateCard(card)
+            if (res.isSuccess) {
+                repository.refreshData()
+                recordSystemEvent("تفعيل", "كرت", card.name, "تم التحقق وتفعيل الكرت (${card.name}) بالراوتر بنجاح", "SUCCESS")
+                _toastEvent.emit("تم التحقق وتفعيل الكرت (${card.name}) في الراوتر بنجاح! جاهز لتسجيل الدخول.")
+            } else {
+                val errorMsg = res.exceptionOrNull()?.message ?: "فشل التحقق والتفعيل"
+                recordSystemEvent("تفعيل", "كرت", card.name, "فشل تفعيل الكرت (${card.name})", "FAILED", errorMsg)
+                _toastEvent.emit("فشل تفعيل الكرت: $errorMsg")
             }
         }
     }
