@@ -1764,8 +1764,8 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
             }
         }
 
-        // D. Fallback realistic sub-nodes in Demo mode or when no external APs auto-discovered
-        if (candidateSubNodes.isEmpty()) {
+        // D. Fallback realistic sub-nodes ONLY in Demo mode or when specifically requested
+        if (candidateSubNodes.isEmpty() && config.isDemoMode) {
             candidateSubNodes.add(
                 com.example.data.model.NetworkNode(
                     id = "node_ap_main",
@@ -2313,16 +2313,37 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     val protocol = if (config.useHttps) "https" else "http"
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                     val credential = Credentials.basic(config.username, config.password)
-                    val delRequest = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/$cardId")
-                        .delete()
-                        .header("Authorization", credential)
-                        .build()
-                    val resp = httpClient.newCall(delRequest).execute()
-                    if (resp.isSuccessful) {
+                    val targetName = cardName.ifBlank { _cards.value.find { it.id == cardId }?.name.orEmpty() }
+
+                    // 1. Try Hotspot removal
+                    val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/$cardId").delete().header("Authorization", credential).build()
+                    val hsResp = httpClient.newCall(hsReq).execute()
+                    if (hsResp.isSuccessful) {
                         _cards.value = _cards.value.filter { it.id != cardId }
                         return@withContext Result.success(true)
                     }
+
+                    // 2. Try User Manager v7 removal
+                    if (targetName.isNotBlank()) {
+                        val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/$targetName").delete().header("Authorization", credential).build()
+                        val um7Resp = httpClient.newCall(um7Req).execute()
+                        if (um7Resp.isSuccessful) {
+                            _cards.value = _cards.value.filter { it.id != cardId }
+                            return@withContext Result.success(true)
+                        }
+                    }
+
+                    // 3. Try User Manager v6 removal
+                    if (targetName.isNotBlank()) {
+                        val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/$targetName").delete().header("Authorization", credential).build()
+                        val um6Resp = httpClient.newCall(um6Req).execute()
+                        if (um6Resp.isSuccessful) {
+                            _cards.value = _cards.value.filter { it.id != cardId }
+                            return@withContext Result.success(true)
+                        }
+                    }
+                    
+                    return@withContext Result.failure(Exception("تعذر حذف الكرت من الراوتر عبر واجهة REST. تأكد من وجود الكرت في الراوتر أو صلاحيات المستخدم."))
                 } catch (e: Exception) {
                     return@withContext Result.failure(e)
                 }
@@ -2348,13 +2369,23 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                             put("uptime", "0s")
                             put("bytes-in", "0")
                             put("bytes-out", "0")
+                        }.toString().toRequestBody("application/json".toMediaType())
+
+                        // 1. Try Hotspot
+                        val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/${card.id}").patch(jsonBody).header("Authorization", credential).build()
+                        val hsResp = httpClient.newCall(hsReq).execute()
+                        
+                        if (!hsResp.isSuccessful) {
+                            // 2. Try User Manager v7
+                            val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${card.name}").patch(jsonBody).header("Authorization", credential).build()
+                            val um7Resp = httpClient.newCall(um7Req).execute()
+                            
+                            if (!um7Resp.isSuccessful) {
+                                // 3. Try User Manager v6
+                                val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${card.name}").patch(jsonBody).header("Authorization", credential).build()
+                                httpClient.newCall(um6Req).execute()
+                            }
                         }
-                        val req = Request.Builder()
-                            .url("$baseUrl/rest/ip/hotspot/user/${card.id}")
-                            .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                            .header("Authorization", credential)
-                            .build()
-                        httpClient.newCall(req).execute()
                     } catch (_: Exception) {}
                 }
             }
@@ -2396,12 +2427,23 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                 put("limit-bytes-total", updatedCard.limitBytesTotal.toString())
                             }
                         }
-                        val req = Request.Builder()
-                            .url("$baseUrl/rest/ip/hotspot/user/${updatedCard.id}")
-                            .patch(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                            .header("Authorization", credential)
-                            .build()
-                        httpClient.newCall(req).execute()
+                        val jsonStr = jsonBody.toString().toRequestBody("application/json".toMediaType())
+                        
+                        // 1. Try Hotspot
+                        val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/${updatedCard.id}").patch(jsonStr).header("Authorization", credential).build()
+                        val hsResp = httpClient.newCall(hsReq).execute()
+                        
+                        if (!hsResp.isSuccessful) {
+                            // 2. Try User Manager v7
+                            val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${updatedCard.name}").patch(jsonStr).header("Authorization", credential).build()
+                            val um7Resp = httpClient.newCall(um7Req).execute()
+                            
+                            if (!um7Resp.isSuccessful) {
+                                // 3. Try User Manager v6
+                                val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${updatedCard.name}").patch(jsonStr).header("Authorization", credential).build()
+                                httpClient.newCall(um6Req).execute()
+                            }
+                        }
                     } catch (_: Exception) {}
                 }
             }
@@ -2455,8 +2497,74 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
         }
     }
 
+    suspend fun verifyUserConnectionAndProfile(profileName: String): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            val config = activeConfig ?: return@withContext Result.failure(Exception("لم يتم ضبط إعدادات الاتصال بالراوتر"))
+            if (config.isDemoMode) return@withContext Result.success(true)
+
+            val isConnected = if (isApiSocketMode) {
+                routerOsApiClient.ensureConnected()
+            } else {
+                try {
+                    val protocol = if (config.useHttps) "https" else "http"
+                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                    val credential = Credentials.basic(config.username, config.password)
+                    val req = Request.Builder().url("$baseUrl/rest/system/resource").header("Authorization", credential).build()
+                    val resp = httpClient.newCall(req).execute()
+                    resp.isSuccessful
+                } catch (_: Exception) {
+                    false
+                }
+            }
+
+            if (!isConnected) {
+                return@withContext Result.failure(Exception("فشل الاتصال بـ User Manager وراوتر ميكروتك (فحص الاتصال Ping/Connection فشل). تأكد من سلامة الشبكة وحالة الراوتر."))
+            }
+
+            refreshProfilesFromRouter()
+
+            val cleanName = profileName.trim()
+            if (cleanName.isBlank() || cleanName.equals("default", ignoreCase = true)) {
+                return@withContext Result.success(true)
+            }
+
+            val found = _profiles.value.any { it.name.trim().equals(cleanName, ignoreCase = true) }
+            if (!found) {
+                val umProfileExists = try {
+                    if (isApiSocketMode) {
+                        _profiles.value.any { it.name.trim().equals(cleanName, ignoreCase = true) }
+                    } else {
+                        val protocol = if (config.useHttps) "https" else "http"
+                        val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                        val credential = Credentials.basic(config.username, config.password)
+                        val r7 = Request.Builder().url("$baseUrl/rest/user-manager/profile/$cleanName").header("Authorization", credential).build()
+                        val resp7 = httpClient.newCall(r7).execute()
+                        if (resp7.isSuccessful) {
+                            true
+                        } else {
+                            val r6 = Request.Builder().url("$baseUrl/rest/tool/user-manager/profile/$cleanName").header("Authorization", credential).build()
+                            val resp6 = httpClient.newCall(r6).execute()
+                            resp6.isSuccessful
+                        }
+                    }
+                } catch (_: Exception) {
+                    false
+                }
+                if (!umProfileExists) {
+                    return@withContext Result.failure(Exception("الباقة المحددة ($cleanName) غير موجودة حالياً في نظام Hotspot أو User Manager في الراوتر. يرجى تحديث البيانات أو اختيار باقة أخرى."))
+                }
+            }
+            Result.success(true)
+        }
+    }
+
+
     suspend fun generateBatch(config: BatchGenerationConfig, dao: com.example.data.local.AppDao): Result<BatchCardGenerationResult> {
         return withContext(Dispatchers.Default) {
+            val preCheck = verifyUserConnectionAndProfile(config.profile)
+            if (preCheck.isFailure) {
+                return@withContext Result.failure(preCheck.exceptionOrNull() ?: Exception("فشل فحص الاتصال وصلاحية الباقة في User Manager"))
+            }
             // 1. Validation & Auto-provision: Verify profile against router profiles (case-insensitive & trimmed)
             val cleanProfileName = config.profile.trim()
             var existingProfiles = _profiles.value
@@ -2578,7 +2686,21 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                         .post(umUserJson.toRequestBody("application/json".toMediaType()))
                                         .header("Authorization", credential)
                                         .build()
-                                    val umResp = httpClient.newCall(umReq).execute()
+                                    var umResp = httpClient.newCall(umReq).execute()
+                                    
+                                    // Fallback to UM v6 if UM v7 failed
+                                    if (!umResp.isSuccessful) {
+                                        val um6Req = Request.Builder()
+                                            .url("$baseUrl/rest/tool/user-manager/user")
+                                            .post(umUserJson.toRequestBody("application/json".toMediaType()))
+                                            .header("Authorization", credential)
+                                            .build()
+                                        val um6Resp = httpClient.newCall(um6Req).execute()
+                                        if (um6Resp.isSuccessful) {
+                                            umResp = um6Resp
+                                        }
+                                    }
+
                                     if (!umResp.isSuccessful) {
                                         val errBody = umResp.body?.string().orEmpty()
                                         failedCards.add(card)
@@ -2594,12 +2716,28 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                             put("user", card.name)
                                             put("profile", cleanProfileName)
                                         }.toString()
+                                        
+                                        // Try UM v7 profile assignment
                                         val assignReq = Request.Builder()
                                             .url("$baseUrl/rest/user-manager/user-profile")
                                             .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        val assignResp = httpClient.newCall(assignReq).execute()
+                                        var assignResp = httpClient.newCall(assignReq).execute()
+                                        
+                                        // Fallback to UM v6 profile assignment if needed
+                                        if (!assignResp.isSuccessful) {
+                                            val assign6Req = Request.Builder()
+                                                .url("$baseUrl/rest/tool/user-manager/user-profile")
+                                                .post(umProfJson.toRequestBody("application/json".toMediaType()))
+                                                .header("Authorization", credential)
+                                                .build()
+                                            val assign6Resp = httpClient.newCall(assign6Req).execute()
+                                            if (assign6Resp.isSuccessful) {
+                                                assignResp = assign6Resp
+                                            }
+                                        }
+
                                         if (assignResp.isSuccessful) {
                                             bindingSuccessful = true
                                         } else {
@@ -2612,12 +2750,23 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                     if (!bindingSuccessful) {
                                         // Transactional Rollback: Delete user to prevent orphaned unlinked card
                                         try {
+                                            // Try UM v7 delete
                                             val delReq = Request.Builder()
                                                 .url("$baseUrl/rest/user-manager/user/${card.name}")
                                                 .delete()
                                                 .header("Authorization", credential)
                                                 .build()
-                                            httpClient.newCall(delReq).execute()
+                                            val delResp = httpClient.newCall(delReq).execute()
+                                            
+                                            if (!delResp.isSuccessful) {
+                                                // Try UM v6 delete
+                                                val del6Req = Request.Builder()
+                                                    .url("$baseUrl/rest/tool/user-manager/user/${card.name}")
+                                                    .delete()
+                                                    .header("Authorization", credential)
+                                                    .build()
+                                                httpClient.newCall(del6Req).execute()
+                                            }
                                         } catch (_: Exception) {}
 
                                         failedCards.add(card)
@@ -2738,6 +2887,10 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
 
     suspend fun addSingleCard(card: HotspotCard): Result<Boolean> {
         return withContext(Dispatchers.IO) {
+            val preCheck = verifyUserConnectionAndProfile(card.profile)
+            if (preCheck.isFailure) {
+                return@withContext Result.failure(preCheck.exceptionOrNull() ?: Exception("فشل فحص الاتصال وصلاحية الباقة في User Manager"))
+            }
             val cleanProfileName = card.profile.trim()
             var existingProfiles = _profiles.value
             var targetProfile = existingProfiles.firstOrNull { it.name.trim().equals(cleanProfileName, ignoreCase = true) }
@@ -2788,7 +2941,21 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                 .post(umUserJson.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            val umResp = httpClient.newCall(umReq).execute()
+                            var umResp = httpClient.newCall(umReq).execute()
+                            
+                            // Fallback to UM v6 if UM v7 failed or 404
+                            if (!umResp.isSuccessful) {
+                                val um6Req = Request.Builder()
+                                    .url("$baseUrl/rest/tool/user-manager/user")
+                                    .post(umUserJson.toRequestBody("application/json".toMediaType()))
+                                    .header("Authorization", credential)
+                                    .build()
+                                val um6Resp = httpClient.newCall(um6Req).execute()
+                                if (um6Resp.isSuccessful) {
+                                    umResp = um6Resp
+                                }
+                            }
+
                             if (!umResp.isSuccessful) {
                                 val errBody = umResp.body?.string().orEmpty()
                                 return@withContext Result.failure(Exception("رفض راوتر ميكروتك إنشاء مستخدم يوزرمانجر: ${umResp.code} - $errBody"))
@@ -2802,12 +2969,28 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                                     put("user", sanitizedCard.name.trim())
                                     put("profile", cleanProfileName)
                                 }.toString()
+                                
+                                // Try UM v7 profile assignment
                                 val assignReq = Request.Builder()
                                     .url("$baseUrl/rest/user-manager/user-profile")
                                     .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                val assignResp = httpClient.newCall(assignReq).execute()
+                                var assignResp = httpClient.newCall(assignReq).execute()
+                                
+                                // Fallback to UM v6 profile assignment if needed
+                                if (!assignResp.isSuccessful) {
+                                    val assign6Req = Request.Builder()
+                                        .url("$baseUrl/rest/tool/user-manager/user-profile")
+                                        .post(umProfJson.toRequestBody("application/json".toMediaType()))
+                                        .header("Authorization", credential)
+                                        .build()
+                                    val assign6Resp = httpClient.newCall(assign6Req).execute()
+                                    if (assign6Resp.isSuccessful) {
+                                        assignResp = assign6Resp
+                                    }
+                                }
+
                                 if (assignResp.isSuccessful) {
                                     bindingSuccessful = true
                                 } else {

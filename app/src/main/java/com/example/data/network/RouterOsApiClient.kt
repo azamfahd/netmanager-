@@ -756,10 +756,7 @@ class RouterOsApiClient {
                     } ?: cachedProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) }
                 }
 
-                val shouldBeUserManager = preferredSystem == "usermanager" ||
-                    (card.isUserManagerCard && preferredSystem != "hotspot") ||
-                    (targetProfile?.isUserManager == true && preferredSystem != "hotspot") ||
-                    (profileSource.startsWith("usermanager") && preferredSystem != "hotspot")
+                val shouldBeUserManager = preferredSystem != "hotspot"
 
                 // 1. If destination is User Manager: NEVER fallback silently to Hotspot!
                 if (shouldBeUserManager) {
@@ -977,6 +974,9 @@ class RouterOsApiClient {
             val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
             if (trap != null) {
                 val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إضافة مستخدم يوزرمانجر"
+                if (msg.contains("no such command", ignoreCase = true) || msg.contains("no such", ignoreCase = true)) {
+                    return addUserManagerV6User(card, "admin")
+                }
                 if (!msg.contains("already exists", ignoreCase = true)) {
                     return Result.failure(Exception(msg))
                 }

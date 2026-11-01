@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit
 object AppUpdateManager {
 
     private const val GITHUB_OWNER = "azamfahd"
-    private const val GITHUB_REPO = "netmanager-"
+    private const val GITHUB_REPO = "netmanager"
     const val GITHUB_RELEASES_WEB_URL = "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases"
 
     private val httpClient = OkHttpClient.Builder()

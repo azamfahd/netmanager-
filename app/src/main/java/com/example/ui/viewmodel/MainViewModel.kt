@@ -1549,6 +1549,22 @@ class MainViewModel(
     private val _autoRefresh = MutableStateFlow(true)
     val autoRefresh: StateFlow<Boolean> = _autoRefresh.asStateFlow()
 
+    private val _profileCheckState = MutableStateFlow<Result<Boolean>?>(null)
+    val profileCheckState: StateFlow<Result<Boolean>?> = _profileCheckState.asStateFlow()
+
+    fun checkProfileValidity(profileName: String) {
+        viewModelScope.launch {
+            _profileCheckState.value = null
+            val result = repository.verifyUserConnectionAndProfile(profileName)
+            _profileCheckState.value = result
+            if (result.isFailure) {
+                _toastEvent.emit(result.exceptionOrNull()?.message ?: "فشل فحص الباقة")
+            } else {
+                _toastEvent.emit("الباقة صالحة والاتصال بالراوتر سليم ✅")
+            }
+        }
+    }
+
     private var refreshJob: Job? = null
 
     // User message toasts / snackbars

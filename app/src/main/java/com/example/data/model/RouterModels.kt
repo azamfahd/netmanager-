@@ -245,8 +245,8 @@ data class BatchGenerationConfig(
     val posAgentId: Long = 0L,
     val posAgentName: String = "",
     val discountPercent: Double = 0.0,
-    val targetSystem: String = "hotspot", // "hotspot" or "usermanager"
-    val profileSource: String = "" // "hotspot", "usermanager_v7", "usermanager_v6"
+    val targetSystem: String = "usermanager", // "usermanager" or "hotspot"
+    val profileSource: String = "usermanager_v7" // "usermanager_v7", "usermanager_v6", "hotspot"
 )
 
 data class BatchCardGenerationResult(
