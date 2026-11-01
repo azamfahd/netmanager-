@@ -294,6 +294,28 @@ object NetworkUtils {
         return "الساعة $timeStr في يوم $dayStr في تاريخ $dateStr"
     }
 
+    fun formatCardCreationDate(timestamp: Long): String {
+        if (timestamp <= 0L) return "تاريخ غير محدد"
+        val now = System.currentTimeMillis()
+        val diff = now - timestamp
+        val calNow = java.util.Calendar.getInstance()
+        val calThen = java.util.Calendar.getInstance().apply { timeInMillis = timestamp }
+        val timeFormat = java.text.SimpleDateFormat("hh:mm a", java.util.Locale("ar", "SA"))
+        val timeStr = timeFormat.format(java.util.Date(timestamp))
+
+        return when {
+            diff in 0..120_000 -> "أضيف للتو ⚡"
+            calNow.get(java.util.Calendar.YEAR) == calThen.get(java.util.Calendar.YEAR) &&
+                    calNow.get(java.util.Calendar.DAY_OF_YEAR) == calThen.get(java.util.Calendar.DAY_OF_YEAR) -> "اليوم $timeStr"
+            calNow.get(java.util.Calendar.YEAR) == calThen.get(java.util.Calendar.YEAR) &&
+                    calNow.get(java.util.Calendar.DAY_OF_YEAR) - calThen.get(java.util.Calendar.DAY_OF_YEAR) == 1 -> "أمس $timeStr"
+            else -> {
+                val dateFormat = java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale("ar", "SA"))
+                "${dateFormat.format(java.util.Date(timestamp))} $timeStr"
+            }
+        }
+    }
+
     fun formatArabicFullDateTimeFromString(dateTimeStr: String, fallbackTimestamp: Long = System.currentTimeMillis()): String {
         if (dateTimeStr.isBlank()) return formatArabicFullDateTime(fallbackTimestamp)
         if (dateTimeStr.startsWith("الساعة ") && dateTimeStr.contains(" في تاريخ ")) return dateTimeStr

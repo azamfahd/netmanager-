@@ -279,6 +279,13 @@ fun VoucherBatchDialog(
         }
     }
 
+    androidx.compose.runtime.LaunchedEffect(selectedProfile, profiles) {
+        val matched = profiles.firstOrNull { it.name.trim().equals(selectedProfile.trim(), ignoreCase = true) }
+        if (matched != null) {
+            targetSystem = if (matched.isUserManager) "usermanager" else "hotspot"
+        }
+    }
+
     // Helper to apply preset category
     fun applyPreset(preset: VoucherPreset) {
         // Find matching real profile from router if available
@@ -670,31 +677,31 @@ fun VoucherBatchDialog(
                     }
                 }
 
-                // System Target Selector (Hotspot vs User Manager)
-                Column {
-                    Text(
-                        text = "نظام وجهة إنشاء الكروت في الراوتر:",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
+                // Smart System Target Detection Badge (Auto-detects Hotspot vs User Manager)
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = (if (targetSystem == "usermanager") Color(0xFF00897B) else Color(0xFF1976D2)).copy(alpha = 0.12f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        FilterChip(
-                            selected = targetSystem == "hotspot",
-                            onClick = { targetSystem = "hotspot" },
-                            label = { Text("🌐 سيرفر الهوتسبوت (Hotspot)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.weight(1f)
+                        Icon(
+                            imageVector = if (targetSystem == "usermanager") Icons.Default.Person else Icons.Default.Wifi,
+                            contentDescription = null,
+                            tint = if (targetSystem == "usermanager") Color(0xFF00897B) else Color(0xFF1976D2),
+                            modifier = Modifier.size(18.dp)
                         )
-                        FilterChip(
-                            selected = targetSystem == "usermanager",
-                            onClick = { targetSystem = "usermanager" },
-                            label = { Text("👤 يوزرمانجر (User Manager)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.weight(1f)
+                        Text(
+                            text = if (targetSystem == "usermanager")
+                                "النظام التابع للباقة: يوزرمانجر (User Manager) - مطابق للراوتر تلقائياً ✅"
+                            else
+                                "النظام التابع للباقة: سيرفر الهوتسبوت (Hotspot) - مطابق للراوتر تلقائياً ✅",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (targetSystem == "usermanager") Color(0xFF00695C) else Color(0xFF1565C0)
                         )
                     }
                 }

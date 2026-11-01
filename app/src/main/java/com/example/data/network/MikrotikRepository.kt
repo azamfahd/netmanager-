@@ -44,7 +44,104 @@ data class UserKnownTelemetry(
     val lastSeenTimestamp: Long = System.currentTimeMillis()
 )
 
-class MikrotikRepository(private val db: FirebaseFirestore) {
+class MikrotikRepository(
+    private val db: FirebaseFirestore,
+    private val appDao: com.example.data.local.AppDao? = null
+) {
+
+    private val cardTimestampCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    fun getCardCreationTimestamp(card: HotspotCard): Long {
+        val cached = cardTimestampCache[card.name]
+        if (cached != null && cached > 0L) return cached
+
+        val resolved = resolveCardTimestamp(card)
+        cardTimestampCache[card.name] = resolved
+        return resolved
+    }
+
+    private fun resolveCardTimestamp(card: HotspotCard): Long {
+        val id = card.id
+        val match = Regex("""(?:gen_|card_|c_|tum_|um_)?(\d{10,13})""").find(id)
+        if (match != null) {
+            val numStr = match.groupValues[1]
+            val parsed = if (numStr.length == 10) numStr.toLongOrNull()?.times(1000L) else numStr.toLongOrNull()
+            if (parsed != null && parsed in 1577836800000L..2082758400000L) {
+                return parsed
+            }
+        }
+
+        val comment = card.comment
+        if (comment.isNotBlank()) {
+            val dateMatch = Regex("""(\d{4})[-/](\d{1,2})[-/](\d{1,2})""").find(comment)
+            if (dateMatch != null) {
+                try {
+                    val (y, m, d) = dateMatch.destructured
+                    val cal = java.util.Calendar.getInstance()
+                    cal.set(y.toInt(), m.toInt() - 1, d.toInt(), 12, 0, 0)
+                    return cal.timeInMillis
+                } catch (_: Exception) {}
+            }
+            val epochMatch = Regex("""\b(17\d{8,11})\b""").find(comment)
+            if (epochMatch != null) {
+                val num = epochMatch.value.toLongOrNull()
+                if (num != null) {
+                    val ms = if (epochMatch.value.length == 10) num * 1000L else num
+                    if (ms in 1577836800000L..2082758400000L) return ms
+                }
+            }
+        }
+
+        val uptimeSec = parseUptimeToSeconds(card.uptime)
+        if (uptimeSec > 0L) {
+            return System.currentTimeMillis() - (uptimeSec * 1000L)
+        }
+
+        return System.currentTimeMillis()
+    }
+
+    fun sortCardsByNewestFirst(cards: List<HotspotCard>): List<HotspotCard> {
+        return cards.sortedWith(
+            compareByDescending<HotspotCard> { getCardCreationTimestamp(it) }
+                .thenByDescending { it.id }
+        )
+    }
+
+    suspend fun syncCardsToRoom(cards: List<HotspotCard>) {
+        val dao = appDao ?: return
+        try {
+            val existing = dao.getAllLocalCardsSync().associateBy { it.name }
+            val entities = cards.map { card ->
+                val prevEntity = existing[card.name]
+                val createdTs = prevEntity?.createdTimestamp?.takeIf { it > 0L } ?: getCardCreationTimestamp(card)
+                cardTimestampCache[card.name] = createdTs
+                com.example.data.local.LocalCardEntity.fromHotspotCard(
+                    card = card,
+                    existingCreatedTs = createdTs,
+                    source = if (card.isUserManagerCard) "usermanager" else "hotspot"
+                )
+            }
+            dao.insertOrUpdateLocalCards(entities)
+        } catch (_: Exception) {}
+    }
+
+    suspend fun initializeFromLocalDatabase() {
+        val dao = appDao ?: return
+        try {
+            val localCards = dao.getAllLocalCardsSync()
+            if (localCards.isNotEmpty()) {
+                localCards.forEach {
+                    if (it.createdTimestamp > 0L) {
+                        cardTimestampCache[it.name] = it.createdTimestamp
+                    }
+                }
+                val cardsList = sortCardsByNewestFirst(localCards.map { it.toHotspotCard() })
+                if (_cards.value.isEmpty()) {
+                    _cards.value = cardsList
+                }
+            }
+        } catch (_: Exception) {}
+    }
 
     private val lastKnownUserTelemetry = java.util.concurrent.ConcurrentHashMap<String, UserKnownTelemetry>()
 
@@ -1001,9 +1098,11 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     }
                 }
                 val distinctCards = combinedCards.distinctBy { it.name }
-                if (distinctCards.isNotEmpty() || _cards.value.isEmpty()) {
-                    _cards.value = distinctCards
+                val sortedCards = sortCardsByNewestFirst(distinctCards)
+                if (sortedCards.isNotEmpty() || _cards.value.isEmpty()) {
+                    _cards.value = sortedCards
                 }
+                syncCardsToRoom(sortedCards)
             }
 
             // 8. Fetch Profiles & IP Bindings from Router
@@ -1405,9 +1504,11 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                         }
                     }
                 } catch (_: Exception) {}
-                if (cardList.isNotEmpty() || _cards.value.isEmpty()) {
-                    _cards.value = cardList.distinctBy { it.name }
+                val sortedCards = sortCardsByNewestFirst(cardList.distinctBy { it.name })
+                if (sortedCards.isNotEmpty() || _cards.value.isEmpty()) {
+                    _cards.value = sortedCards
                 }
+                syncCardsToRoom(sortedCards)
 
                 // Fetch hotspot profiles
                 val profRequest = Request.Builder()
@@ -2348,7 +2449,12 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     return@withContext Result.failure(e)
                 }
             }
-            _cards.value = _cards.value.filter { it.id != cardId }
+            val targetName = cardName.ifBlank { _cards.value.find { it.id == cardId }?.name.orEmpty() }
+            if (targetName.isNotBlank()) {
+                cardTimestampCache.remove(targetName)
+                try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
+            }
+            _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
             Result.success(true)
         }
     }
@@ -2864,16 +2970,24 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                     )
                 }
 
+                val now = System.currentTimeMillis()
+                addedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = now - i }
                 val currentList = _cards.value.toMutableList()
                 currentList.addAll(0, addedCards)
-                _cards.value = currentList.distinctBy { it.name }
+                val sorted = sortCardsByNewestFirst(currentList.distinctBy { it.name })
+                _cards.value = sorted
+                syncCardsToRoom(sorted)
                 return@withContext Result.success(batchResult)
             }
 
             // Demo Mode: Add generated cards locally
+            val now = System.currentTimeMillis()
+            generatedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = now - i }
             val currentList = _cards.value.toMutableList()
             currentList.addAll(0, generatedCards)
-            _cards.value = currentList.distinctBy { it.name }
+            val sorted = sortCardsByNewestFirst(currentList.distinctBy { it.name })
+            _cards.value = sorted
+            syncCardsToRoom(sorted)
 
             val batchResult = BatchCardGenerationResult(
                 totalRequested = config.count,
@@ -2908,7 +3022,21 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
             }
 
             val sanitizedCard = card.copy(profile = cleanProfileName)
-            val targetSystem = if (sanitizedCard.isUserManagerCard) "usermanager" else "hotspot"
+            val isUmProfile = targetProfile?.isUserManager == true ||
+                targetProfile?.source?.startsWith("usermanager") == true ||
+                sanitizedCard.isUserManagerCard
+
+            val isHsProfile = targetProfile?.isHotspot == true ||
+                targetProfile?.source == "hotspot" ||
+                sanitizedCard.isHotspotCard
+
+            val targetSystem = when {
+                isUmProfile -> "usermanager"
+                isHsProfile -> "hotspot"
+                _profiles.value.any { it.isUserManager } && _profiles.value.none { it.isHotspot } -> "usermanager"
+                _profiles.value.any { it.isHotspot } && _profiles.value.none { it.isUserManager } -> "hotspot"
+                else -> "usermanager"
+            }
 
             if (routerConfig != null && !routerConfig.isDemoMode) {
                 if (isApiSocketMode) {
@@ -3066,9 +3194,13 @@ class MikrotikRepository(private val db: FirebaseFirestore) {
                 refreshCardsFromRouter()
             }
 
+            val now = System.currentTimeMillis()
+            cardTimestampCache[sanitizedCard.name] = now
             val currentList = _cards.value.toMutableList()
             currentList.add(0, sanitizedCard)
-            _cards.value = currentList.distinctBy { it.name }
+            val sorted = sortCardsByNewestFirst(currentList.distinctBy { it.name })
+            _cards.value = sorted
+            syncCardsToRoom(sorted)
             Result.success(true)
         }
     }

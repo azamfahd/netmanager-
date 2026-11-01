@@ -17,9 +17,11 @@ import androidx.room.RoomDatabase
         RouterErrorLogEntity::class,
         UserLoginHistoryEntity::class,
         NetworkNodeEntity::class,
-        SystemEventLogEntity::class
+        SystemEventLogEntity::class,
+        LocalCardEntity::class,
+        MonthlyProfitRecordEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

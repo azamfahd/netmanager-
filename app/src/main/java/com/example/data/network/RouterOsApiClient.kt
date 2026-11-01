@@ -40,7 +40,8 @@ class RouterOsApiClient {
 
     suspend fun ensureConnected(): Boolean = withContext(Dispatchers.IO) {
         synchronized(socketLock) {
-            if (socket != null && socket?.isClosed == false && socket?.isConnected == true) {
+            val s = socket
+            if (s != null && !s.isClosed && s.isConnected && !s.isInputShutdown && !s.isOutputShutdown) {
                 return@synchronized true
             }
             if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
@@ -68,8 +69,10 @@ class RouterOsApiClient {
                 lastPassword = password
 
                 val sock = Socket()
+                sock.tcpNoDelay = true
+                sock.keepAlive = true
                 sock.connect(InetSocketAddress(cleanHost, port), timeoutMs)
-                sock.soTimeout = 8000
+                sock.soTimeout = 12000
                 socket = sock
                 inStream = sock.getInputStream()
                 outStream = sock.getOutputStream()
@@ -756,11 +759,28 @@ class RouterOsApiClient {
                     } ?: cachedProfiles.firstOrNull { it.name.trim().equals(profileName, ignoreCase = true) }
                 }
 
-                val shouldBeUserManager = preferredSystem != "hotspot"
+                val isUmProfile = targetProfile?.isUserManager == true ||
+                    targetProfile?.source?.startsWith("usermanager") == true ||
+                    profileSource.startsWith("usermanager")
 
-                // 1. If destination is User Manager: NEVER fallback silently to Hotspot!
+                val isHsProfile = targetProfile?.isHotspot == true ||
+                    targetProfile?.source == "hotspot" ||
+                    profileSource == "hotspot"
+
+                val shouldBeUserManager = when {
+                    isUmProfile -> true
+                    isHsProfile -> false
+                    preferredSystem == "usermanager" || card.isUserManagerCard -> true
+                    preferredSystem == "hotspot" || card.isHotspotCard -> false
+                    else -> synchronized(cachedProfiles) {
+                        if (cachedProfiles.any { it.isUserManager } && cachedProfiles.none { it.isHotspot }) true
+                        else if (cachedProfiles.any { it.isHotspot } && cachedProfiles.none { it.isUserManager }) false
+                        else true
+                    }
+                }
+
+                // 1. User Manager system
                 if (shouldBeUserManager) {
-                    // Make sure profile exists in User Manager
                     if (profileName.isNotBlank() && !profileName.equals("default", ignoreCase = true)) {
                         ensureUserManagerProfileExists(profileName, targetProfile)
                     }
@@ -773,11 +793,20 @@ class RouterOsApiClient {
                         addUserManagerV7User(card)
                     }
 
-                    // Strict boundary: User Manager cards must succeed or fail in User Manager with explicit error
                     if (umResult.isSuccess) {
                         return@withContext umResult
                     } else {
                         val umError = umResult.exceptionOrNull()?.message ?: "فشل إنشاء كرت يوزرمانجر"
+                        // Intelligent fallback: If router does not have user-manager package installed ("no such command"), try Hotspot
+                        if (umError.contains("no such command", ignoreCase = true) || umError.contains("no such", ignoreCase = true)) {
+                            if (profileName.isNotBlank() && !profileName.equals("default", ignoreCase = true)) {
+                                ensureHotspotProfileExists(profileName, targetProfile)
+                            }
+                            val hsFallback = addHotspotNativeUser(card)
+                            if (hsFallback.isSuccess) {
+                                return@withContext hsFallback
+                            }
+                        }
                         return@withContext Result.failure(Exception("خطأ في نظام يوزرمانجر: $umError"))
                     }
                 }
@@ -793,6 +822,12 @@ class RouterOsApiClient {
                 }
 
                 val errMsg = hsResult.exceptionOrNull()?.message.orEmpty()
+                // Intelligent fallback: If router does not have Hotspot package ("no such command"), try User Manager
+                if (errMsg.contains("no such command", ignoreCase = true) || errMsg.contains("no such", ignoreCase = true)) {
+                    val umFallback = addUserManagerV7User(card)
+                    if (umFallback.isSuccess) return@withContext umFallback
+                }
+
                 // If failed because profile was not found on the router, auto-create it now and retry
                 if (errMsg.contains("profile", ignoreCase = true) || errMsg.contains("not found", ignoreCase = true)) {
                     createHotspotProfileSimple(profileName)
@@ -1734,8 +1769,10 @@ class RouterOsApiClient {
 
         return try {
             val sock = Socket()
+            sock.tcpNoDelay = true
+            sock.keepAlive = true
             sock.connect(InetSocketAddress(cleanHost, lastPort), 5000)
-            sock.soTimeout = 8000
+            sock.soTimeout = 12000
             socket = sock
             inStream = sock.getInputStream()
             outStream = sock.getOutputStream()
@@ -1886,25 +1923,25 @@ class RouterOsApiClient {
 
     private fun readWord(inStream: InputStream): String {
         val b1 = inStream.read()
-        if (b1 == -1) return ""
+        if (b1 == -1) throw java.io.EOFException("تم إغلاق الاتصال من راوتر ميكروتك")
         val len = when {
             (b1 and 0x80) == 0 -> b1
             (b1 and 0xC0) == 0x80 -> {
                 val b2 = inStream.read()
-                if (b2 == -1) return ""
+                if (b2 == -1) throw java.io.EOFException("انقطع تدفق البيانات من راوتر ميكروتك أثناء قراءة طول الحزمة")
                 ((b1 and 0x3F) shl 8) or b2
             }
             (b1 and 0xE0) == 0xC0 -> {
                 val b2 = inStream.read()
                 val b3 = inStream.read()
-                if (b2 == -1 || b3 == -1) return ""
+                if (b2 == -1 || b3 == -1) throw java.io.EOFException("انقطع تدفق البيانات من راوتر ميكروتك أثناء قراءة طول الحزمة")
                 ((b1 and 0x1F) shl 16) or (b2 shl 8) or b3
             }
             else -> {
                 val b2 = inStream.read()
                 val b3 = inStream.read()
                 val b4 = inStream.read()
-                if (b2 == -1 || b3 == -1 || b4 == -1) return ""
+                if (b2 == -1 || b3 == -1 || b4 == -1) throw java.io.EOFException("انقطع تدفق البيانات من راوتر ميكروتك أثناء قراءة طول الحزمة")
                 ((b1 and 0x0F) shl 24) or (b2 shl 16) or (b3 shl 8) or b4
             }
         }
@@ -1913,7 +1950,7 @@ class RouterOsApiClient {
         var read = 0
         while (read < len) {
             val count = inStream.read(buf, read, len - read)
-            if (count == -1) break
+            if (count == -1) throw java.io.EOFException("تم إغلاق الاتصال قبل اكتمال قراءة الكلمة من راوتر ميكروتك")
             read += count
         }
         return String(buf, 0, read, Charsets.UTF_8)

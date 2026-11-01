@@ -211,4 +211,43 @@ interface AppDao {
 
     @Query("SELECT COUNT(*) FROM pos_payments")
     suspend fun getPosPaymentCount(): Int
+
+    // ==========================================
+    // Local Cards Database & Sync
+    // ==========================================
+    @Query("SELECT * FROM local_cards ORDER BY createdTimestamp DESC")
+    fun getAllLocalCardsFlow(): Flow<List<LocalCardEntity>>
+
+    @Query("SELECT * FROM local_cards ORDER BY createdTimestamp DESC")
+    suspend fun getAllLocalCardsSync(): List<LocalCardEntity>
+
+    @Query("SELECT * FROM local_cards WHERE name = :cardName LIMIT 1")
+    suspend fun getLocalCardByName(cardName: String): LocalCardEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateLocalCard(card: LocalCardEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateLocalCards(cards: List<LocalCardEntity>)
+
+    @Query("DELETE FROM local_cards WHERE name = :cardName")
+    suspend fun deleteLocalCardByName(cardName: String)
+
+    @Query("DELETE FROM local_cards")
+    suspend fun clearAllLocalCards()
+
+    // ==========================================
+    // Monthly Profit Records
+    // ==========================================
+    @Query("SELECT * FROM monthly_profit_records ORDER BY year DESC, month DESC")
+    fun getAllMonthlyProfitRecordsFlow(): Flow<List<MonthlyProfitRecordEntity>>
+
+    @Query("SELECT * FROM monthly_profit_records ORDER BY year DESC, month DESC")
+    suspend fun getAllMonthlyProfitRecordsSync(): List<MonthlyProfitRecordEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateMonthlyProfitRecord(record: MonthlyProfitRecordEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateMonthlyProfitRecords(records: List<MonthlyProfitRecordEntity>)
 }

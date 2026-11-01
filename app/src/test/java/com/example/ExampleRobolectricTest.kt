@@ -54,7 +54,7 @@ class ExampleRobolectricTest {
         )
         val result = repository.generateBatch(config, database.appDao())
         assertTrue(result.isSuccess)
-        val generated = result.getOrNull().orEmpty()
+        val generated = result.getOrNull()?.successfulCards.orEmpty()
         assertEquals(15, generated.size)
         // Check prefix and length
         generated.forEach { card ->

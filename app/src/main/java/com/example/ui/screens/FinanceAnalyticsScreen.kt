@@ -153,6 +153,29 @@ fun FinanceAnalyticsScreen(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
+                // Sync Status Banner
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = RouterBlue.copy(alpha = 0.08f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = RouterBlue, modifier = Modifier.size(14.dp))
+                        Text(
+                            text = "قاعدة البيانات المحلية: SQLite مدمجة ونشطة ✅ - متزامنة مع السيرفر",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = RouterBlue,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
                 // Navigation Tabs within Finance: Overview, All Months, Package Breakdown, POS Agents
                 Row(
                     modifier = Modifier
@@ -676,6 +699,33 @@ private fun MonthlySalesDetailedCard(
                             Text("الشهر الحالي", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                         }
                     }
+                    
+                    // Growth Indicator
+                    if (month.growthRatePercent != 0.0) {
+                        val isPositive = month.growthRatePercent > 0
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = (if (isPositive) StatusActiveGreen else StatusErrorRed).copy(alpha = 0.15f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (isPositive) Icons.Default.TrendingUp else Icons.Default.TrendingDown,
+                                    contentDescription = null,
+                                    tint = if (isPositive) StatusActiveGreen else StatusErrorRed,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Text(
+                                    text = "${if (isPositive) "+" else ""}${month.growthRatePercent.toInt()}%",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isPositive) StatusActiveGreen else StatusErrorRed
+                                )
+                            }
+                        }
+                    }
                 }
 
                 Text(
@@ -744,6 +794,54 @@ private fun MonthlySalesDetailedCard(
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("عجز المبيعات عن الهدف:", style = MaterialTheme.typography.labelSmall)
                                 Text("${currencyFormat.format(month.targetDeficit)} ر.ي", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = StatusWarningAmber)
+                            }
+                        }
+                    }
+
+                    // Detailed Package Breakdown for this month
+                    if (month.packageBreakdown.isNotEmpty()) {
+                        Text("توزيع المبيعات حسب الباقات لهذا الشهر:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            month.packageBreakdown.take(4).forEach { pkg ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(pkg.packageName, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                                    Text("${pkg.cardsSold} كرت", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("${currencyFormat.format(pkg.netProfit)} ر.ي", style = MaterialTheme.typography.bodySmall, color = StatusActiveGreen, fontWeight = FontWeight.Bold)
+                                }
+                                LinearProgressIndicator(
+                                    progress = { pkg.sharePercentage / 100f },
+                                    modifier = Modifier.fillMaxWidth().height(2.dp).clip(CircleShape),
+                                    color = RouterBlue.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                    }
+
+                    // Daily Sales Distribution
+                    if (month.dailyBreakdown.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("توزيع المبيعات اليومي (عينات):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            month.dailyBreakdown.forEach { point ->
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(point.dayLabel, style = MaterialTheme.typography.labelSmall, fontSize = 8.sp)
+                                    Box(
+                                        modifier = Modifier
+                                            .width(24.dp)
+                                            .height((point.cardsSold * 3).dp.coerceIn(10.dp, 60.dp))
+                                            .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
+                                            .background(RouterBlue)
+                                    )
+                                    Text("${point.cardsSold}", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }

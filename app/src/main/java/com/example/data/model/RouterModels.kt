@@ -124,7 +124,7 @@ data class HotspotCard(
     val cardType: String = "hotspot" // "hotspot" or "usermanager"
 ) {
     val isUserManagerCard: Boolean
-        get() = cardType.contains("usermanager", ignoreCase = true) || id.startsWith("um_")
+        get() = cardType.contains("usermanager", ignoreCase = true) || id.startsWith("um", ignoreCase = true) || id.startsWith("tum", ignoreCase = true)
 
     val isHotspotCard: Boolean
         get() = !isUserManagerCard
@@ -663,6 +663,22 @@ data class RevenueAnalyticsSummary(
     val selectedTimeFilter: TimeFilterRange = TimeFilterRange.ALL
 )
 
+data class MonthlyPackageSales(
+    val packageName: String,
+    val cardsSold: Int = 0,
+    val totalRevenue: Double = 0.0,
+    val netProfit: Double = 0.0,
+    val sharePercentage: Float = 0f
+)
+
+data class DailySalesPoint(
+    val dayNumber: Int,
+    val dayLabel: String,
+    val cardsSold: Int = 0,
+    val revenue: Double = 0.0,
+    val profit: Double = 0.0
+)
+
 data class MonthlySalesSummary(
     val monthKey: String, // e.g. "2026-10"
     val monthName: String, // e.g. "أكتوبر 2026"
@@ -675,7 +691,10 @@ data class MonthlySalesSummary(
     val potentialUnsoldValue: Double = 0.0,
     val salesPercentage: Float = 0f, // (sold / total) * 100
     val targetDeficit: Double = 0.0, // target gap or unrealized sales
-    val isCurrentMonth: Boolean = false
+    val isCurrentMonth: Boolean = false,
+    val growthRatePercent: Double = 0.0,
+    val packageBreakdown: List<MonthlyPackageSales> = emptyList(),
+    val dailyBreakdown: List<DailySalesPoint> = emptyList()
 )
 
 data class NetworkConsumptionReport(

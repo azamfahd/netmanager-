@@ -128,7 +128,6 @@ fun CardsScreen(
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val searchQuery by viewModel.cardSearchQuery.collectAsStateWithLifecycle()
     val currentFilter by viewModel.cardFilter.collectAsStateWithLifecycle()
-    val currentSystemFilter by viewModel.cardSystemFilter.collectAsStateWithLifecycle()
 
     var cardToDelete by remember { mutableStateOf<HotspotCard?>(null) }
     var cardToEdit by remember { mutableStateOf<HotspotCard?>(null) }
@@ -254,41 +253,7 @@ fun CardsScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // System Subsystem Filter (الكل / هوتسبوت / يوزرمانجر)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                val countHotspotCards = remember(distinctCards) { distinctCards.count { it.isHotspotCard } }
-                val countUmCards = remember(distinctCards) { distinctCards.count { it.isUserManagerCard } }
-
-                FilterChip(
-                    selected = currentSystemFilter == CardSystemFilter.ALL,
-                    onClick = { viewModel.updateCardSystemFilter(CardSystemFilter.ALL) },
-                    label = { Text("الكل (${distinctCards.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.height(34.dp)
-                )
-                FilterChip(
-                    selected = currentSystemFilter == CardSystemFilter.HOTSPOT,
-                    onClick = { viewModel.updateCardSystemFilter(CardSystemFilter.HOTSPOT) },
-                    label = { Text("🌐 هوتسبوت ($countHotspotCards)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.height(34.dp)
-                )
-                FilterChip(
-                    selected = currentSystemFilter == CardSystemFilter.USER_MANAGER,
-                    onClick = { viewModel.updateCardSystemFilter(CardSystemFilter.USER_MANAGER) },
-                    label = { Text("👤 يوزرمانجر ($countUmCards)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.height(34.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
             // Filter Chips (Scrollable & Uniform compact height)
             Row(
@@ -454,8 +419,8 @@ fun CardsScreen(
 
                 val sortedIndividualCards = remember(rawIndividualCards, readySortOrder) {
                     when (readySortOrder) {
-                        ReadyCardsSortOrder.NEWEST_FIRST -> rawIndividualCards.sortedByDescending { extractCardTimestamp(it) }
-                        ReadyCardsSortOrder.OLDEST_FIRST -> rawIndividualCards.sortedBy { extractCardTimestamp(it) }
+                        ReadyCardsSortOrder.NEWEST_FIRST -> rawIndividualCards.sortedByDescending { viewModel.getCardCreationTimestamp(it) }
+                        ReadyCardsSortOrder.OLDEST_FIRST -> rawIndividualCards.sortedBy { viewModel.getCardCreationTimestamp(it) }
                         ReadyCardsSortOrder.BY_PROFILE -> rawIndividualCards.sortedBy { it.profile }
                         ReadyCardsSortOrder.BY_PRICE -> rawIndividualCards.sortedByDescending { parsePriceNumber(it.price) }
                     }
@@ -542,6 +507,7 @@ fun CardsScreen(
                                         Box(modifier = Modifier.padding(start = 12.dp)) {
                                             HotspotCardItem(
                                                 card = card,
+                                                creationTimestamp = viewModel.getCardCreationTimestamp(card),
                                                 onClick = { onCardDetailClick(card) },
                                                 onEdit = { cardToEdit = card },
                                                 onReactivate = { cardToReactivate = card },
@@ -613,6 +579,7 @@ fun CardsScreen(
                             items(sortedIndividualCards, key = { "ind_card_${it.id}" }) { card ->
                                 HotspotCardItem(
                                     card = card,
+                                    creationTimestamp = viewModel.getCardCreationTimestamp(card),
                                     onClick = { onCardDetailClick(card) },
                                     onEdit = { cardToEdit = card },
                                     onReactivate = { cardToReactivate = card },
@@ -645,6 +612,7 @@ fun CardsScreen(
                     items(filteredCards, key = { it.id }) { card ->
                         HotspotCardItem(
                             card = card,
+                            creationTimestamp = viewModel.getCardCreationTimestamp(card),
                             onClick = { onCardDetailClick(card) },
                             onEdit = { cardToEdit = card },
                             onReactivate = { cardToReactivate = card },
@@ -781,6 +749,7 @@ fun CardsScreen(
 @Composable
 fun HotspotCardItem(
     card: HotspotCard,
+    creationTimestamp: Long,
     onClick: () -> Unit,
     onEdit: () -> Unit,
     onReactivate: () -> Unit,
@@ -850,6 +819,17 @@ fun HotspotCardItem(
                                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                                 )
                             }
+                        }
+
+                        // Added: Creation date badge
+                        if (creationTimestamp > 0) {
+                            Text(
+                                text = "أضيف: ${NetworkUtils.formatCardCreationDate(creationTimestamp)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 10.sp
+                            )
                         }
                         if (card.password != card.name && card.password.isNotBlank()) {
                             Row(
@@ -1135,7 +1115,8 @@ data class CardBatchGroup(
     val cards: List<HotspotCard>
 )
 
-fun extractCardTimestamp(card: HotspotCard): Long {
+fun extractCardTimestamp(card: HotspotCard, viewModel: MainViewModel? = null): Long {
+    if (viewModel != null) return viewModel.getCardCreationTimestamp(card)
     val parts = card.id.split("_")
     if (parts.size >= 2) {
         val ts = parts[1].toLongOrNull()

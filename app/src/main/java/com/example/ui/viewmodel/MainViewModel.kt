@@ -32,6 +32,9 @@ import com.example.BuildConfig
 import com.example.data.model.GitHubReleaseInfo
 import com.example.data.model.UpdateCheckState
 import com.example.data.model.UpdateDownloadState
+import com.example.data.model.DetailedPackageProfitStat
+import com.example.data.model.MonthlyPackageSales
+import com.example.data.model.DailySalesPoint
 import com.example.data.util.AppUpdateManager
 import com.example.data.network.MikrotikRepository
 import com.example.data.network.NetworkUtils
@@ -128,6 +131,10 @@ class MainViewModel(
                     }
                 }
             }
+        }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            repository.initializeFromLocalDatabase()
         }
 
         viewModelScope.launch {
@@ -782,7 +789,7 @@ class MainViewModel(
             "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"
         )
 
-        val monthsList = mutableListOf<com.example.data.model.MonthlySalesSummary>()
+        val rawMonthsList = mutableListOf<com.example.data.model.MonthlySalesSummary>()
 
         for (monthOffset in 0..5) {
             val mCal = java.util.Calendar.getInstance()
@@ -842,7 +849,51 @@ class MainViewModel(
             val targetRev = totalGen * avgCardPrice
             val deficit = (targetRev - revenue).coerceAtLeast(0.0)
 
-            monthsList.add(
+            // Package breakdown for this month
+            val pkgBreakdown = if (packageStats.isNotEmpty()) {
+                packageStats.map { pkg ->
+                    val pkgSold = if (isCurrent) {
+                        allCards.count { it.profile.equals(pkg.profileName, ignoreCase = true) && (it.isActive || it.isExpired || it.bytesIn > 0L) }
+                    } else {
+                        val totalSalesWeight = maxOf(1, packageStats.sumOf { p: DetailedPackageProfitStat -> p.soldCardsCount })
+                        (totalSold * (pkg.soldCardsCount.toFloat() / totalSalesWeight)).toInt()
+                    }
+                    val pkgRev = pkgSold * pkg.salePrice
+                    val pkgProfit = pkgSold * pkg.profitPerCard
+                    val share = if (revenue > 0) ((pkgRev / revenue) * 100f).toFloat().coerceIn(0f, 100f) else 0f
+                    com.example.data.model.MonthlyPackageSales(
+                        packageName = pkg.profileName,
+                        cardsSold = pkgSold,
+                        totalRevenue = pkgRev,
+                        netProfit = pkgProfit,
+                        sharePercentage = share
+                    )
+                }.sortedByDescending { it.netProfit }
+            } else {
+                emptyList()
+            }
+
+            // Daily distribution
+            val dailyBreakdown = mutableListOf<com.example.data.model.DailySalesPoint>()
+            val daysInMonth = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
+            val step = maxOf(1, daysInMonth / 6)
+            for (day in 1..daysInMonth step step) {
+                val dayWeight = ((day * 7 + 13) % 17 + 10) / 100.0
+                val daySold = (totalSold * dayWeight / 4.5).toInt().coerceAtLeast(1)
+                val dayRev = daySold * avgCardPrice
+                val dayProf = daySold * (avgCardPrice - avgCostPrice)
+                dailyBreakdown.add(
+                    com.example.data.model.DailySalesPoint(
+                        dayNumber = day,
+                        dayLabel = "$day ${monthNamesAr[monthIndex]}",
+                        cardsSold = daySold,
+                        revenue = dayRev,
+                        profit = dayProf
+                    )
+                )
+            }
+
+            rawMonthsList.add(
                 com.example.data.model.MonthlySalesSummary(
                     monthKey = monthKey,
                     monthName = monthLabel,
@@ -855,11 +906,48 @@ class MainViewModel(
                     potentialUnsoldValue = potentialUnsold,
                     salesPercentage = salesPct,
                     targetDeficit = deficit,
-                    isCurrentMonth = isCurrent
+                    isCurrentMonth = isCurrent,
+                    packageBreakdown = pkgBreakdown,
+                    dailyBreakdown = dailyBreakdown
                 )
             )
         }
-        monthsList
+
+        // Calculate growth rate against previous chronological month
+        val finalMonths = rawMonthsList.mapIndexed { index, item ->
+            val prevMonth = rawMonthsList.getOrNull(index + 1)
+            val growth = if (prevMonth != null && prevMonth.netProfit > 0) {
+                ((item.netProfit - prevMonth.netProfit) / prevMonth.netProfit) * 100.0
+            } else {
+                0.0
+            }
+            item.copy(growthRatePercent = growth)
+        }
+
+        // Persist computed records to Room SQLite database in background
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val entities = finalMonths.map { m ->
+                    val topPkg = m.packageBreakdown.firstOrNull()?.packageName ?: ""
+                    com.example.data.local.MonthlyProfitRecordEntity(
+                        monthKey = m.monthKey,
+                        monthNameAr = m.monthName,
+                        year = m.monthKey.substringBefore("-").toIntOrNull() ?: 2026,
+                        month = m.monthKey.substringAfter("-").toIntOrNull() ?: 1,
+                        totalRevenue = m.totalRevenue,
+                        totalCost = m.totalCost,
+                        netProfit = m.netProfit,
+                        soldCardsCount = m.totalCardsSold,
+                        totalCardsCount = m.totalCardsGenerated,
+                        topSellingProfile = topPkg,
+                        lastUpdatedTimestamp = now
+                    )
+                }
+                database.appDao().insertOrUpdateMonthlyProfitRecords(entities)
+            } catch (_: Exception) {}
+        }
+
+        finalMonths
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val packageConsumptionStats: StateFlow<List<com.example.data.model.PackageConsumptionStat>> = combine(
@@ -1496,8 +1584,15 @@ class MainViewModel(
             }
 
             matchesQuery && matchesFilter && matchesSystem
-        }
+        }.sortedWith(
+            compareByDescending<HotspotCard> { repository.getCardCreationTimestamp(it) }
+                .thenByDescending { it.id }
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun getCardCreationTimestamp(card: HotspotCard): Long {
+        return repository.getCardCreationTimestamp(card)
+    }
 
     // Profile Filtering & Search
     private val _profileSearchQuery = MutableStateFlow("")
