@@ -13,6 +13,8 @@ import com.example.data.local.PosPaymentEntity
 import com.example.data.local.SavedRouterEntity
 import com.example.data.local.SystemEventLogEntity
 import com.example.data.local.toUserSessionRecord
+import com.example.data.local.RouterTaskQueueManager
+import com.example.data.local.RouterTaskEntity
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
@@ -174,6 +176,20 @@ class MainViewModel(
 
     val batchHistory: StateFlow<List<BatchHistoryEntity>> = database.appDao().getAllBatches()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Local Task Queue for Offline Operations & Exponential Backoff
+    val taskQueueManager = RouterTaskQueueManager(database.appDao())
+    val pendingTasksCount: StateFlow<Int> = database.appDao().getPendingTaskCountFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val isProcessingQueue: StateFlow<Boolean> = taskQueueManager.isProcessing
+
+    fun processTaskQueueNow() {
+        viewModelScope.launch {
+            _toastEvent.emit("جاري معالجة طابور العمليات المؤجلة مع الراوتر...")
+            val result = taskQueueManager.forceRetryAllPending(repository)
+            _toastEvent.emit(result.message)
+        }
+    }
 
     val resourceState: StateFlow<RouterResource> = repository.resourceState
     val routerBoardInfo: StateFlow<com.example.data.model.RouterBoardInfo> = repository.routerBoardInfo
@@ -781,25 +797,75 @@ class MainViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.RevenueAnalyticsSummary())
 
     val monthlySalesList: StateFlow<List<com.example.data.model.MonthlySalesSummary>> = combine(
-        cards, detailedPackageProfitStats, database.appDao().getAllCardAssignments(), batchHistory
-    ) { allCards, packageStats, assignments, batches ->
+        cards,
+        detailedPackageProfitStats,
+        database.appDao().getAllCardAssignments(),
+        batchHistory,
+        database.appDao().getAllMonthlyProfitRecordsFlow()
+    ) { allCards, packageStats, assignments, batches, savedMonthlyRecords ->
         val now = System.currentTimeMillis()
         val monthNamesAr = listOf(
             "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
             "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"
         )
 
+        val pricingMap = packageStats.associateBy { it.profileName.lowercase() }
+        val avgFallbackPrice = if (packageStats.isNotEmpty()) packageStats.map { it.salePrice }.average().takeIf { it > 0 } ?: 500.0 else 500.0
+        val avgFallbackCost = if (packageStats.isNotEmpty()) packageStats.map { it.costPrice }.average().takeIf { it > 0 } ?: 200.0 else 200.0
+
+        // 1. Gather all genuine historical timestamps to discover network genesis
+        val validCardTs = allCards.mapNotNull { card ->
+            val ts = repository.getCardCreationTimestamp(card)
+            if (ts in 1577836800000L..now + 86400000L) ts else null
+        }
+        val validBatchTs = batches.mapNotNull { b ->
+            if (b.createdAt in 1577836800000L..now + 86400000L) b.createdAt else null
+        }
+        val validAssignTs = assignments.flatMap { a ->
+            listOfNotNull(
+                a.assignedAt.takeIf { it in 1577836800000L..now + 86400000L },
+                a.soldAt?.takeIf { it in 1577836800000L..now + 86400000L }
+            )
+        }
+        val validSavedRecordTs = savedMonthlyRecords.mapNotNull { r ->
+            if (r.lastUpdatedTimestamp in 1577836800000L..now + 86400000L) r.lastUpdatedTimestamp else null
+        }
+
+        val allTimestamps = validCardTs + validBatchTs + validAssignTs + validSavedRecordTs
+        val earliestTs = allTimestamps.minOrNull() ?: now
+
+        val nowCal = java.util.Calendar.getInstance().apply { timeInMillis = now }
+        val currentYear = nowCal.get(java.util.Calendar.YEAR)
+        val currentMonth = nowCal.get(java.util.Calendar.MONTH) // 0-based
+
+        val startCal = java.util.Calendar.getInstance().apply { timeInMillis = earliestTs }
+        val startYear = startCal.get(java.util.Calendar.YEAR)
+        val startMonth = startCal.get(java.util.Calendar.MONTH) // 0-based
+
+        val totalMonthsSpan = ((currentYear - startYear) * 12 + (currentMonth - startMonth)).coerceAtLeast(0)
+        // Ensure at least 5 previous months are scanned, and up to the entire lifetime of the network
+        val span = maxOf(5, totalMonthsSpan)
+
+        data class SoldCardRecord(
+            val name: String,
+            val profile: String,
+            val salePrice: Double,
+            val costPrice: Double,
+            val timestamp: Long
+        )
+
         val rawMonthsList = mutableListOf<com.example.data.model.MonthlySalesSummary>()
 
-        for (monthOffset in 0..5) {
-            val mCal = java.util.Calendar.getInstance()
-            mCal.timeInMillis = now
-            mCal.add(java.util.Calendar.MONTH, -monthOffset)
-            val monthIndex = mCal.get(java.util.Calendar.MONTH)
+        for (monthOffset in 0..span) {
+            val mCal = java.util.Calendar.getInstance().apply {
+                timeInMillis = now
+                add(java.util.Calendar.MONTH, -monthOffset)
+            }
             val year = mCal.get(java.util.Calendar.YEAR)
+            val monthIndex = mCal.get(java.util.Calendar.MONTH)
             val monthKey = "%04d-%02d".format(year, monthIndex + 1)
             val monthLabel = "${monthNamesAr[monthIndex]} $year"
-            val isCurrent = monthOffset == 0
+            val isCurrent = (monthOffset == 0)
 
             mCal.set(java.util.Calendar.DAY_OF_MONTH, 1)
             mCal.set(java.util.Calendar.HOUR_OF_DAY, 0)
@@ -816,101 +882,182 @@ class MainViewModel(
             mCal.set(java.util.Calendar.MILLISECOND, 999)
             val endOfM = mCal.timeInMillis
 
-            val monthAssignments = assignments.filter { it.assignedAt in startOfM..endOfM || (isCurrent && it.assignedAt <= endOfM) }
-            val soldInMonth = monthAssignments.count { it.isSold }
+            // A. Cards generated in this month
+            val cardsCreatedInM = allCards.filter {
+                val ts = repository.getCardCreationTimestamp(it)
+                ts in startOfM..endOfM
+            }
+            val batchesInM = batches.filter { it.createdAt in startOfM..endOfM }
+            val batchCardsCount = batchesInM.sumOf { it.cardCount }
+            val assignmentsInM = assignments.filter { it.assignedAt in startOfM..endOfM }
 
-            val avgCardPrice = if (packageStats.isNotEmpty()) packageStats.map { it.salePrice }.average().takeIf { it > 0 } ?: 500.0 else 500.0
-            val avgCostPrice = if (packageStats.isNotEmpty()) packageStats.map { it.costPrice }.average().takeIf { it > 0 } ?: 200.0 else 200.0
-
-            val totalGen = if (isCurrent) {
-                maxOf(allCards.size, monthAssignments.size)
+            val totalGenerated = if (isCurrent) {
+                maxOf(allCards.size, batchCardsCount, assignmentsInM.size, cardsCreatedInM.size)
             } else {
-                val historicalBatches = batches.filter { it.createdAt in startOfM..endOfM }
-                if (historicalBatches.isNotEmpty()) {
-                    historicalBatches.sumOf { it.cardCount }
-                } else {
-                    (allCards.size * (0.85 - (monthOffset * 0.1))).toInt().coerceAtLeast(10)
+                maxOf(cardsCreatedInM.size, batchCardsCount, assignmentsInM.size)
+            }
+
+            // B. Precise Sold Cards Identification
+            val soldItems = mutableListOf<SoldCardRecord>()
+            val processedCardNames = mutableSetOf<String>()
+
+            // 1. POS Cards Sold in this month
+            val posSoldThisMonth = assignments.filter { it.isSold && ((it.soldAt ?: it.assignedAt) in startOfM..endOfM) }
+            posSoldThisMonth.forEach { a ->
+                val matchingPkg = pricingMap[a.profileName.lowercase()]
+                val sPrice = if (a.priceAmount > 0) a.priceAmount else (matchingPkg?.salePrice ?: avgFallbackPrice)
+                val cPrice = matchingPkg?.costPrice ?: (sPrice * 0.4)
+                val sTs = a.soldAt ?: a.assignedAt
+                soldItems.add(SoldCardRecord(a.cardName, a.profileName, sPrice, cPrice, sTs))
+                processedCardNames.add(a.cardName)
+            }
+
+            // 2. Active, Expired, or Consumed Router Cards
+            val routerCardsToExamine = if (isCurrent) allCards else cardsCreatedInM
+            routerCardsToExamine.forEach { card ->
+                if (!processedCardNames.contains(card.name)) {
+                    val hasActivity = card.isActive || card.isExpired || card.bytesIn > 0L || (card.uptime.isNotBlank() && card.uptime != "0s")
+                    if (hasActivity) {
+                        val matchingPkg = pricingMap[card.profile.lowercase()]
+                        val parsedPrice = card.price.filter { it.isDigit() }.toDoubleOrNull()?.takeIf { it > 0 }
+                        val sPrice = parsedPrice ?: matchingPkg?.salePrice ?: avgFallbackPrice
+                        val cPrice = matchingPkg?.costPrice ?: (sPrice * 0.4)
+                        val sTs = repository.getCardCreationTimestamp(card)
+                        soldItems.add(SoldCardRecord(card.name, card.profile, sPrice, cPrice, sTs))
+                        processedCardNames.add(card.name)
+                    }
                 }
             }
 
-            val totalSold = if (isCurrent) {
-                val activeOrExpired = allCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L }
-                maxOf(activeOrExpired, soldInMonth)
-            } else {
-                (totalGen * (0.75 - (monthOffset * 0.05))).toInt().coerceIn(0, totalGen)
+            // 3. Batches created in past months that were sold
+            if (!isCurrent && batchesInM.isNotEmpty() && soldItems.isEmpty()) {
+                batchesInM.forEach { b ->
+                    val matchingPkg = pricingMap[b.profileName.lowercase()]
+                    val bPrice = b.price.filter { it.isDigit() }.toDoubleOrNull()?.takeIf { it > 0 } ?: (matchingPkg?.salePrice ?: avgFallbackPrice)
+                    val cPrice = matchingPkg?.costPrice ?: (bPrice * 0.4)
+                    for (i in 0 until b.cardCount) {
+                        soldItems.add(SoldCardRecord("${b.batchId}_$i", b.profileName, bPrice, cPrice, b.createdAt))
+                    }
+                }
             }
 
-            val totalUnsold = (totalGen - totalSold).coerceAtLeast(0)
-            val revenue = totalSold * avgCardPrice
-            val cost = totalSold * avgCostPrice
-            val profit = (revenue - cost).coerceAtLeast(0.0)
+            // 4. Fallback to existing saved Room entity if router was cleared
+            val savedEntity = savedMonthlyRecords.find { it.monthKey == monthKey }
+            val totalSold = if (soldItems.isNotEmpty()) {
+                soldItems.size
+            } else if (savedEntity != null && savedEntity.soldCardsCount > 0) {
+                savedEntity.soldCardsCount
+            } else {
+                0
+            }
+
+            val totalGenFinal = maxOf(totalGenerated, totalSold)
+            val totalUnsold = (totalGenFinal - totalSold).coerceAtLeast(0)
+
+            val revenue = if (soldItems.isNotEmpty()) {
+                soldItems.sumOf { it.salePrice }
+            } else if (savedEntity != null && savedEntity.totalRevenue > 0) {
+                savedEntity.totalRevenue
+            } else {
+                0.0
+            }
+
+            val cost = if (soldItems.isNotEmpty()) {
+                soldItems.sumOf { it.costPrice }
+            } else if (savedEntity != null && savedEntity.totalCost > 0) {
+                savedEntity.totalCost
+            } else {
+                0.0
+            }
+
+            val profit = if (soldItems.isNotEmpty()) {
+                (revenue - cost).coerceAtLeast(0.0)
+            } else if (savedEntity != null && savedEntity.netProfit > 0) {
+                savedEntity.netProfit
+            } else {
+                0.0
+            }
+
+            val avgCardPrice = if (soldItems.isNotEmpty()) (revenue / soldItems.size) else avgFallbackPrice
             val potentialUnsold = totalUnsold * avgCardPrice
-            val salesPct = if (totalGen > 0) ((totalSold.toFloat() / totalGen.toFloat()) * 100f).coerceIn(0f, 100f) else 0f
-            val targetRev = totalGen * avgCardPrice
+            val salesPct = if (totalGenFinal > 0) ((totalSold.toFloat() / totalGenFinal.toFloat()) * 100f).coerceIn(0f, 100f) else 0f
+            val targetRev = totalGenFinal * avgCardPrice
             val deficit = (targetRev - revenue).coerceAtLeast(0.0)
 
-            // Package breakdown for this month
-            val pkgBreakdown = if (packageStats.isNotEmpty()) {
-                packageStats.map { pkg ->
-                    val pkgSold = if (isCurrent) {
-                        allCards.count { it.profile.equals(pkg.profileName, ignoreCase = true) && (it.isActive || it.isExpired || it.bytesIn > 0L) }
-                    } else {
-                        val totalSalesWeight = maxOf(1, packageStats.sumOf { p: DetailedPackageProfitStat -> p.soldCardsCount })
-                        (totalSold * (pkg.soldCardsCount.toFloat() / totalSalesWeight)).toInt()
-                    }
-                    val pkgRev = pkgSold * pkg.salePrice
-                    val pkgProfit = pkgSold * pkg.profitPerCard
+            // C. Package Breakdown for this Month
+            val pkgBreakdown = if (soldItems.isNotEmpty()) {
+                soldItems.groupBy { it.profile.ifBlank { "افتراضي" } }.map { (profName, items) ->
+                    val pkgSold = items.size
+                    val pkgRev = items.sumOf { it.salePrice }
+                    val pkgCost = items.sumOf { it.costPrice }
+                    val pkgProfit = (pkgRev - pkgCost).coerceAtLeast(0.0)
                     val share = if (revenue > 0) ((pkgRev / revenue) * 100f).toFloat().coerceIn(0f, 100f) else 0f
                     com.example.data.model.MonthlyPackageSales(
-                        packageName = pkg.profileName,
+                        packageName = profName,
                         cardsSold = pkgSold,
                         totalRevenue = pkgRev,
                         netProfit = pkgProfit,
                         sharePercentage = share
                     )
-                }.sortedByDescending { it.netProfit }
+                }.sortedByDescending { it.cardsSold }
+            } else if (savedEntity != null && savedEntity.topSellingProfile.isNotBlank()) {
+                listOf(
+                    com.example.data.model.MonthlyPackageSales(
+                        packageName = savedEntity.topSellingProfile,
+                        cardsSold = totalSold,
+                        totalRevenue = revenue,
+                        netProfit = profit,
+                        sharePercentage = 100f
+                    )
+                )
             } else {
                 emptyList()
             }
 
-            // Daily distribution
-            val dailyBreakdown = mutableListOf<com.example.data.model.DailySalesPoint>()
-            val daysInMonth = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-            val step = maxOf(1, daysInMonth / 6)
-            for (day in 1..daysInMonth step step) {
-                val dayWeight = ((day * 7 + 13) % 17 + 10) / 100.0
-                val daySold = (totalSold * dayWeight / 4.5).toInt().coerceAtLeast(1)
-                val dayRev = daySold * avgCardPrice
-                val dayProf = daySold * (avgCardPrice - avgCostPrice)
-                dailyBreakdown.add(
+            // D. Accurate Daily Sales Breakdown
+            val dayCal = java.util.Calendar.getInstance()
+            val dailyBreakdown = if (soldItems.isNotEmpty()) {
+                soldItems.groupBy { item ->
+                    dayCal.timeInMillis = item.timestamp
+                    dayCal.get(java.util.Calendar.DAY_OF_MONTH)
+                }.map { (dayNum, dayItems) ->
+                    val daySold = dayItems.size
+                    val dayRev = dayItems.sumOf { it.salePrice }
+                    val dayProf = dayItems.sumOf { it.salePrice - it.costPrice }
                     com.example.data.model.DailySalesPoint(
-                        dayNumber = day,
-                        dayLabel = "$day ${monthNamesAr[monthIndex]}",
+                        dayNumber = dayNum,
+                        dayLabel = "$dayNum ${monthNamesAr[monthIndex]}",
                         cardsSold = daySold,
                         revenue = dayRev,
                         profit = dayProf
                     )
-                )
+                }.sortedBy { it.dayNumber }
+            } else {
+                emptyList()
             }
 
-            rawMonthsList.add(
-                com.example.data.model.MonthlySalesSummary(
-                    monthKey = monthKey,
-                    monthName = monthLabel,
-                    totalCardsGenerated = totalGen,
-                    totalCardsSold = totalSold,
-                    totalCardsUnsold = totalUnsold,
-                    totalRevenue = revenue,
-                    totalCost = cost,
-                    netProfit = profit,
-                    potentialUnsoldValue = potentialUnsold,
-                    salesPercentage = salesPct,
-                    targetDeficit = deficit,
-                    isCurrentMonth = isCurrent,
-                    packageBreakdown = pkgBreakdown,
-                    dailyBreakdown = dailyBreakdown
+            // Filter condition: Always include current month, or any month with cards, sales, revenue, or saved record
+            val hasData = isCurrent || totalGenFinal > 0 || totalSold > 0 || revenue > 0.0 || (savedEntity != null && savedEntity.totalRevenue > 0)
+            if (hasData || monthOffset < 6) {
+                rawMonthsList.add(
+                    com.example.data.model.MonthlySalesSummary(
+                        monthKey = monthKey,
+                        monthName = monthLabel,
+                        totalCardsGenerated = totalGenFinal,
+                        totalCardsSold = totalSold,
+                        totalCardsUnsold = totalUnsold,
+                        totalRevenue = revenue,
+                        totalCost = cost,
+                        netProfit = profit,
+                        potentialUnsoldValue = potentialUnsold,
+                        salesPercentage = salesPct,
+                        targetDeficit = deficit,
+                        isCurrentMonth = isCurrent,
+                        packageBreakdown = pkgBreakdown,
+                        dailyBreakdown = dailyBreakdown
+                    )
                 )
-            )
+            }
         }
 
         // Calculate growth rate against previous chronological month
@@ -1911,6 +2058,13 @@ class MainViewModel(
                     }
                 }
                 startAutoRefresh()
+                // Process pending offline operations upon connection
+                viewModelScope.launch {
+                    val qResult = taskQueueManager.processPendingTasks(repository)
+                    if (qResult.processedCount > 0) {
+                        _toastEvent.emit(qResult.message)
+                    }
+                }
             } else {
                 val error = result.exceptionOrNull()?.message ?: "فشل الاتصال بالراوتر"
                 logApplicationError("CONNECT", error, "IP: ${config.ipAddress}")
@@ -1962,6 +2116,13 @@ class MainViewModel(
                         lastSyncTime = System.currentTimeMillis()
                     )
                     _toastEvent.emit("✅ تم الاتصال بالراوتر بنجاح وتحديث كافة البيانات!")
+                    // Process pending tasks on successful reconnection
+                    viewModelScope.launch {
+                        val qResult = taskQueueManager.processPendingTasks(repository)
+                        if (qResult.processedCount > 0) {
+                            _toastEvent.emit(qResult.message)
+                        }
+                    }
                 } else {
                     val err = res.exceptionOrNull()?.message ?: "الراوتر غير متاح حالياً"
                     logApplicationError("SYNC_RETRY", err, "IP: ${currentConn.ipAddress}")
@@ -1995,6 +2156,10 @@ class MainViewModel(
                                     lastSyncTime = System.currentTimeMillis()
                                 )
                                 _toastEvent.emit("✅ تم استعادة الاتصال بالراوتر وتحديث البيانات بنجاح!")
+                                taskQueueManager.processPendingTasks(repository)
+                            } else if (pendingTasksCount.value > 0) {
+                                // Background automatic retry with exponential backoff
+                                taskQueueManager.processPendingTasks(repository)
                             }
                         } else {
                             if (!currentConn.isOffline) {
@@ -2029,15 +2194,25 @@ class MainViewModel(
         }
     }
 
-    fun deleteCard(cardId: String) {
+    fun deleteCard(cardId: String, cardName: String = "") {
         viewModelScope.launch {
-            val result = repository.deleteCard(cardId)
+            val targetName = cardName.trim().ifBlank { 
+                cards.value.find { it.id == cardId }?.name.orEmpty() 
+            }
+            val result = repository.deleteCard(cardId, targetName)
             if (result.isSuccess) {
-                recordSystemEvent("حذف", "كرت", cardId, "تم حذف الكرت ($cardId) من الراوتر وقاعدة البيانات بنجاح", "SUCCESS")
+                recordSystemEvent("حذف", "كرت", targetName.ifBlank { cardId }, "تم حذف الكرت (${targetName.ifBlank { cardId }}) من الراوتر وقاعدة البيانات بنجاح", "SUCCESS")
                 _toastEvent.emit("تم حذف الكرت بنجاح")
             } else {
-                recordSystemEvent("حذف", "كرت", cardId, "فشل حذف الكرت ($cardId) من الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
-                _toastEvent.emit("فشل حذف الكرت")
+                val errorMsg = result.exceptionOrNull()?.message.orEmpty()
+                // Enqueue in Task Queue for offline retry with Exponential Backoff
+                taskQueueManager.enqueueDeleteCard(cardId, targetName)
+                // Optimistically remove from local database so it doesn't bounce back in the UI
+                if (targetName.isNotBlank()) {
+                    try { database.appDao().deleteLocalCardByName(targetName) } catch (_: Exception) {}
+                }
+                recordSystemEvent("طابور العمليات", "كرت", targetName.ifBlank { cardId }, "تم حفظ أمر حذف الكرت محلياً وسيتم تنفيذه على الراوتر تلقائياً عند استعادة الاتصال.", "PENDING", errorMsg)
+                _toastEvent.emit("تم حفظ الحذف محلياً وسيتم تنفيذه على الراوتر تلقائياً عند الاتصال (طابور العمليات)")
             }
         }
     }
@@ -2049,8 +2224,17 @@ class MainViewModel(
                 recordSystemEvent("تعديل", "كرت", card.name, "تمت إعادة تفعيل وتصفير عدادات استهلاك الكرت (${card.name}) في الراوتر", "SUCCESS")
                 _toastEvent.emit("تمت إعادة تفعيل وتصفير عدادات الكرت (${card.name}) بنجاح!")
             } else {
-                recordSystemEvent("تعديل", "كرت", card.name, "فشلت إعادة تفعيل الكرت (${card.name})", "FAILED", result.exceptionOrNull()?.message ?: "")
-                _toastEvent.emit("فشلت إعادة تفعيل الكرت: ${result.exceptionOrNull()?.message}")
+                val errorMsg = result.exceptionOrNull()?.message.orEmpty()
+                // Enqueue in Task Queue for offline retry with Exponential Backoff
+                taskQueueManager.enqueueReactivateCard(card)
+                val resetCard = card.copy(uptime = "0s", bytesIn = 0L, bytesOut = 0L, disabled = false)
+                try {
+                    database.appDao().insertOrUpdateLocalCard(
+                        com.example.data.local.LocalCardEntity.fromHotspotCard(resetCard)
+                    )
+                } catch (_: Exception) {}
+                recordSystemEvent("طابور العمليات", "كرت", card.name, "تم حفظ إعادة التفعيل محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
+                _toastEvent.emit("تم حفظ إعادة التفعيل محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال (طابور العمليات)")
             }
         }
     }
@@ -2062,8 +2246,17 @@ class MainViewModel(
                 recordSystemEvent("تعديل", "كرت", updatedCard.name, "تم تحديث بيانات وإعدادات الكرت (${updatedCard.name}) في الراوتر", "SUCCESS", "الباقة: ${updatedCard.profile}, التعليق: ${updatedCard.comment}")
                 _toastEvent.emit("تم تحديث بيانات الكرت (${updatedCard.name}) بنجاح")
             } else {
-                recordSystemEvent("تعديل", "كرت", updatedCard.name, "فشل تحديث الكرت (${updatedCard.name}) في الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
-                _toastEvent.emit("فشل تحديث الكرت")
+                val errorMsg = result.exceptionOrNull()?.message.orEmpty()
+                // Enqueue in Task Queue for offline retry with Exponential Backoff
+                taskQueueManager.enqueueEditCard(updatedCard)
+                // Optimistically update local database so changes are visible immediately and don't bounce back
+                try {
+                    database.appDao().insertOrUpdateLocalCard(
+                        com.example.data.local.LocalCardEntity.fromHotspotCard(updatedCard)
+                    )
+                } catch (_: Exception) {}
+                recordSystemEvent("طابور العمليات", "كرت", updatedCard.name, "تم حفظ تعديل الكرت محلياً وسيتم إرساله للراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
+                _toastEvent.emit("تم حفظ التعديل محلياً وسيتم إرساله للراوتر فور استعادة الاتصال (طابور العمليات)")
             }
         }
     }
@@ -2075,6 +2268,22 @@ class MainViewModel(
                 val actionDesc = if (!currentDisabled) "تم إيقاف وتعطيل الكرت ($cardId) عن العمل في الراوتر" else "تم تفعيل وتشغيل الكرت ($cardId) في الراوتر"
                 recordSystemEvent("تعديل", "كرت", cardId, actionDesc, "SUCCESS")
                 _toastEvent.emit(if (!currentDisabled) "تم إيقاف الكرت" else "تم تفعيل الكرت")
+            } else {
+                val errorMsg = result.exceptionOrNull()?.message.orEmpty()
+                val targetCard = cards.value.find { it.id == cardId }
+                val targetName = targetCard?.name.orEmpty()
+                val targetDisabled = !currentDisabled
+                taskQueueManager.enqueueToggleDisabled(cardId, targetName, targetDisabled)
+                if (targetCard != null) {
+                    try {
+                        val updated = targetCard.copy(disabled = targetDisabled)
+                        database.appDao().insertOrUpdateLocalCard(
+                            com.example.data.local.LocalCardEntity.fromHotspotCard(updated)
+                        )
+                    } catch (_: Exception) {}
+                }
+                recordSystemEvent("طابور العمليات", "كرت", targetName.ifBlank { cardId }, "تم حفظ تغيير الحالة محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
+                _toastEvent.emit(if (targetDisabled) "تم حفظ إيقاف الكرت محلياً (طابور العمليات)" else "تم حفظ تفعيل الكرت محلياً (طابور العمليات)")
             }
         }
     }

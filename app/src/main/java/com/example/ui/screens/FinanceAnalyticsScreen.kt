@@ -90,6 +90,15 @@ fun FinanceAnalyticsScreen(
 
     var selectedTab by remember { mutableStateOf(FinanceTab.OVERVIEW) }
     var selectedMonthKey by remember { mutableStateOf<String?>(null) }
+    var selectedYearFilter by remember { mutableStateOf<String?>(null) }
+
+    val distinctYears = remember(monthlySales) {
+        monthlySales.map { it.monthKey.substringBefore("-") }.distinct()
+    }
+    val filteredMonths = remember(monthlySales, selectedYearFilter) {
+        if (selectedYearFilter == null) monthlySales
+        else monthlySales.filter { it.monthKey.startsWith(selectedYearFilter!!) }
+    }
 
     val currencyFormat = remember {
         NumberFormat.getNumberInstance(Locale("ar", "SA")).apply {
@@ -254,15 +263,59 @@ fun FinanceAnalyticsScreen(
                         )
                     }
 
-                    items(monthlySales, key = { it.monthKey }) { monthItem ->
-                        MonthlySalesDetailedCard(
-                            month = monthItem,
-                            currencyFormat = currencyFormat,
-                            isExpanded = selectedMonthKey == monthItem.monthKey,
-                            onToggleExpand = {
-                                selectedMonthKey = if (selectedMonthKey == monthItem.monthKey) null else monthItem.monthKey
+                    if (distinctYears.size > 1) {
+                        item {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                FilterChip(
+                                    selected = selectedYearFilter == null,
+                                    onClick = { selectedYearFilter = null },
+                                    label = { Text("كل السنوات (${monthlySales.size} شهر)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+                                )
+                                distinctYears.forEach { yr ->
+                                    FilterChip(
+                                        selected = selectedYearFilter == yr,
+                                        onClick = { selectedYearFilter = yr },
+                                        label = { Text("سنة $yr", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+                                    )
+                                }
                             }
-                        )
+                        }
+                    }
+
+                    if (filteredMonths.isEmpty()) {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                                shape = RoundedCornerShape(14.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(24.dp).fillMaxWidth(),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(Icons.Default.CalendarMonth, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text("لا توجد إحصائيات مسجلة لهذا العام", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                                }
+                            }
+                        }
+                    } else {
+                        items(filteredMonths, key = { it.monthKey }) { monthItem ->
+                            MonthlySalesDetailedCard(
+                                month = monthItem,
+                                currencyFormat = currencyFormat,
+                                isExpanded = selectedMonthKey == monthItem.monthKey,
+                                onToggleExpand = {
+                                    selectedMonthKey = if (selectedMonthKey == monthItem.monthKey) null else monthItem.monthKey
+                                }
+                            )
+                        }
                     }
                 }
 
@@ -617,9 +670,14 @@ private fun AllMonthsAggregateHeader(
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
-                text = "تقرير المبيعات التراكمية الشاملة لجميع الأشهر",
+                text = "تقرير المبيعات التراكمية الشاملة لجميع الأشهر (${monthlySales.size} شهر)",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "إحصائيات دقيقة ومحسوبة مباشرة من بيانات الكروت والدفعات ونقاط البيع منذ بداية تشغيل الشبكة",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             // Top highlights
@@ -753,13 +811,13 @@ private fun MonthlySalesDetailedCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    "مباع: ${month.totalCardsSold} كرت (${month.salesPercentage.toInt()}%)",
+                    "المباع: ${month.totalCardsSold} كرت (${month.salesPercentage.toInt()}%)",
                     style = MaterialTheme.typography.labelSmall,
                     color = StatusActiveGreen,
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    "غير مباع: ${month.totalCardsUnsold} كرت",
+                    "المولد: ${month.totalCardsGenerated} | غير مباع: ${month.totalCardsUnsold}",
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFFFF8F00),
                     fontWeight = FontWeight.SemiBold

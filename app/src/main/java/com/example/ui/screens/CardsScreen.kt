@@ -128,6 +128,8 @@ fun CardsScreen(
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val searchQuery by viewModel.cardSearchQuery.collectAsStateWithLifecycle()
     val currentFilter by viewModel.cardFilter.collectAsStateWithLifecycle()
+    val pendingTasksCount by viewModel.pendingTasksCount.collectAsStateWithLifecycle()
+    val isProcessingQueue by viewModel.isProcessingQueue.collectAsStateWithLifecycle()
 
     var cardToDelete by remember { mutableStateOf<HotspotCard?>(null) }
     var cardToEdit by remember { mutableStateOf<HotspotCard?>(null) }
@@ -254,6 +256,77 @@ fun CardsScreen(
             }
 
             Spacer(modifier = Modifier.height(4.dp))
+
+            // Task Queue Pending Status Banner
+            if (pendingTasksCount > 0) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f)
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.5f))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (isProcessingQueue) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Autorenew,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.tertiary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "طابور العمليات المعلقة ($pendingTasksCount عملية)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                                )
+                                Text(
+                                    text = "تعديلات وحذف محفوظة محلياً - تُرسل للراوتر تلقائياً مع Exponential Backoff",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f)
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = { viewModel.processTaskQueueNow() },
+                            enabled = !isProcessingQueue,
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Text(
+                                text = if (isProcessingQueue) "جاري الإرسال..." else "إرسال الآن",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+            }
 
             // Filter Chips (Scrollable & Uniform compact height)
             Row(
@@ -704,7 +777,7 @@ fun CardsScreen(
             confirmText = "حذف الكرت",
             isDestructive = true,
             onConfirm = {
-                viewModel.deleteCard(target.id)
+                viewModel.deleteCard(target.id, target.name)
                 cardToDelete = null
             },
             onDismiss = { cardToDelete = null }

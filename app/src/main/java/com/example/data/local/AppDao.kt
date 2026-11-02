@@ -250,4 +250,40 @@ interface AppDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateMonthlyProfitRecords(records: List<MonthlyProfitRecordEntity>)
+
+    // ==========================================
+    // Router Task Queue (Offline sync & Exponential Backoff)
+    // ==========================================
+    @Query("SELECT * FROM router_task_queue WHERE status = 'PENDING' AND nextAttemptTimestamp <= :currentTime ORDER BY createdAt ASC")
+    suspend fun getPendingTasksReady(currentTime: Long): List<RouterTaskEntity>
+
+    @Query("SELECT * FROM router_task_queue WHERE status != 'COMPLETED' ORDER BY createdAt DESC")
+    fun getAllActiveTasksFlow(): Flow<List<RouterTaskEntity>>
+
+    @Query("SELECT COUNT(*) FROM router_task_queue WHERE status = 'PENDING'")
+    fun getPendingTaskCountFlow(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM router_task_queue WHERE status = 'PENDING'")
+    suspend fun getPendingTaskCount(): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTask(task: RouterTaskEntity): Long
+
+    @androidx.room.Update
+    suspend fun updateTask(task: RouterTaskEntity)
+
+    @Query("UPDATE router_task_queue SET status = :status, lastError = :error WHERE id = :id")
+    suspend fun updateTaskStatus(id: Long, status: String, error: String? = null)
+
+    @Query("DELETE FROM router_task_queue WHERE id = :id")
+    suspend fun deleteTaskById(id: Long)
+
+    @Query("DELETE FROM router_task_queue WHERE cardName = :cardName")
+    suspend fun deleteTasksByCardName(cardName: String)
+
+    @Query("DELETE FROM router_task_queue WHERE status = 'COMPLETED'")
+    suspend fun clearCompletedTasks()
+
+    @Query("DELETE FROM router_task_queue")
+    suspend fun clearAllTasks()
 }
