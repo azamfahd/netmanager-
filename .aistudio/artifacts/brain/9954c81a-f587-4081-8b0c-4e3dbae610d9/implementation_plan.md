@@ -1,33 +1,32 @@
-# خطة العمل المنفذة: إصلاح مشكلة رفض السيرفر للتعديلات وطابور المهام المحلي (Room Task Queue)
+# Implementation Plan - Enhanced Finance & Monthly Profits Section
 
-## 1. الإنجازات المكتملة
-1. **التعرف التلقائي الذكي على نظام الكروت (Smart System Auto-Detection):**
-   - تم دعم فحص مسار الكرت تلقائياً (Hotspot أو User Manager v6 أو User Manager v7).
-   - استخراج المعرف الداخلي الدقيق `.id` لاستخدامه في أوامر التعديل والحذف.
+## Goal
+Improve the Finance and Profits section (`FinanceAnalyticsScreen` and related ViewModels/Models) to correctly display **all months and years** from the router, user manager, and local cache without any hardcoded limitations, featuring expandable monthly details with sold vs. unsold cards, revenue breakdown, and multi-year support.
 
-2. **فصل الجلسات النشطة فوراً (Instant Active Session Terminate):**
-   - قطع أي جلسة نشطة للمستخدم في `/ip/hotspot/active` أو `/user-manager/session` قبل تنفيذ التعديل أو الحذف لضمان عدم رفض الراوتر للأمر أو قفل الكرت.
+## Proposed Changes
 
-3. **تصحيح أوامر RouterOS API و REST API:**
-   - استبعاد حقل `name` غير القابل للتعديل في طلبات الـ PATCH و `/set` لتجنب خطأ `cannot change user name` أو `!trap`.
-   - تنفيذ أمر تصفير العدادات (`reset-counters`) وتفعيل الحساب (`disabled=no`) بأمر مدمج ومباشر في إعادة التفعيل.
+### 1. Data Models & Analytics Extension (`app/src/main/java/com/example/data/model/RouterModels.kt` or new model file)
+- Ensure `MonthlySalesSummary` and revenue calculations properly parse and aggregate cards across **all years and months** (extracting year and month from card creation timestamps, comments, or IDs).
+- Add support for categorizing cards per month into:
+  - Sold cards (used / active / logged in)
+  - Unsold cards (unused / valid)
+  - Total revenue (sold vs potential revenue)
 
-4. **إنشاء طابور المهام المحلي (Room Task Queue):**
-   - إنشاء جدول `router_task_queue` عبر كيان `RouterTaskEntity` في قاعدة بيانات Room.
-   - دعم أنواع العمليات الأساسية: `EDIT_CARD`, `DELETE_CARD`, `TOGGLE_CARD`, `REACTIVATE_CARD`.
-   - ترقية إصدار قاعدة البيانات إلى 11 وتحديث `AppDao`.
+### 2. ViewModel Logic (`MainViewModel.kt` & `MikrotikRepository.kt`)
+- Update `monthlySalesList` and analytics aggregation in `MainViewModel` to dynamically group all loaded hotspot cards, user manager cards, and local database cards by Year and Month (`YYYY-MM`).
+- Sort months in descending or chronological order across all detected years.
+- Compute accurate per-month metrics: total cards, sold count, unsold count, total revenue, average card price, and profit.
 
-5. **تنفيذ آلية التراجع الأسي الذكية (Exponential Backoff):**
-   - فترات الانتظار المتصاعدة: (2 ثانية -> 4 ثوانٍ -> 8 ثوانٍ -> 16 ثانية -> 32 ثانية -> حد أقصى 60 ثانية).
-   - إدارة حالات المهام: `PENDING`, `PROCESSING`, `FAILED`, `COMPLETED`.
-   - محاولات ذكية تصل إلى 8 محاولات قبل وسم المهمة كـ `FAILED`، مع خيار إعادة المحاولة الفورية بضغطة زر.
+### 3. UI Enhancements in `FinanceAnalyticsScreen.kt`
+- Upgrade the "المبيعات الشهرية والأشهر" (Monthly Sales & Records) tab/section:
+  - Display a comprehensive chronological list of **all months across all years** (e.g. November 2026, October 2026, ..., 2025, etc.).
+  - Add **Year Selector / Filter** or hierarchical year-month view.
+  - Make each month card **expandable** to reveal detailed statistics:
+    - Sold vs. Unsold cards count & progress bar.
+    - Revenue generated from sold cards vs. potential revenue from unsold cards.
+    - Breakdown of card profiles/packages sold in that specific month.
+    - Quick actions (e.g., export monthly report, view cards of that month).
 
-6. **التكامل الشامل مع الواجهة والعمل في الخلفية:**
-   - الحفظ التفاؤلي المحلي الفوري لمنع ارتداد الكرت أو عودته لما كان عليه عند بطء الاتصال أو انقطاعه.
-   - التشغيل التلقائي لطابور المهام عند الاتصال الأولي بالراوتر، أو استعادة الاتصال في دورة التحديث الدوري (Auto-Refresh)، أو الضغط على إعادة المزامنة (Retry Sync).
-   - عرض شريط تنبيهي ذكي وتفاعلي في شاشة الكروت `CardsScreen` يوضح عدد العمليات المعلقة في الطابور مع مؤشر تقدم وزر "إرسال الآن".
-
----
-
-## 2. التحقق والاختبار
-- تم التحقق من نجاح البناء التراكمي للبرنامج عبر `compile_applet` بدون أي أخطاء برمجية.
+## Verification Plan
+- Compile applet with `compile_applet`.
+- Verify no compilation errors and check that monthly analytics display correctly across multiple years.

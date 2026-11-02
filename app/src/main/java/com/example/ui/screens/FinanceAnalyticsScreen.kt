@@ -860,7 +860,7 @@ private fun MonthlySalesDetailedCard(
                     if (month.packageBreakdown.isNotEmpty()) {
                         Text("توزيع المبيعات حسب الباقات لهذا الشهر:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            month.packageBreakdown.take(4).forEach { pkg ->
+                            month.packageBreakdown.forEach { pkg ->
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,

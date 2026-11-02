@@ -89,6 +89,9 @@ class MainViewModel(
             val ctx = appContext
             if (ctx != null) {
                 viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    val currentConn = _connectionState.value
+                    val isDemoConn = if (currentConn is ConnectionState.Connected) currentConn.isDemo else false
+
                     com.example.data.local.RouterCacheManager.saveSnapshot(
                         context = ctx,
                         ipAddress = snapshot.ipAddress,
@@ -101,7 +104,8 @@ class MainViewModel(
                         servers = snapshot.servers,
                         nodes = snapshot.nodes,
                         logs = snapshot.logs,
-                        ipBindings = snapshot.ipBindings
+                        ipBindings = snapshot.ipBindings,
+                        isDemo = isDemoConn
                     )
                     
                     // Persist logs to Room
@@ -198,10 +202,43 @@ class MainViewModel(
     val ipPools: StateFlow<List<com.example.data.model.IpPoolInfo>> = repository.ipPools
     val interfaceStats: StateFlow<List<com.example.data.model.InterfaceStats>> = repository.interfaceStats
     val activeUsers: StateFlow<List<HotspotActiveUser>> = repository.activeUsers
-    val cards: StateFlow<List<HotspotCard>> = repository.cards
-    val profiles: StateFlow<List<HotspotProfile>> = repository.profiles
+    val cardsState: StateFlow<List<HotspotCard>> = repository.cards
+
+    // Comprehensive cards history combining live router cards + locally cached historical cards
+    val allCardsHistory: StateFlow<List<HotspotCard>> = combine(
+        cardsState,
+        database.appDao().getAllLocalCardsFlow()
+    ) { live, localEntities ->
+        val local = localEntities.map { it.toHotspotCard() }
+        val liveNames = live.map { it.name }.toSet()
+        // Merge: prefer live data for overlapping card names
+        live + local.filter { it.name !in liveNames }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val cards: StateFlow<List<HotspotCard>> = allCardsHistory
+    val profilesState: StateFlow<List<HotspotProfile>> = repository.profiles
+    val allProfilesHistory: StateFlow<List<HotspotProfile>> = combine(
+        profilesState,
+        database.appDao().getAllLocalProfilesFlow()
+    ) { live, localEntities ->
+        val local = localEntities.map { it.toHotspotProfile() }
+        val liveNames = live.map { it.name }.toSet()
+        live + local.filter { it.name !in liveNames }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val profiles: StateFlow<List<HotspotProfile>> = allProfilesHistory
     val networkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = repository.networkNodes
-    val ipBindings: StateFlow<List<IpBinding>> = repository.ipBindings
+    val ipBindingsState: StateFlow<List<IpBinding>> = repository.ipBindings
+    val allIpBindingsHistory: StateFlow<List<IpBinding>> = combine(
+        ipBindingsState,
+        database.appDao().getAllLocalIpBindingsFlow()
+    ) { live, localEntities ->
+        val local = localEntities.map { it.toIpBinding() }
+        val liveMacs = live.map { it.macAddress.uppercase() }.toSet()
+        live + local.filter { it.macAddress !in liveMacs }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val ipBindings: StateFlow<List<IpBinding>> = allIpBindingsHistory
 
     private val _isHeartbeatScanning = MutableStateFlow(false)
     val isHeartbeatScanning: StateFlow<Boolean> = _isHeartbeatScanning.asStateFlow()
@@ -285,7 +322,16 @@ class MainViewModel(
         }
     }
 
-    val userSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = repository.userSessions
+    private val liveSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = repository.userSessions
+    val userSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = combine(
+        liveSessions,
+        database.appDao().getAllArchivedSessions()
+    ) { live, archivedEntities ->
+        val archived = archivedEntities.map { it.toUserSessionRecord() }
+        val liveIds = live.map { it.id }.toSet()
+        // Merge: live first, then archived unique sessions
+        live + archived.filter { it.id !in liveIds }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val activityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = repository.activityEvents
     val adminUsers: StateFlow<List<com.example.data.model.AdminUser>> = repository.adminUsers
     val auditLogs: StateFlow<List<com.example.data.model.AuditLogEntry>> = repository.auditLogs
@@ -797,7 +843,7 @@ class MainViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.RevenueAnalyticsSummary())
 
     val monthlySalesList: StateFlow<List<com.example.data.model.MonthlySalesSummary>> = combine(
-        cards,
+        allCardsHistory,
         detailedPackageProfitStats,
         database.appDao().getAllCardAssignments(),
         batchHistory,
@@ -843,8 +889,8 @@ class MainViewModel(
         val startMonth = startCal.get(java.util.Calendar.MONTH) // 0-based
 
         val totalMonthsSpan = ((currentYear - startYear) * 12 + (currentMonth - startMonth)).coerceAtLeast(0)
-        // Ensure at least 5 previous months are scanned, and up to the entire lifetime of the network
-        val span = maxOf(5, totalMonthsSpan)
+        // Ensure at least 36 previous months (3 years) are scanned, and up to the entire lifetime of the network
+        val span = maxOf(36, totalMonthsSpan)
 
         data class SoldCardRecord(
             val name: String,
@@ -1934,7 +1980,8 @@ class MainViewModel(
                     servers = snapshot.servers,
                     nodes = snapshot.nodes,
                     logs = snapshot.logs,
-                    ipBindings = snapshot.ipBindings
+                    ipBindings = snapshot.ipBindings,
+                    isDemo = currentConn.isDemo
                 )
                 refreshCachedSnapshot(context)
                 _toastEvent.emit("✓ تم حفظ وتحديث قاعدة البيانات المحلية للراوتر بنجاح!")

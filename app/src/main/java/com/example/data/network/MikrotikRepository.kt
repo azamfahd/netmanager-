@@ -125,6 +125,52 @@ class MikrotikRepository(
         } catch (_: Exception) {}
     }
 
+    suspend fun syncProfilesToRoom(profiles: List<HotspotProfile>) {
+        val dao = appDao ?: return
+        try {
+            val entities = profiles.map { com.example.data.local.LocalProfileEntity.fromHotspotProfile(it) }
+            dao.insertOrUpdateLocalProfiles(entities)
+        } catch (_: Exception) {}
+    }
+
+    suspend fun syncIpBindingsToRoom(bindings: List<IpBinding>) {
+        val dao = appDao ?: return
+        try {
+            val entities = bindings.map { com.example.data.local.LocalIpBindingEntity.fromIpBinding(it) }
+            dao.insertOrUpdateLocalIpBindings(entities)
+        } catch (_: Exception) {}
+    }
+
+    suspend fun syncSessionsToRoom(sessions: List<com.example.data.model.UserSessionRecord>) {
+        val dao = appDao ?: return
+        try {
+            val entities = sessions.map { s ->
+                com.example.data.local.SessionArchiveEntity(
+                    sessionId = s.id,
+                    username = s.username,
+                    ipAddress = s.ipAddress,
+                    macAddress = s.macAddress,
+                    loginTime = s.loginTime,
+                    logoutTime = s.logoutTime,
+                    duration = s.duration,
+                    bytesIn = s.bytesIn,
+                    bytesOut = s.bytesOut,
+                    totalBytes = s.totalBytes,
+                    terminateReason = s.terminateReason,
+                    profile = s.profile,
+                    price = s.price,
+                    isOnline = s.isOnline,
+                    deviceBrand = s.deviceInfo.brand,
+                    deviceModel = s.deviceInfo.modelName,
+                    nodeName = s.nodeName,
+                    timestamp = System.currentTimeMillis(),
+                    isQuotaExhausted = s.isQuotaExhausted
+                )
+            }
+            dao.insertOrUpdateSessions(entities)
+        } catch (_: Exception) {}
+    }
+
     suspend fun initializeFromLocalDatabase() {
         val dao = appDao ?: return
         try {
@@ -1112,6 +1158,7 @@ class MikrotikRepository(
                 if (liveProfiles.isNotEmpty() || _profiles.value.isEmpty()) {
                     _profiles.value = liveProfiles
                 }
+                syncProfilesToRoom(liveProfiles)
             }
             val bindResult = routerOsApiClient.getIpBindings()
             if (bindResult.isSuccess) {
@@ -1119,6 +1166,7 @@ class MikrotikRepository(
                 if (liveBindings.isNotEmpty() || _ipBindings.value.isEmpty()) {
                     _ipBindings.value = liveBindings
                 }
+                syncIpBindingsToRoom(liveBindings)
             }
 
             // 9. Fetch Interfaces & Neighbors for Per-Node Distribution
@@ -1593,6 +1641,7 @@ class MikrotikRepository(
 
                     if (profList.isNotEmpty()) {
                         _profiles.value = profList
+                        syncProfilesToRoom(profList)
                     }
                 }
 
@@ -1620,6 +1669,7 @@ class MikrotikRepository(
                     }
                     if (bindList.isNotEmpty()) {
                         _ipBindings.value = bindList
+                        syncIpBindingsToRoom(bindList)
                     }
                 }
 
@@ -2190,6 +2240,11 @@ class MikrotikRepository(
         }
 
         _userSessions.value = sessionList
+        
+        // Persist every session seen to Room for historical retention
+        CoroutineScope(Dispatchers.IO).launch {
+            syncSessionsToRoom(sessionList)
+        }
 
         // 6. Activity events log strictly from real active users
         val eventsList = mutableListOf<com.example.data.model.UserActivityEvent>()
