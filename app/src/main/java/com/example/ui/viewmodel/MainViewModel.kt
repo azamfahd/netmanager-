@@ -51,6 +51,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -107,40 +108,43 @@ class MainViewModel(
                         ipBindings = snapshot.ipBindings,
                         isDemo = isDemoConn
                     )
-                    
-                    // Persist logs to Room
-                    val dao = database.appDao()
-                    snapshot.logs.forEach { log ->
-                        val timestamp = System.currentTimeMillis()
-                        val insertedId = dao.insertSystemEventLog(
-                            SystemEventLogEntity(
-                                actionType = if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام",
-                                targetType = "راوتر",
-                                targetName = "سجل خارجي",
-                                description = log.message,
-                                details = "Topic: ${log.topics}",
-                                timestamp = timestamp
-                            )
-                        )
-                        
-                        // Sync to Cloud
-                        syncToCloud("systemLogs", insertedId.toString(), mapOf(
-                            "id" to insertedId.toString(),
-                            "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
-                            "actionType" to (if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام"),
-                            "targetType" to "راوتر",
-                            "targetName" to "سجل خارجي",
-                            "description" to log.message,
-                            "status" to "INFO",
-                            "operatorUsername" to "system"
-                        ))
-                    }
+                    // Snapshot data is saved to RouterCacheManager. Router syslog entries are exposed via repository.systemLogs.
                 }
             }
         }
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             repository.initializeFromLocalDatabase()
+        }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            monthlySalesList.collectLatest { list ->
+                if (list.isNotEmpty()) {
+                    val toSave = list.filter { it.totalCardsGenerated > 0 || it.totalCardsSold > 0 || it.totalRevenue > 0.0 }.map { m ->
+                        val parts = m.monthKey.split("-")
+                        val y = parts.getOrNull(0)?.toIntOrNull() ?: 2026
+                        val mo = parts.getOrNull(1)?.toIntOrNull() ?: 1
+                        val topProfile = m.packageBreakdown.firstOrNull()?.packageName ?: ""
+                        com.example.data.local.MonthlyProfitRecordEntity(
+                            monthKey = m.monthKey,
+                            monthNameAr = m.monthName,
+                            year = y,
+                            month = mo,
+                            totalRevenue = m.totalRevenue,
+                            totalCost = m.totalCost,
+                            netProfit = m.netProfit,
+                            soldCardsCount = m.totalCardsSold,
+                            totalCardsCount = m.totalCardsGenerated,
+                            topSellingProfile = topProfile,
+                            totalBytesConsumed = m.totalBytesConsumed,
+                            lastUpdatedTimestamp = System.currentTimeMillis()
+                        )
+                    }
+                    if (toSave.isNotEmpty()) {
+                        database.appDao().insertOrUpdateMonthlyProfitRecords(toSave)
+                    }
+                }
+            }
         }
 
         viewModelScope.launch {
@@ -801,7 +805,8 @@ class MainViewModel(
                 salesSharePercent = ((stat.soldCardsCount.toFloat() / totalNetworkSold.toFloat()) * 100f).coerceIn(0f, 100f)
             )
         }.sortedWith(compareByDescending<com.example.data.model.DetailedPackageProfitStat> { it.netProfit }.thenByDescending { it.soldCardsCount })
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val revenueAnalytics: StateFlow<com.example.data.model.RevenueAnalyticsSummary> = combine(
         detailedPackageProfitStats, cards, _selectedTimeFilter
@@ -840,7 +845,8 @@ class MainViewModel(
             topProfitablePackageProfit = topProfitable?.netProfit ?: 0.0,
             selectedTimeFilter = timeFilter
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.RevenueAnalyticsSummary())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.RevenueAnalyticsSummary())
 
     val monthlySalesList: StateFlow<List<com.example.data.model.MonthlySalesSummary>> = combine(
         allCardsHistory,
@@ -859,16 +865,32 @@ class MainViewModel(
         val avgFallbackPrice = if (packageStats.isNotEmpty()) packageStats.map { it.salePrice }.average().takeIf { it > 0 } ?: 500.0 else 500.0
         val avgFallbackCost = if (packageStats.isNotEmpty()) packageStats.map { it.costPrice }.average().takeIf { it > 0 } ?: 200.0 else 200.0
 
-        // 1. Pre-calculate effective timestamps and prices for all cards once
+        val cal = java.util.Calendar.getInstance()
+        fun toMonthKey(ts: Long): String {
+            cal.timeInMillis = ts
+            val y = cal.get(java.util.Calendar.YEAR)
+            val m = cal.get(java.util.Calendar.MONTH) + 1
+            return "%04d-%02d".format(y, m)
+        }
+
+        fun getDay(ts: Long): Int {
+            cal.timeInMillis = ts
+            return cal.get(java.util.Calendar.DAY_OF_MONTH)
+        }
+
+        // 1. Pre-calculate effective timestamps and prices for all cards once with batch fallback
         data class CardMeta(
             val card: HotspotCard,
             val timestamp: Long,
             val salePrice: Double,
             val costPrice: Double,
-            val isSoldOrActive: Boolean
+            val isSoldOrActive: Boolean,
+            val totalBytes: Long = 0L
         )
 
         val posAssignmentMap = assignments.associateBy { it.cardName }
+        val batchMap = batches.associateBy { it.batchId }
+
         val cardMetaList = allCards.map { card ->
             val posAss = posAssignmentMap[card.name]
             val cardTs = if (posAss != null && posAss.soldAt != null) {
@@ -876,7 +898,16 @@ class MainViewModel(
             } else if (posAss != null && posAss.assignedAt > 0L) {
                 posAss.assignedAt
             } else {
-                repository.getCardCreationTimestamp(card)
+                val resolved = repository.getCardCreationTimestamp(card)
+                // If timestamp defaulted to current time, try to match batch ID prefix in card name
+                if (resolved >= now - 60000L && batches.isNotEmpty()) {
+                    val matchingBatch = batches.find { b ->
+                        b.batchId.isNotBlank() && (card.name.startsWith(b.batchId) || card.comment.contains(b.batchId))
+                    }
+                    matchingBatch?.createdAt ?: resolved
+                } else {
+                    resolved
+                }
             }
 
             val matchingPkg = pricingMap[card.profile.lowercase()]
@@ -886,37 +917,41 @@ class MainViewModel(
             val cPrice = matchingPkg?.costPrice ?: (sPrice * 0.4)
             val hasActivity = card.isActive || card.isExpired || card.bytesIn > 0L ||
                     (card.uptime.isNotBlank() && card.uptime != "0s") || (posAss?.isSold == true)
+            val cardBytes = card.bytesIn + card.bytesOut
 
-            CardMeta(card, cardTs, sPrice, cPrice, hasActivity)
+            CardMeta(card, cardTs, sPrice, cPrice, hasActivity, cardBytes)
         }
 
-        // 2. Discover earliest genuine record timestamp across all sources
-        val validCardTs = cardMetaList.mapNotNull { it.timestamp.takeIf { ts -> ts in 1577836800000L..now + 86400000L } }
-        val validBatchTs = batches.mapNotNull { b -> b.createdAt.takeIf { it in 1577836800000L..now + 86400000L } }
-        val validAssignTs = assignments.flatMap { a ->
-            listOfNotNull(
-                a.assignedAt.takeIf { it in 1577836800000L..now + 86400000L },
-                a.soldAt?.takeIf { it in 1577836800000L..now + 86400000L }
-            )
+        // 2. High-speed Single-Pass Indexing: Group everything by month key O(N)
+        val cardsByMonth = cardMetaList.groupBy { toMonthKey(it.timestamp) }
+        val batchesByMonth = batches.groupBy { toMonthKey(it.createdAt) }
+        val assignmentsByMonth = assignments.groupBy { toMonthKey(it.assignedAt) }
+        val posSoldByMonth = assignments.filter { it.isSold }.groupBy { toMonthKey(it.soldAt ?: it.assignedAt) }
+        val savedRecordsByMonth = savedMonthlyRecords.associateBy { it.monthKey }
+
+        // 3. Discover ALL unique month keys across all data sources + at least 36 recent months
+        val allMonthKeys = sortedSetOf<String>(Comparator.reverseOrder())
+        allMonthKeys.addAll(cardsByMonth.keys.filter { it.length == 7 && it[4] == '-' })
+        allMonthKeys.addAll(batchesByMonth.keys.filter { it.length == 7 && it[4] == '-' })
+        allMonthKeys.addAll(assignmentsByMonth.keys.filter { it.length == 7 && it[4] == '-' })
+        allMonthKeys.addAll(posSoldByMonth.keys.filter { it.length == 7 && it[4] == '-' })
+        allMonthKeys.addAll(savedRecordsByMonth.keys.filter { it.length == 7 && it[4] == '-' })
+
+        // Ensure at least 36 consecutive months from current month backwards
+        cal.timeInMillis = now
+        val curYear = cal.get(java.util.Calendar.YEAR)
+        val curMonth = cal.get(java.util.Calendar.MONTH) + 1
+        val currentMonthKey = "%04d-%02d".format(curYear, curMonth)
+
+        for (offset in 0..35) {
+            val walkCal = java.util.Calendar.getInstance().apply {
+                timeInMillis = now
+                add(java.util.Calendar.MONTH, -offset)
+            }
+            val y = walkCal.get(java.util.Calendar.YEAR)
+            val m = walkCal.get(java.util.Calendar.MONTH) + 1
+            allMonthKeys.add("%04d-%02d".format(y, m))
         }
-        val validSavedRecordTs = savedMonthlyRecords.mapNotNull { r ->
-            r.lastUpdatedTimestamp.takeIf { it in 1577836800000L..now + 86400000L }
-        }
-
-        val allTimestamps = validCardTs + validBatchTs + validAssignTs + validSavedRecordTs
-        val earliestTs = allTimestamps.minOrNull() ?: now
-
-        val nowCal = java.util.Calendar.getInstance().apply { timeInMillis = now }
-        val currentYear = nowCal.get(java.util.Calendar.YEAR)
-        val currentMonth = nowCal.get(java.util.Calendar.MONTH) // 0-based
-
-        val startCal = java.util.Calendar.getInstance().apply { timeInMillis = earliestTs }
-        val startYear = startCal.get(java.util.Calendar.YEAR)
-        val startMonth = startCal.get(java.util.Calendar.MONTH) // 0-based
-
-        val totalMonthsSpan = ((currentYear - startYear) * 12 + (currentMonth - startMonth)).coerceAtLeast(0)
-        // Ensure at least 36 previous months (3 full years) are scanned and displayed accurately
-        val span = maxOf(36, totalMonthsSpan)
 
         data class SoldCardRecord(
             val name: String,
@@ -928,47 +963,27 @@ class MainViewModel(
 
         val rawMonthsList = mutableListOf<com.example.data.model.MonthlySalesSummary>()
 
-        for (monthOffset in 0..span) {
-            val mCal = java.util.Calendar.getInstance().apply {
-                timeInMillis = now
-                add(java.util.Calendar.MONTH, -monthOffset)
-            }
-            val year = mCal.get(java.util.Calendar.YEAR)
-            val monthIndex = mCal.get(java.util.Calendar.MONTH)
-            val monthKey = "%04d-%02d".format(year, monthIndex + 1)
-            val monthLabel = "${monthNamesAr[monthIndex]} $year"
-            val isCurrent = (monthOffset == 0)
+        // 4. Evaluate each month instantaneously via O(1) Lookups
+        for (monthKey in allMonthKeys) {
+            val parts = monthKey.split("-")
+            val year = parts.getOrNull(0)?.toIntOrNull() ?: curYear
+            val monthIndex = (parts.getOrNull(1)?.toIntOrNull() ?: 1) - 1
+            val monthLabel = if (monthIndex in 0..11) "${monthNamesAr[monthIndex]} $year" else monthKey
+            val isCurrent = (monthKey == currentMonthKey)
 
-            mCal.set(java.util.Calendar.DAY_OF_MONTH, 1)
-            mCal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-            mCal.set(java.util.Calendar.MINUTE, 0)
-            mCal.set(java.util.Calendar.SECOND, 0)
-            mCal.set(java.util.Calendar.MILLISECOND, 0)
-            val startOfM = mCal.timeInMillis
-
-            val maxDay = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-            mCal.set(java.util.Calendar.DAY_OF_MONTH, maxDay)
-            mCal.set(java.util.Calendar.HOUR_OF_DAY, 23)
-            mCal.set(java.util.Calendar.MINUTE, 59)
-            mCal.set(java.util.Calendar.SECOND, 59)
-            mCal.set(java.util.Calendar.MILLISECOND, 999)
-            val endOfM = mCal.timeInMillis
-
-            // A. Cards created or active in this specific month
-            val cardsInThisMonth = cardMetaList.filter { it.timestamp in startOfM..endOfM }
-            val batchesInM = batches.filter { it.createdAt in startOfM..endOfM }
+            val cardsInThisMonth = cardsByMonth[monthKey] ?: emptyList()
+            val batchesInM = batchesByMonth[monthKey] ?: emptyList()
             val batchCardsCount = batchesInM.sumOf { it.cardCount }
-            val assignmentsInM = assignments.filter { it.assignedAt in startOfM..endOfM }
+            val assignmentsInM = assignmentsByMonth[monthKey] ?: emptyList()
 
             val totalGenerated = maxOf(cardsInThisMonth.size, batchCardsCount, assignmentsInM.size)
 
-            // B. Precise Sold Cards Identification for this Month
             val soldItems = mutableListOf<SoldCardRecord>()
             val processedCardNames = mutableSetOf<String>()
 
             // 1. POS Cards Sold in this month
-            val posSoldThisMonth = assignments.filter { it.isSold && ((it.soldAt ?: it.assignedAt) in startOfM..endOfM) }
-            posSoldThisMonth.forEach { a ->
+            val posSoldInThisMonth = posSoldByMonth[monthKey] ?: emptyList()
+            posSoldInThisMonth.forEach { a ->
                 val matchingPkg = pricingMap[a.profileName.lowercase()]
                 val sPrice = if (a.priceAmount > 0) a.priceAmount else (matchingPkg?.salePrice ?: avgFallbackPrice)
                 val cPrice = matchingPkg?.costPrice ?: (sPrice * 0.4)
@@ -998,7 +1013,7 @@ class MainViewModel(
             }
 
             // 4. Fallback to existing saved Room entity if router was cleared or cards archived
-            val savedEntity = savedMonthlyRecords.find { it.monthKey == monthKey }
+            val savedEntity = savedRecordsByMonth[monthKey]
             val totalSold = if (soldItems.isNotEmpty()) {
                 soldItems.size
             } else if (savedEntity != null && savedEntity.soldCardsCount > 0) {
@@ -1040,7 +1055,7 @@ class MainViewModel(
             val targetRev = totalGenFinal * avgCardPrice
             val deficit = (targetRev - revenue).coerceAtLeast(0.0)
 
-            // C. Package Breakdown for this Month
+            // Package Breakdown for this Month
             val pkgBreakdown = if (soldItems.isNotEmpty()) {
                 soldItems.groupBy { it.profile.ifBlank { "افتراضي" } }.map { (profName, items) ->
                     val pkgSold = items.size
@@ -1070,19 +1085,17 @@ class MainViewModel(
                 emptyList()
             }
 
-            // D. Accurate Daily Sales Breakdown
-            val dayCal = java.util.Calendar.getInstance()
+            // Daily Sales Breakdown
             val dailyBreakdown = if (soldItems.isNotEmpty()) {
                 soldItems.groupBy { item ->
-                    dayCal.timeInMillis = item.timestamp
-                    dayCal.get(java.util.Calendar.DAY_OF_MONTH)
+                    getDay(item.timestamp)
                 }.map { (dayNum, dayItems) ->
                     val daySold = dayItems.size
                     val dayRev = dayItems.sumOf { it.salePrice }
                     val dayProf = dayItems.sumOf { it.salePrice - it.costPrice }
                     com.example.data.model.DailySalesPoint(
                         dayNumber = dayNum,
-                        dayLabel = "$dayNum ${monthNamesAr[monthIndex]}",
+                        dayLabel = "$dayNum ${monthNamesAr.getOrElse(monthIndex) { "" }}",
                         cardsSold = daySold,
                         revenue = dayRev,
                         profit = dayProf
@@ -1092,9 +1105,17 @@ class MainViewModel(
                 emptyList()
             }
 
-            // Filter condition: Always include current month, or any month with cards, sales, revenue, or saved record
+            val monthBytes = if (cardsInThisMonth.isNotEmpty()) {
+                cardsInThisMonth.sumOf { it.totalBytes }
+            } else if (savedEntity != null && savedEntity.totalBytesConsumed > 0L) {
+                savedEntity.totalBytesConsumed
+            } else {
+                0L
+            }
+
+            // Always include current month, or any month with cards, sales, revenue, or saved record, or recent 6 months
             val hasData = isCurrent || totalGenFinal > 0 || totalSold > 0 || revenue > 0.0 || (savedEntity != null && savedEntity.totalRevenue > 0)
-            if (hasData || monthOffset < 6) {
+            if (hasData || rawMonthsList.size < 12) {
                 rawMonthsList.add(
                     com.example.data.model.MonthlySalesSummary(
                         monthKey = monthKey,
@@ -1110,7 +1131,8 @@ class MainViewModel(
                         targetDeficit = deficit,
                         isCurrentMonth = isCurrent,
                         packageBreakdown = pkgBreakdown,
-                        dailyBreakdown = dailyBreakdown
+                        dailyBreakdown = dailyBreakdown,
+                        totalBytesConsumed = monthBytes
                     )
                 )
             }
@@ -1128,7 +1150,8 @@ class MainViewModel(
         }
 
         finalMonths
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val packageConsumptionStats: StateFlow<List<com.example.data.model.PackageConsumptionStat>> = combine(
         profiles, cards, activeUsers

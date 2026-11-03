@@ -1,32 +1,55 @@
-# Implementation Plan - Enhanced Finance & Monthly Profits Section
+# خطة العمل: تسريع التطبيق وجلب مبيعات الأشهر السابقة القديمة بدقة
 
-## Goal
-Improve the Finance and Profits section (`FinanceAnalyticsScreen` and related ViewModels/Models) to correctly display **all months and years** from the router, user manager, and local cache without any hardcoded limitations, featuring expandable monthly details with sold vs. unsold cards, revenue breakdown, and multi-year support.
+بناءً على إجاباتك بتحديد تواريخ الكروت عبر تعليقات الكروت ومعرفات الدفعات واستخدام معالجة ذكية بالخلفية بدون تجميد الواجهة، تم تصميم هذه الخطة لإزالة أي بطء أو تعليق وضمان عرض تفاصيل كل الأشهر والسنوات السابقة بدقة متناهية.
 
-## Proposed Changes
+---
 
-### 1. Data Models & Analytics Extension (`app/src/main/java/com/example/data/model/RouterModels.kt` or new model file)
-- Ensure `MonthlySalesSummary` and revenue calculations properly parse and aggregate cards across **all years and months** (extracting year and month from card creation timestamps, comments, or IDs).
-- Add support for categorizing cards per month into:
-  - Sold cards (used / active / logged in)
-  - Unsold cards (unused / valid)
-  - Total revenue (sold vs potential revenue)
+## 1. تشخيص أسباب المشكلة والحلول الهندسية
 
-### 2. ViewModel Logic (`MainViewModel.kt` & `MikrotikRepository.kt`)
-- Update `monthlySalesList` and analytics aggregation in `MainViewModel` to dynamically group all loaded hotspot cards, user manager cards, and local database cards by Year and Month (`YYYY-MM`).
-- Sort months in descending or chronological order across all detected years.
-- Compute accurate per-month metrics: total cards, sold count, unsold count, total revenue, average card price, and profit.
+### أ) أسباب ثقل التطبيق والتعليق (Performance Lag & Freezing):
+- **حسابات متكررة على المسار الرئيسي (Main Thread Blocking)**: كان محرك `monthlySalesList` يقوم بعمل تكرار حلقي مضاعف `for (monthOffset in 0..span)` يمسح آلاف الكروت 36 إلى 60 مرة لكل تحديث بيانات، مع إنشاء كائنات `Calendar` بشكل متكرر ومكلف جداً لمعالجة التاريخ.
+- **تزامن التدفقات المتعددة (Heavy StateFlow Combines)**: دمج جداول الكروت، الحزم، الدفعات، وقاعدة البيانات دفعة واحدة دون تشغيلها على `Dispatchers.Default` كان يوقف استجابة واجهة Jetpack Compose (Frame Drop).
+- **إعادة تصيير القوائم (Recomposition Jank)**: غياب الـ `key` الثابت في بعض عناصر `LazyColumn` كان يؤدي لإعادة رسم شاشات التحليل المالي بالكامل عند أي تحديث بسيط.
 
-### 3. UI Enhancements in `FinanceAnalyticsScreen.kt`
-- Upgrade the "المبيعات الشهرية والأشهر" (Monthly Sales & Records) tab/section:
-  - Display a comprehensive chronological list of **all months across all years** (e.g. November 2026, October 2026, ..., 2025, etc.).
-  - Add **Year Selector / Filter** or hierarchical year-month view.
-  - Make each month card **expandable** to reveal detailed statistics:
-    - Sold vs. Unsold cards count & progress bar.
-    - Revenue generated from sold cards vs. potential revenue from unsold cards.
-    - Breakdown of card profiles/packages sold in that specific month.
-    - Quick actions (e.g., export monthly report, view cards of that month).
+### ب) أسباب عدم ظهور مبيعات الأشهر السابقة (Missing Historical Sales):
+- **محدودية قراءة التاريخ من تعليق الكرت**: العديد من كروت المايكروتك تملك تواريخ بصيغ متنوعة (`YYYY-MM-DD`, `DD/MM/YYYY`, `Jan/15/2024`, صيغ برنامج ميكهوم Mikhmon مثل `vc-100-2024-05`, أو أسماء دفعات وبصمات وقت يونكس). عندما تفشل قراءة التاريخ، كان النظام يفترض التاريخ هو "اليوم"، مما يجعل جميع المبيعات تتكدس في الشهر الحالي وتختفي من الأشهر السابقة!
+- **عدم ربط الكروت غير المؤرخة بدفعاتها التاريخية**: الكروت الناتجة عن دفعات قديمة لم تكن ترث تاريخ الدفعة المخزن في `BatchHistoryEntity`.
 
-## Verification Plan
-- Compile applet with `compile_applet`.
-- Verify no compilation errors and check that monthly analytics display correctly across multiple years.
+---
+
+## 2. خطوات التنفيذ المقترحة
+
+### الخطوة الأولى: تطوير محرك فك ترميز تواريخ الكروت والدفعات (`MikrotikRepository.kt`)
+- توسيع نطاق دالة `resolveCardTimestamp` لدعم كافة صيغ التواريخ الشائعة في شبكات المايكروتك:
+  1. الصيغ النصية اللاتينية: `oct/14/2023`, `2024-01-15`, `15-01-2024`, `2023/12/01`, `15/02/2024`.
+  2. صيغ برامج توليد الكروت الشهيرة (Mikhmon / UserMan): مثل `vc-...-2024-03`, `batch-202311`, `b_202401`.
+  3. بصمات الوقت بالأرقام (Epoch Timestamps بالثواني أو الميلي ثانية).
+  4. استخراج التواريخ المكتوبة باللغة العربية داخل التعليق (مثل `يناير 2024`, `أكتوبر 2023`).
+  5. ربط اسم الكرت بكاش الدفعات (`BatchHistoryEntity`) بحيث يرث الكرت تاريخ توليد دفعته تلقائياً إذا خلا التعليق من التاريخ.
+  6. التخزين المؤقت للتواريخ المحلولة (`cardTimestampCache`) لمنع إعادة تحليل الكروت التي تم فحصها سابقاً.
+
+### الخطوة الثانية: محرك الفهرسة الفورية في الخلفية بدون تعليق (`MainViewModel.kt`)
+- نقل كافة المعالجات الحسابية والمالية إلى خيوط المعالجة الخلفية `Dispatchers.Default` عبر `flowOn(Dispatchers.Default)`.
+- تحويل خوارزمية تجميع الأشهر من `O(Months * Cards)` (المسببة للتعليق) إلى **الفهرسة بنقرة واحدة `Single-Pass Hash Map Indexing` بنمط `O(N)`**:
+  - تصنيف وتوزيع الكروت، الدفعات، وسجلات نقاط البيع دفعة واحدة على مفاتيح الأشهر `YYYY-MM`.
+  - حساب المبيعات، الإيرادات، الأرباح، التكاليف، والكروت غير المباعة لكل شهر في مسار خلفي فائق السرعة.
+  - إدراج كافة الأشهر التي تم اكتشاف مبيعات أو كروت فيها عبر كل السنوات (2026, 2025, 2024 وما قبلها) بالإضافة إلى السجلات المؤرشفة في قاعدة البيانات المحلية `SQLite`.
+
+### الخطوة الثالثة: تحسين أداء الواجهة وتجربة المستخدم (`FinanceAnalyticsScreen.kt`)
+- تزويد عناصر `LazyColumn` بمعرفات فريدة ثابتة `key = { it.monthKey }` لضمان سلاسة التمرير والتنقل بدون أي لاق.
+- إضافة شرائح تصفية السنوات (كل السنوات، 2026، 2025، 2024...) لسرعة الوصول إلى سجلات أي سنة.
+- تفاصيل قابلة للتوسيع (`Expandable Month Card`) تعرض:
+  - عدد الكروت المباعة وغير المباعة وقيمة كل منها.
+  - تفاصيل الباقات الأكثر مبيعاً في ذلك الشهر.
+  - المبيعات اليومية داخل الشهر.
+- مؤشر حالة التحميل السريع لمنح المستخدم سلاسة تامة وفورية عند التنقل.
+
+### الخطوة الرابعة: فحص شامل واختبار البناء (`compile_applet`)
+- تشغيل فحص البناء والتحقق من عدم وجود أي خطأ أو تعارض في الشفرة المصدرية وسرعة استجابة التطبيق.
+
+---
+
+## 3. معايير النجاح والتحقق
+- استجابة فورية بدون أي تعليق أو تجميد في التطبيق حتى مع وجود آلاف الكروت.
+- ظهور مبيعات وتفاصيل كل الأشهر السابقة والسنوات في قسم المالية بشكل سليم ودقيق.
+- دقة تصنيف الكروت المباعة وغير المباعة وتفاصيل الباقات لكل شهر.

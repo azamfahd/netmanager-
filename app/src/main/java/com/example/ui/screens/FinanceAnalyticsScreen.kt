@@ -333,7 +333,7 @@ fun FinanceAnalyticsScreen(
                         )
                     }
 
-                    items(packageStats) { pkg ->
+                    items(packageStats, key = { it.profileName }) { pkg ->
                         PackageProfitDetailCard(
                             pkg = pkg,
                             currencyFormat = currencyFormat
@@ -381,7 +381,7 @@ fun FinanceAnalyticsScreen(
                             }
                         }
                     } else {
-                        items(posAgents) { agentSummary ->
+                        items(posAgents, key = { it.agent.id }) { agentSummary ->
                             PosAgentFinanceCard(
                                 summary = agentSummary,
                                 currencyFormat = currencyFormat
@@ -721,6 +721,29 @@ private fun AllMonthsAggregateHeader(
                     Text("${currencyFormat.format(totalDeficitAllMonths)} ر.ي", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = StatusErrorRed)
                 }
             }
+
+            val totalBytesAllMonths = monthlySales.sumOf { it.totalBytesConsumed }
+            if (totalBytesAllMonths > 0L) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = RouterBlue.copy(alpha = 0.08f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("إجمالي استهلاك البيانات لكل الأشهر:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = com.example.data.network.NetworkUtils.formatBytes(totalBytesAllMonths),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = RouterBlue
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -852,6 +875,12 @@ private fun MonthlySalesDetailedCard(
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("عجز المبيعات عن الهدف:", style = MaterialTheme.typography.labelSmall)
                                 Text("${currencyFormat.format(month.targetDeficit)} ر.ي", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = StatusWarningAmber)
+                            }
+                            if (month.totalBytesConsumed > 0L) {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("استهلاك بيانات الشبكة:", style = MaterialTheme.typography.labelSmall)
+                                    Text(com.example.data.network.NetworkUtils.formatBytes(month.totalBytesConsumed), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = RouterBlue)
+                                }
                             }
                         }
                     }

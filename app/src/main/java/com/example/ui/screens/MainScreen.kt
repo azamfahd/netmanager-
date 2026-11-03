@@ -553,47 +553,6 @@ fun MainScreen(
                 }
             }
 
-            // Offline Safe Browsing Banner (تنبيه التصفح المحلي الآمن)
-            if (connectedState?.isOffline == true) {
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.WifiOff,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "وضع التصفح المحلي (Offline Cache)",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                            Text(
-                                text = "انقطع الاتصال بالراوتر مؤقتاً. جميع الكروت والإحصائيات محفوظة محلياً وجاهزة للاستخدام.",
-                                style = MaterialTheme.typography.bodySmall,
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            }
-
             Box(modifier = Modifier.weight(1f)) {
                 when (currentTab) {
                     AppTab.DASHBOARD -> {

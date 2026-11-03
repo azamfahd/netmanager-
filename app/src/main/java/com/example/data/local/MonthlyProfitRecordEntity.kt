@@ -16,5 +16,6 @@ data class MonthlyProfitRecordEntity(
     val soldCardsCount: Int = 0,
     val totalCardsCount: Int = 0,
     val topSellingProfile: String = "",
+    val totalBytesConsumed: Long = 0L,
     val lastUpdatedTimestamp: Long = System.currentTimeMillis()
 )
