@@ -65,11 +65,14 @@ jobs:
           elif [ -f "google-services.json" ]; then
             cp google-services.json "$TARGET"
             echo "Copied google-services.json from root to $TARGET"
+          elif [ -f "public/assets/aistudio/google-services__12__074a9eee.json" ]; then
+            cp public/assets/aistudio/google-services__12__074a9eee.json "$TARGET"
+            echo "Copied google-services.json from assets to $TARGET"
           elif [ -n "${{ secrets.FIREBASE_GOOGLE_SERVICES_JSON }}" ]; then
             echo "${{ secrets.FIREBASE_GOOGLE_SERVICES_JSON }}" > "$TARGET"
-            echo "Provisioned $TARGET from GitHub Secret."
+            echo "Provisioned $TARGET from secret."
           else
-            echo "Error: google-services.json is missing. Please ensure it is committed to the repository or added as a GitHub Secret (FIREBASE_GOOGLE_SERVICES_JSON)."
+            echo "Error: google-services.json is missing and no fallback found in root, assets, or secrets."
             exit 1
           fi
 
