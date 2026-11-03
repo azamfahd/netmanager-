@@ -824,14 +824,15 @@ class MainViewModel(
         allCardsHistory,
         detailedPackageProfitStats,
         database.appDao().getAllCardAssignments(),
-        batchHistory
-    ) { allCards, packageStats, assignments, batches ->
+        batchHistory,
+        database.appDao().getAllMonthlyProfitRecordsFlow()
+    ) { allCards, packageStats, assignments, batches, savedMonthlyRecords ->
         val now = System.currentTimeMillis()
         val monthNamesAr = listOf(
             "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
             "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"
         )
-
+        
         val pricingMap = packageStats.associateBy { it.profileName.lowercase() }
         val avgFallbackPrice = if (packageStats.isNotEmpty()) packageStats.map { it.salePrice }.average().takeIf { it > 0 } ?: 500.0 else 500.0
         val avgFallbackCost = if (packageStats.isNotEmpty()) packageStats.map { it.costPrice }.average().takeIf { it > 0 } ?: 200.0 else 200.0
@@ -898,7 +899,7 @@ class MainViewModel(
         val batchesByMonth = batches.groupBy { toMonthKey(it.createdAt) }
         val assignmentsByMonth = assignments.groupBy { toMonthKey(it.assignedAt) }
         val posSoldByMonth = assignments.filter { it.isSold }.groupBy { toMonthKey(it.soldAt ?: it.assignedAt) }
-        val savedRecordsByMonth = emptyMap<String, com.example.data.local.MonthlyProfitRecordEntity>()
+        val savedRecordsByMonth = savedMonthlyRecords.associateBy { it.monthKey }
 
         // 3. Discover ALL unique month keys across all data sources + at least 36 recent months
         val allMonthKeys = sortedSetOf<String>(Comparator.reverseOrder())

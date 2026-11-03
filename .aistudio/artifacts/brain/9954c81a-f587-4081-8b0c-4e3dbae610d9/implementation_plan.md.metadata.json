@@ -1,6 +1,6 @@
 {
-  "summary": "خطة عمل هندسية شاملة لحل مشكلة ثقل وتعليق التطبيق وتطوير محرك معالجة وفهرسة مبيعات كل الأشهر السابقة والسنوات من كروت المايكروتك وقاعدة البيانات المحلية بدون تجميد واجهة المستخدم.",
-  "updatedAt": "2026-11-03T18:47:19.521533602Z",
+  "summary": "Implementation plan for reviewing and improving cumulative monthly sales analytics, fixing profit/cost calculations, and restructuring monthly details display for clarity and accuracy.",
+  "updatedAt": "2026-11-03T20:13:28.913166826Z",
   "requestFeedback": true,
   "userFacing": true
 }

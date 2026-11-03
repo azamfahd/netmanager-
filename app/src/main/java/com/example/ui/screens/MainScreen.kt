@@ -26,6 +26,13 @@ import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
@@ -51,6 +58,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -334,66 +342,82 @@ fun MainScreen(
                 shadowElevation = 8.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
+                val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 6.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     AppTab.entries.forEach { tab ->
                         val isSelected = currentTab == tab
                         Surface(
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(16.dp),
                             color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
                             modifier = Modifier
-                                .clickable { currentTab = tab }
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable { 
+                                    if (currentTab != tab) {
+                                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                        currentTab = tab 
+                                    }
+                                }
                                 .testTag("nav_item_${tab.name.lowercase()}")
                         ) {
                             Column(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.Center
                             ) {
+                                val iconColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                
                                 if (tab == AppTab.ACTIVE_USERS && activeUsers.isNotEmpty()) {
                                     BadgedBox(badge = {
-                                        Badge { Text("${activeUsers.size}") }
+                                        Badge(
+                                            containerColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                                            contentColor = Color.White
+                                        ) { Text("${activeUsers.size}") }
                                     }) {
                                         Icon(
                                             tab.icon,
                                             contentDescription = tab.title,
-                                            tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(20.dp)
+                                            tint = iconColor,
+                                            modifier = Modifier.size(22.dp)
                                         )
                                     }
                                 } else if (tab == AppTab.NODES && networkNodes.isNotEmpty()) {
                                     BadgedBox(badge = {
-                                        Badge { Text("${networkNodes.count { it.isOnline }}") }
+                                        Badge(
+                                            containerColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                                            contentColor = Color.White
+                                        ) { Text("${networkNodes.count { it.isOnline }}") }
                                     }) {
                                         Icon(
                                             tab.icon,
                                             contentDescription = tab.title,
-                                            tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(20.dp)
+                                            tint = iconColor,
+                                            modifier = Modifier.size(22.dp)
                                         )
                                     }
                                 } else {
                                     Icon(
                                         tab.icon,
                                         contentDescription = tab.title,
-                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(20.dp)
+                                        tint = iconColor,
+                                        modifier = Modifier.size(22.dp)
                                     )
                                 }
 
-                                Spacer(modifier = Modifier.height(3.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
 
                                 Text(
                                     text = tab.title,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
                                     fontSize = 11.sp,
-                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = iconColor,
+                                    letterSpacing = 0.sp
                                 )
                             }
                         }
@@ -407,7 +431,17 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Offline Local Data Banner (شعار البيانات المحلية أوفلاين)
+            // Global Syncing Progress Indicator
+            val isSyncing = (connectionState as? ConnectionState.Connected)?.isSyncing == true
+            AnimatedVisibility(visible = isSyncing) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().height(2.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
+                )
+            }
+
+            // Offline Local Data Banner
             if (connectedState?.isOffline == true || connectedState?.isFromCache == true) {
                 Surface(
                     color = Color(0xFFFFF3E0),
@@ -554,74 +588,88 @@ fun MainScreen(
             }
 
             Box(modifier = Modifier.weight(1f)) {
-                when (currentTab) {
-                    AppTab.DASHBOARD -> {
-                        DashboardScreen(
-                            viewModel = viewModel,
-                            onNavigateToActiveUsers = { currentTab = AppTab.ACTIVE_USERS },
-                            onNavigateToCards = { currentTab = AppTab.CARDS },
-                            onNavigateToProfiles = { currentTab = AppTab.PROFILES },
-                            onOpenBatchGenerator = { showBatchGeneratorDialog = true },
-                            onOpenPrintScreen = {
-                                viewModel.setPrintableCards(viewModel.cards.value)
-                                isShowingPrintScreen = true
-                            },
-                            onNavigateToFinance = { currentTab = AppTab.FINANCE }
-                        )
-                    }
-                    AppTab.FINANCE -> {
-                        FinanceAnalyticsScreen(
-                            viewModel = viewModel,
-                            onNavigateToCards = { currentTab = AppTab.CARDS },
-                            onNavigateToPosAgents = { currentTab = AppTab.POS_AGENTS }
-                        )
-                    }
-                    AppTab.ACTIVE_USERS -> {
-                        ActiveUsersScreen(
-                            viewModel = viewModel,
-                            onOpenSessionDetail = { session ->
-                                selectedSessionForDetailScreen = session
-                            }
-                        )
-                    }
-                    AppTab.NODES -> {
-                        NetworkNodesScreen(
-                            viewModel = viewModel
-                        )
-                    }
-                    AppTab.CARDS -> {
-                        CardsScreen(
-                            viewModel = viewModel,
-                            onOpenBatchGenerator = {
-                                preselectedAgentIdForBatch = 0L
-                                showBatchGeneratorDialog = true
-                            },
-                            onOpenPrintScreen = { isShowingPrintScreen = true },
-                            onOpenSessionDetail = { session ->
-                                selectedSessionForDetailScreen = session
-                            }
-                        )
-                    }
-                    AppTab.POS_AGENTS -> {
-                        PosAgentsScreen(
-                            viewModel = viewModel,
-                            onOpenBatchGeneratorForAgent = { agent ->
-                                preselectedAgentIdForBatch = agent.id
-                                showBatchGeneratorDialog = true
-                            }
-                        )
-                    }
-                    AppTab.PROFILES -> {
-                        ProfilesScreen(
-                            viewModel = viewModel
-                        )
-                    }
-                    AppTab.TOOLS -> {
-                        NetworkToolsScreen(
-                            viewModel = viewModel,
-                            onOpenSystemEventLog = { isShowingSystemEventLogScreen = true },
-                            onTriggerSignIn = onTriggerSignIn
-                        )
+                AnimatedContent(
+                    targetState = currentTab,
+                    transitionSpec = {
+                        if (targetState.ordinal > initialState.ordinal) {
+                            (slideInHorizontally { width -> width } + fadeIn()).togetherWith(
+                                slideOutHorizontally { width -> -width } + fadeOut())
+                        } else {
+                            (slideInHorizontally { width -> -width } + fadeIn()).togetherWith(
+                                slideOutHorizontally { width -> width } + fadeOut())
+                        }
+                    },
+                    label = "TabTransition"
+                ) { targetTab ->
+                    when (targetTab) {
+                        AppTab.DASHBOARD -> {
+                            DashboardScreen(
+                                viewModel = viewModel,
+                                onNavigateToActiveUsers = { currentTab = AppTab.ACTIVE_USERS },
+                                onNavigateToCards = { currentTab = AppTab.CARDS },
+                                onNavigateToProfiles = { currentTab = AppTab.PROFILES },
+                                onOpenBatchGenerator = { showBatchGeneratorDialog = true },
+                                onOpenPrintScreen = {
+                                    viewModel.setPrintableCards(viewModel.cards.value)
+                                    isShowingPrintScreen = true
+                                },
+                                onNavigateToFinance = { currentTab = AppTab.FINANCE }
+                            )
+                        }
+                        AppTab.FINANCE -> {
+                            FinanceAnalyticsScreen(
+                                viewModel = viewModel,
+                                onNavigateToCards = { currentTab = AppTab.CARDS },
+                                onNavigateToPosAgents = { currentTab = AppTab.POS_AGENTS }
+                            )
+                        }
+                        AppTab.ACTIVE_USERS -> {
+                            ActiveUsersScreen(
+                                viewModel = viewModel,
+                                onOpenSessionDetail = { session ->
+                                    selectedSessionForDetailScreen = session
+                                }
+                            )
+                        }
+                        AppTab.NODES -> {
+                            NetworkNodesScreen(
+                                viewModel = viewModel
+                            )
+                        }
+                        AppTab.CARDS -> {
+                            CardsScreen(
+                                viewModel = viewModel,
+                                onOpenBatchGenerator = {
+                                    preselectedAgentIdForBatch = 0L
+                                    showBatchGeneratorDialog = true
+                                },
+                                onOpenPrintScreen = { isShowingPrintScreen = true },
+                                onOpenSessionDetail = { session ->
+                                    selectedSessionForDetailScreen = session
+                                }
+                            )
+                        }
+                        AppTab.POS_AGENTS -> {
+                            PosAgentsScreen(
+                                viewModel = viewModel,
+                                onOpenBatchGeneratorForAgent = { agent ->
+                                    preselectedAgentIdForBatch = agent.id
+                                    showBatchGeneratorDialog = true
+                                }
+                            )
+                        }
+                        AppTab.PROFILES -> {
+                            ProfilesScreen(
+                                viewModel = viewModel
+                            )
+                        }
+                        AppTab.TOOLS -> {
+                            NetworkToolsScreen(
+                                viewModel = viewModel,
+                                onOpenSystemEventLog = { isShowingSystemEventLogScreen = true },
+                                onTriggerSignIn = onTriggerSignIn
+                            )
+                        }
                     }
                 }
             }
