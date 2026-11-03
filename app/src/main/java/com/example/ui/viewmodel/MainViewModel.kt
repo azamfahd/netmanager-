@@ -859,14 +859,40 @@ class MainViewModel(
         val avgFallbackPrice = if (packageStats.isNotEmpty()) packageStats.map { it.salePrice }.average().takeIf { it > 0 } ?: 500.0 else 500.0
         val avgFallbackCost = if (packageStats.isNotEmpty()) packageStats.map { it.costPrice }.average().takeIf { it > 0 } ?: 200.0 else 200.0
 
-        // 1. Gather all genuine historical timestamps to discover network genesis
-        val validCardTs = allCards.mapNotNull { card ->
-            val ts = repository.getCardCreationTimestamp(card)
-            if (ts in 1577836800000L..now + 86400000L) ts else null
+        // 1. Pre-calculate effective timestamps and prices for all cards once
+        data class CardMeta(
+            val card: HotspotCard,
+            val timestamp: Long,
+            val salePrice: Double,
+            val costPrice: Double,
+            val isSoldOrActive: Boolean
+        )
+
+        val posAssignmentMap = assignments.associateBy { it.cardName }
+        val cardMetaList = allCards.map { card ->
+            val posAss = posAssignmentMap[card.name]
+            val cardTs = if (posAss != null && posAss.soldAt != null) {
+                posAss.soldAt!!
+            } else if (posAss != null && posAss.assignedAt > 0L) {
+                posAss.assignedAt
+            } else {
+                repository.getCardCreationTimestamp(card)
+            }
+
+            val matchingPkg = pricingMap[card.profile.lowercase()]
+            val parsedPrice = card.price.filter { it.isDigit() }.toDoubleOrNull()?.takeIf { it > 0 }
+            val posPrice = posAss?.priceAmount?.takeIf { it > 0 }
+            val sPrice = posPrice ?: parsedPrice ?: matchingPkg?.salePrice ?: avgFallbackPrice
+            val cPrice = matchingPkg?.costPrice ?: (sPrice * 0.4)
+            val hasActivity = card.isActive || card.isExpired || card.bytesIn > 0L ||
+                    (card.uptime.isNotBlank() && card.uptime != "0s") || (posAss?.isSold == true)
+
+            CardMeta(card, cardTs, sPrice, cPrice, hasActivity)
         }
-        val validBatchTs = batches.mapNotNull { b ->
-            if (b.createdAt in 1577836800000L..now + 86400000L) b.createdAt else null
-        }
+
+        // 2. Discover earliest genuine record timestamp across all sources
+        val validCardTs = cardMetaList.mapNotNull { it.timestamp.takeIf { ts -> ts in 1577836800000L..now + 86400000L } }
+        val validBatchTs = batches.mapNotNull { b -> b.createdAt.takeIf { it in 1577836800000L..now + 86400000L } }
         val validAssignTs = assignments.flatMap { a ->
             listOfNotNull(
                 a.assignedAt.takeIf { it in 1577836800000L..now + 86400000L },
@@ -874,7 +900,7 @@ class MainViewModel(
             )
         }
         val validSavedRecordTs = savedMonthlyRecords.mapNotNull { r ->
-            if (r.lastUpdatedTimestamp in 1577836800000L..now + 86400000L) r.lastUpdatedTimestamp else null
+            r.lastUpdatedTimestamp.takeIf { it in 1577836800000L..now + 86400000L }
         }
 
         val allTimestamps = validCardTs + validBatchTs + validAssignTs + validSavedRecordTs
@@ -889,7 +915,7 @@ class MainViewModel(
         val startMonth = startCal.get(java.util.Calendar.MONTH) // 0-based
 
         val totalMonthsSpan = ((currentYear - startYear) * 12 + (currentMonth - startMonth)).coerceAtLeast(0)
-        // Ensure at least 36 previous months (3 years) are scanned, and up to the entire lifetime of the network
+        // Ensure at least 36 previous months (3 full years) are scanned and displayed accurately
         val span = maxOf(36, totalMonthsSpan)
 
         data class SoldCardRecord(
@@ -928,22 +954,15 @@ class MainViewModel(
             mCal.set(java.util.Calendar.MILLISECOND, 999)
             val endOfM = mCal.timeInMillis
 
-            // A. Cards generated in this month
-            val cardsCreatedInM = allCards.filter {
-                val ts = repository.getCardCreationTimestamp(it)
-                ts in startOfM..endOfM
-            }
+            // A. Cards created or active in this specific month
+            val cardsInThisMonth = cardMetaList.filter { it.timestamp in startOfM..endOfM }
             val batchesInM = batches.filter { it.createdAt in startOfM..endOfM }
             val batchCardsCount = batchesInM.sumOf { it.cardCount }
             val assignmentsInM = assignments.filter { it.assignedAt in startOfM..endOfM }
 
-            val totalGenerated = if (isCurrent) {
-                maxOf(allCards.size, batchCardsCount, assignmentsInM.size, cardsCreatedInM.size)
-            } else {
-                maxOf(cardsCreatedInM.size, batchCardsCount, assignmentsInM.size)
-            }
+            val totalGenerated = maxOf(cardsInThisMonth.size, batchCardsCount, assignmentsInM.size)
 
-            // B. Precise Sold Cards Identification
+            // B. Precise Sold Cards Identification for this Month
             val soldItems = mutableListOf<SoldCardRecord>()
             val processedCardNames = mutableSetOf<String>()
 
@@ -958,25 +977,16 @@ class MainViewModel(
                 processedCardNames.add(a.cardName)
             }
 
-            // 2. Active, Expired, or Consumed Router Cards
-            val routerCardsToExamine = if (isCurrent) allCards else cardsCreatedInM
-            routerCardsToExamine.forEach { card ->
-                if (!processedCardNames.contains(card.name)) {
-                    val hasActivity = card.isActive || card.isExpired || card.bytesIn > 0L || (card.uptime.isNotBlank() && card.uptime != "0s")
-                    if (hasActivity) {
-                        val matchingPkg = pricingMap[card.profile.lowercase()]
-                        val parsedPrice = card.price.filter { it.isDigit() }.toDoubleOrNull()?.takeIf { it > 0 }
-                        val sPrice = parsedPrice ?: matchingPkg?.salePrice ?: avgFallbackPrice
-                        val cPrice = matchingPkg?.costPrice ?: (sPrice * 0.4)
-                        val sTs = repository.getCardCreationTimestamp(card)
-                        soldItems.add(SoldCardRecord(card.name, card.profile, sPrice, cPrice, sTs))
-                        processedCardNames.add(card.name)
-                    }
+            // 2. Router Cards active, expired, or consumed in this specific month
+            cardsInThisMonth.forEach { meta ->
+                if (!processedCardNames.contains(meta.card.name) && meta.isSoldOrActive) {
+                    soldItems.add(SoldCardRecord(meta.card.name, meta.card.profile, meta.salePrice, meta.costPrice, meta.timestamp))
+                    processedCardNames.add(meta.card.name)
                 }
             }
 
-            // 3. Batches created in past months that were sold
-            if (!isCurrent && batchesInM.isNotEmpty() && soldItems.isEmpty()) {
+            // 3. Batches created in this month that were sold
+            if (batchesInM.isNotEmpty() && soldItems.isEmpty()) {
                 batchesInM.forEach { b ->
                     val matchingPkg = pricingMap[b.profileName.lowercase()]
                     val bPrice = b.price.filter { it.isDigit() }.toDoubleOrNull()?.takeIf { it > 0 } ?: (matchingPkg?.salePrice ?: avgFallbackPrice)
@@ -987,7 +997,7 @@ class MainViewModel(
                 }
             }
 
-            // 4. Fallback to existing saved Room entity if router was cleared
+            // 4. Fallback to existing saved Room entity if router was cleared or cards archived
             val savedEntity = savedMonthlyRecords.find { it.monthKey == monthKey }
             val totalSold = if (soldItems.isNotEmpty()) {
                 soldItems.size
@@ -1115,29 +1125,6 @@ class MainViewModel(
                 0.0
             }
             item.copy(growthRatePercent = growth)
-        }
-
-        // Persist computed records to Room SQLite database in background
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val entities = finalMonths.map { m ->
-                    val topPkg = m.packageBreakdown.firstOrNull()?.packageName ?: ""
-                    com.example.data.local.MonthlyProfitRecordEntity(
-                        monthKey = m.monthKey,
-                        monthNameAr = m.monthName,
-                        year = m.monthKey.substringBefore("-").toIntOrNull() ?: 2026,
-                        month = m.monthKey.substringAfter("-").toIntOrNull() ?: 1,
-                        totalRevenue = m.totalRevenue,
-                        totalCost = m.totalCost,
-                        netProfit = m.netProfit,
-                        soldCardsCount = m.totalCardsSold,
-                        totalCardsCount = m.totalCardsGenerated,
-                        topSellingProfile = topPkg,
-                        lastUpdatedTimestamp = now
-                    )
-                }
-                database.appDao().insertOrUpdateMonthlyProfitRecords(entities)
-            } catch (_: Exception) {}
         }
 
         finalMonths
@@ -2188,8 +2175,9 @@ class MainViewModel(
         stopAutoRefresh()
         refreshJob = viewModelScope.launch {
             while (isActive && _autoRefresh.value) {
-                delay(4000)
                 val currentConn = _connectionState.value
+                val pollDelay = if (currentConn is ConnectionState.Connected && currentConn.isOffline) 15000L else 4000L
+                delay(pollDelay)
                 if (currentConn is ConnectionState.Connected) {
                     if (currentConn.isDemo) {
                         repository.refreshData()

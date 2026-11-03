@@ -40,6 +40,7 @@ import com.example.data.model.UpdateCheckState
 import com.example.ui.components.AppUpdateDialog
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -406,6 +407,72 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            // Offline Local Data Banner (شعار البيانات المحلية أوفلاين)
+            if (connectedState?.isOffline == true || connectedState?.isFromCache == true) {
+                Surface(
+                    color = Color(0xFFFFF3E0),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFFFFB74D)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                        .testTag("offline_local_data_badge")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFFFE0B2)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.WifiOff,
+                                    contentDescription = null,
+                                    tint = Color(0xFFE65100),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "⚡ وضع البيانات المحلية (أوفلاين)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = Color(0xFFBF360C)
+                                )
+                                Text(
+                                    text = "يتم عرض الكروت والبيانات المحفوظة محلياً على جهازك • جاهز للعمل والطباعة",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFFE65100)
+                                )
+                            }
+                        }
+                        Button(
+                            onClick = { viewModel.refreshData() },
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE65100)),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(12.dp), tint = Color.White)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("إعادة المحاولة", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+                }
+            }
+
             // App Update Notification Banner (إشعار التحديث الجديد المباشر من GitHub Releases)
             if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
                 val updateState = updateCheckState as UpdateCheckState.UpdateAvailable
