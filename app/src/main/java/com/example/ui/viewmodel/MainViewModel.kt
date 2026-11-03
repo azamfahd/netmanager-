@@ -117,35 +117,7 @@ class MainViewModel(
             repository.initializeFromLocalDatabase()
         }
 
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            monthlySalesList.collectLatest { list ->
-                if (list.isNotEmpty()) {
-                    val toSave = list.filter { it.totalCardsGenerated > 0 || it.totalCardsSold > 0 || it.totalRevenue > 0.0 }.map { m ->
-                        val parts = m.monthKey.split("-")
-                        val y = parts.getOrNull(0)?.toIntOrNull() ?: 2026
-                        val mo = parts.getOrNull(1)?.toIntOrNull() ?: 1
-                        val topProfile = m.packageBreakdown.firstOrNull()?.packageName ?: ""
-                        com.example.data.local.MonthlyProfitRecordEntity(
-                            monthKey = m.monthKey,
-                            monthNameAr = m.monthName,
-                            year = y,
-                            month = mo,
-                            totalRevenue = m.totalRevenue,
-                            totalCost = m.totalCost,
-                            netProfit = m.netProfit,
-                            soldCardsCount = m.totalCardsSold,
-                            totalCardsCount = m.totalCardsGenerated,
-                            topSellingProfile = topProfile,
-                            totalBytesConsumed = m.totalBytesConsumed,
-                            lastUpdatedTimestamp = System.currentTimeMillis()
-                        )
-                    }
-                    if (toSave.isNotEmpty()) {
-                        database.appDao().insertOrUpdateMonthlyProfitRecords(toSave)
-                    }
-                }
-            }
-        }
+
 
         viewModelScope.launch {
             delay(2500)
@@ -852,9 +824,8 @@ class MainViewModel(
         allCardsHistory,
         detailedPackageProfitStats,
         database.appDao().getAllCardAssignments(),
-        batchHistory,
-        database.appDao().getAllMonthlyProfitRecordsFlow()
-    ) { allCards, packageStats, assignments, batches, savedMonthlyRecords ->
+        batchHistory
+    ) { allCards, packageStats, assignments, batches ->
         val now = System.currentTimeMillis()
         val monthNamesAr = listOf(
             "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
@@ -927,7 +898,7 @@ class MainViewModel(
         val batchesByMonth = batches.groupBy { toMonthKey(it.createdAt) }
         val assignmentsByMonth = assignments.groupBy { toMonthKey(it.assignedAt) }
         val posSoldByMonth = assignments.filter { it.isSold }.groupBy { toMonthKey(it.soldAt ?: it.assignedAt) }
-        val savedRecordsByMonth = savedMonthlyRecords.associateBy { it.monthKey }
+        val savedRecordsByMonth = emptyMap<String, com.example.data.local.MonthlyProfitRecordEntity>()
 
         // 3. Discover ALL unique month keys across all data sources + at least 36 recent months
         val allMonthKeys = sortedSetOf<String>(Comparator.reverseOrder())
