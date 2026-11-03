@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for reviewing and improving cumulative monthly sales analytics, fixing profit/cost calculations, and restructuring monthly details display for clarity and accuracy.",
-  "updatedAt": "2026-11-03T20:13:28.913166826Z",
+  "summary": "خطة العمل المحدثة وإتمام تنفيذ طابور المهام المحلي (Room Task Queue) مع آلية التراجع الأسي (Exponential Backoff) لإعادة المحاولة ومزامنة تعديل وحذف الكروت تلقائياً فور استعادة الاتصال بالراوتر.",
+  "updatedAt": "2026-11-02T20:47:10.525575509Z",
   "requestFeedback": true,
   "userFacing": true
 }

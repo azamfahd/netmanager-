@@ -50,23 +50,6 @@ class MikrotikRepository(
 ) {
 
     private val cardTimestampCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private var lastSyncedCardsHash = 0
-    private var lastSyncedProfilesHash = 0
-    private var lastSyncedBindingsHash = 0
-
-    private fun normalizeDigits(text: String): String {
-        if (text.isEmpty()) return ""
-        val sb = StringBuilder(text.length)
-        for (ch in text) {
-            val d = when (ch) {
-                '٠' -> '0'; '١' -> '1'; '٢' -> '2'; '٣' -> '3'; '٤' -> '4'
-                '٥' -> '5'; '٦' -> '6'; '٧' -> '7'; '٨' -> '8'; '٩' -> '9'
-                else -> ch
-            }
-            sb.append(d)
-        }
-        return sb.toString()
-    }
 
     fun getCardCreationTimestamp(card: HotspotCard): Long {
         val cached = cardTimestampCache[card.name]
@@ -78,223 +61,42 @@ class MikrotikRepository(
     }
 
     private fun resolveCardTimestamp(card: HotspotCard): Long {
-        val rawCombined = "${card.id} ${card.name} ${card.comment} ${card.profile}"
-        val textToScan = normalizeDigits(rawCombined)
-
-        // 1. Try numeric Epoch timestamp in ID or Name or Comment (10 or 13 digits)
-        val match = Regex("""(?:gen_|card_|c_|tum_|um_|batch_|b_)?\b(1[5-8]\d{8}|1[5-8]\d{11})\b""").find(textToScan)
+        val id = card.id
+        val match = Regex("""(?:gen_|card_|c_|tum_|um_)?(\d{10,13})""").find(id)
         if (match != null) {
             val numStr = match.groupValues[1]
             val parsed = if (numStr.length == 10) numStr.toLongOrNull()?.times(1000L) else numStr.toLongOrNull()
-            if (parsed != null && parsed in 1546300800000L..2082758400000L) { // from 2019 to 2035
+            if (parsed != null && parsed in 1577836800000L..2082758400000L) {
                 return parsed
             }
         }
 
-        if (textToScan.isNotBlank()) {
-            // 2. Arabic Month Names: e.g. "15 نوفمبر 2023" or "يناير 2024" or "مارس 2025" or "دفعة مايو 2024"
-            val arMonthMap = mapOf(
-                "يناير" to 0, "فبراير" to 1, "مارس" to 2, "ابريل" to 3, "أبريل" to 3,
-                "مايو" to 4, "يونيو" to 5, "يوليو" to 6, "اغسطس" to 7, "أغسطس" to 7,
-                "سبتمبر" to 8, "اكتوبر" to 9, "أكتوبر" to 9, "نوفمبر" to 10, "ديسمبر" to 11
-            )
-            for ((arName, mIndex) in arMonthMap) {
-                if (textToScan.contains(arName)) {
-                    val yearMatch = Regex("""\b(201[89]|202[0-9]|203[0-9])\b""").find(textToScan)
-                    val dayMatch = Regex("""\b(\d{1,2})\b""").find(textToScan)
-                    val y = yearMatch?.value?.toIntOrNull() ?: java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
-                    val d = dayMatch?.value?.toIntOrNull()?.coerceIn(1, 28) ?: 15
+        val comment = card.comment
+        if (comment.isNotBlank()) {
+            val dateMatch = Regex("""(\d{4})[-/](\d{1,2})[-/](\d{1,2})""").find(comment)
+            if (dateMatch != null) {
+                try {
+                    val (y, m, d) = dateMatch.destructured
                     val cal = java.util.Calendar.getInstance()
-                    cal.set(y, mIndex, d, 12, 0, 0)
+                    cal.set(y.toInt(), m.toInt() - 1, d.toInt(), 12, 0, 0)
                     return cal.timeInMillis
+                } catch (_: Exception) {}
+            }
+            val epochMatch = Regex("""\b(17\d{8,11})\b""").find(comment)
+            if (epochMatch != null) {
+                val num = epochMatch.value.toLongOrNull()
+                if (num != null) {
+                    val ms = if (epochMatch.value.length == 10) num * 1000L else num
+                    if (ms in 1577836800000L..2082758400000L) return ms
                 }
-            }
-
-            // 3. RouterOS Standard Date with English Month: e.g. "oct/14/2023 15:30:00" or "jan-25-2024" or "15-nov-2023"
-            val enMonthRegex = Regex("""(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-/. ](\d{1,2})[-/. ](201[89]|202[0-9]|203[0-9])\b""")
-            val enMatch = enMonthRegex.find(textToScan)
-            if (enMatch != null) {
-                try {
-                    val mStr = enMatch.groupValues[1].lowercase()
-                    val d = enMatch.groupValues[2].toInt()
-                    val y = enMatch.groupValues[3].toInt()
-                    val mIndex = listOf("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec").indexOf(mStr)
-                    if (mIndex in 0..11 && y in 2018..2035 && d in 1..31) {
-                        val cal = java.util.Calendar.getInstance()
-                        cal.set(y, mIndex, d, 12, 0, 0)
-                        return cal.timeInMillis
-                    }
-                } catch (_: Exception) {}
-            }
-
-            // 4. Inverted Month Name: "15-nov-2023" or "25/jan/2024"
-            val enInvertedMatch = Regex("""(?i)\b(\d{1,2})[-/. ](jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-/. ](201[89]|202[0-9]|203[0-9])\b""").find(textToScan)
-            if (enInvertedMatch != null) {
-                try {
-                    val d = enInvertedMatch.groupValues[1].toInt()
-                    val mStr = enInvertedMatch.groupValues[2].lowercase()
-                    val y = enInvertedMatch.groupValues[3].toInt()
-                    val mIndex = listOf("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec").indexOf(mStr)
-                    if (mIndex in 0..11 && y in 2018..2035 && d in 1..31) {
-                        val cal = java.util.Calendar.getInstance()
-                        cal.set(y, mIndex, d, 12, 0, 0)
-                        return cal.timeInMillis
-                    }
-                } catch (_: Exception) {}
-            }
-
-            // 5. Arabic Batch/Month with number: e.g. "دفعة شهر 5", "شهر 5 2024", "دفعة 5-2024", "دفعة 2024/5", "كرت شهر 10"
-            val arBatchMonthRegex = Regex("""(?i)(?:دفعة|دفعه|شهر|كرت|ش)\s*(?:شهر\s*)?([1-9]|0[1-9]|1[0-2])\b(?:\s*[-/,\s]\s*(201[89]|202[0-9]|203[0-9]|1[89]|2[0-9]|3[0-5]))?""")
-            val arBatchMatch = arBatchMonthRegex.find(textToScan)
-            if (arBatchMatch != null) {
-                val m = arBatchMatch.groupValues[1].toInt()
-                val rawYear = arBatchMatch.groupValues.getOrNull(2)?.toIntOrNull()
-                val y = if (rawYear != null) {
-                    if (rawYear < 100) 2000 + rawYear else rawYear
-                } else {
-                    java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
-                }
-                val cal = java.util.Calendar.getInstance()
-                cal.set(y, m - 1, 15, 12, 0, 0)
-                return cal.timeInMillis
-            }
-
-            // 6. Standard ISO: YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
-            val isoMatch = Regex("""\b(201[89]|202[0-9]|203[0-9])[-/.](\d{1,2})[-/.](\d{1,2})\b""").find(textToScan)
-            if (isoMatch != null) {
-                try {
-                    val (y, m, d) = isoMatch.destructured
-                    val cal = java.util.Calendar.getInstance()
-                    cal.set(y.toInt(), m.toInt() - 1, d.toInt().coerceIn(1, 31), 12, 0, 0)
-                    return cal.timeInMillis
-                } catch (_: Exception) {}
-            }
-
-            // 7. Standard Day First: DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
-            val dmyMatch = Regex("""\b(\d{1,2})[-/.](\d{1,2})[-/.](201[89]|202[0-9]|203[0-9])\b""").find(textToScan)
-            if (dmyMatch != null) {
-                try {
-                    val (d, m, y) = dmyMatch.destructured
-                    val cal = java.util.Calendar.getInstance()
-                    cal.set(y.toInt(), m.toInt() - 1, d.toInt().coerceIn(1, 31), 12, 0, 0)
-                    return cal.timeInMillis
-                } catch (_: Exception) {}
-            }
-
-            // 8. Mikhmon Voucher Comments: e.g. "vc-100-2024-05", "vc-10-2023-11-20", "vc-20240215", "vc-24-05"
-            val mikhmonMatch = Regex("""(?i)vc-[^-]+-(201[89]|202[0-9]|203[0-9]|2[0-9])[-_]?(\d{1,2})?[-_]?(\d{1,2})?""").find(textToScan)
-            if (mikhmonMatch != null) {
-                try {
-                    val rawY = mikhmonMatch.groupValues[1].toInt()
-                    val y = if (rawY < 100) 2000 + rawY else rawY
-                    val m = mikhmonMatch.groupValues.getOrNull(2)?.toIntOrNull() ?: 1
-                    val d = mikhmonMatch.groupValues.getOrNull(3)?.toIntOrNull() ?: 15
-                    val cal = java.util.Calendar.getInstance()
-                    cal.set(y, (m - 1).coerceIn(0, 11), d.coerceIn(1, 28), 12, 0, 0)
-                    return cal.timeInMillis
-                } catch (_: Exception) {}
-            }
-
-            // 9. Compact 8-digit Date: YYYYMMDD (e.g. 20231120 or 20240215)
-            val compactDateMatch = Regex("""\b(201[89]|202[0-9]|203[0-9])(0[1-9]|1[0-2])([0-2][0-9]|3[01])\b""").find(textToScan)
-            if (compactDateMatch != null) {
-                try {
-                    val y = compactDateMatch.groupValues[1].toInt()
-                    val m = compactDateMatch.groupValues[2].toInt()
-                    val d = compactDateMatch.groupValues[3].toInt()
-                    val cal = java.util.Calendar.getInstance()
-                    cal.set(y, m - 1, d, 12, 0, 0)
-                    return cal.timeInMillis
-                } catch (_: Exception) {}
-            }
-
-            // 10. Compact 6-digit Year-Month: YYYYMM (e.g. 202405, 202311, 202502, 202610)
-            val yyyymmMatch = Regex("""\b(201[89]|202[0-9]|203[0-9])(0[1-9]|1[0-2])\b""").find(textToScan)
-            if (yyyymmMatch != null) {
-                try {
-                    val y = yyyymmMatch.groupValues[1].toInt()
-                    val m = yyyymmMatch.groupValues[2].toInt()
-                    val cal = java.util.Calendar.getInstance()
-                    cal.set(y, m - 1, 15, 12, 0, 0)
-                    return cal.timeInMillis
-                } catch (_: Exception) {}
-            }
-
-            // 11. Year-Month Format: YYYY-MM or YYYY-M or YYYY/MM or YYYY/M (e.g. 2024-5, 2024/05, 2023_11)
-            val ymMatch = Regex("""\b(201[89]|202[0-9]|203[0-9])[-_/](1[0-2]|0?[1-9])\b""").find(textToScan)
-            if (ymMatch != null) {
-                try {
-                    val y = ymMatch.groupValues[1].toInt()
-                    val m = ymMatch.groupValues[2].toInt()
-                    val cal = java.util.Calendar.getInstance()
-                    cal.set(y, m - 1, 15, 12, 0, 0)
-                    return cal.timeInMillis
-                } catch (_: Exception) {}
-            }
-
-            // 12. Month-Year Format: MM/YYYY or M/YYYY or MM-YYYY or M-YYYY (e.g. 5/2024, 11/2023, 03-2024)
-            val myMatch = Regex("""\b(1[0-2]|0?[1-9])[-_/](201[89]|202[0-9]|203[0-9])\b""").find(textToScan)
-            if (myMatch != null) {
-                try {
-                    val m = myMatch.groupValues[1].toInt()
-                    val y = myMatch.groupValues[2].toInt()
-                    val cal = java.util.Calendar.getInstance()
-                    cal.set(y, m - 1, 15, 12, 0, 0)
-                    return cal.timeInMillis
-                } catch (_: Exception) {}
-            }
-
-            // 13. Two-Digit Year Date: DD/MM/YY or DD-MM-YY (e.g. 15/03/24, 20-11-23)
-            val dmy2Match = Regex("""\b(\d{1,2})[-/.](\d{1,2})[-/.](1[89]|2[0-9]|3[0-5])\b""").find(textToScan)
-            if (dmy2Match != null) {
-                try {
-                    val d = dmy2Match.groupValues[1].toInt()
-                    val m = dmy2Match.groupValues[2].toInt()
-                    val y = 2000 + dmy2Match.groupValues[3].toInt()
-                    if (m in 1..12 && d in 1..31) {
-                        val cal = java.util.Calendar.getInstance()
-                        cal.set(y, m - 1, d, 12, 0, 0)
-                        return cal.timeInMillis
-                    }
-                } catch (_: Exception) {}
-            }
-
-            // 14. Batch Tag with Year/Month: e.g. b202401, b_2023_11, b2402, batch2403, b24-05
-            val batchYearMonth = Regex("""(?i)\bb(?:atch)?_?(?:(201[89]|202[0-9]|203[0-9])|(2[0-9]))[-_]?(0[1-9]|1[0-2])\b""").find(textToScan)
-            if (batchYearMonth != null) {
-                try {
-                    val fullY = batchYearMonth.groupValues[1].toIntOrNull()
-                    val shortY = batchYearMonth.groupValues[2].toIntOrNull()
-                    val y = fullY ?: (2000 + (shortY ?: 24))
-                    val m = batchYearMonth.groupValues[3].toInt()
-                    val cal = java.util.Calendar.getInstance()
-                    cal.set(y, m - 1, 15, 12, 0, 0)
-                    return cal.timeInMillis
-                } catch (_: Exception) {}
-            }
-
-            // 15. Card Name Prefix with YYMM or YYYYMM (e.g. "24059812", "23110291", "2024051029")
-            val cardNameNorm = normalizeDigits(card.name.trim())
-            val namePrefixMatch = Regex("""^(?:b|vc|c|u)?(201[89]|202[0-9]|203[0-9]|2[0-9])(0[1-9]|1[0-2])\d{3,}$""").find(cardNameNorm)
-            if (namePrefixMatch != null) {
-                try {
-                    val rawY = namePrefixMatch.groupValues[1].toInt()
-                    val y = if (rawY < 100) 2000 + rawY else rawY
-                    val m = namePrefixMatch.groupValues[2].toInt()
-                    val cal = java.util.Calendar.getInstance()
-                    cal.set(y, m - 1, 15, 12, 0, 0)
-                    return cal.timeInMillis
-                } catch (_: Exception) {}
             }
         }
 
-        // 16. Fallback: Deduce from Uptime if card has been active in the past
         val uptimeSec = parseUptimeToSeconds(card.uptime)
         if (uptimeSec > 0L) {
-            return (System.currentTimeMillis() - (uptimeSec * 1000L)).coerceAtLeast(1546300800000L)
+            return System.currentTimeMillis() - (uptimeSec * 1000L)
         }
 
-        // 17. Default to current time for completely undated new cards
         return System.currentTimeMillis()
     }
 
@@ -308,24 +110,10 @@ class MikrotikRepository(
     suspend fun syncCardsToRoom(cards: List<HotspotCard>) {
         val dao = appDao ?: return
         try {
-            val contentHash = cards.size * 31 + cards.take(15).sumOf { it.name.hashCode() }
-            if (contentHash == lastSyncedCardsHash && cards.isNotEmpty()) {
-                return // Skip redundant DB thrashing
-            }
-            lastSyncedCardsHash = contentHash
-
             val existing = dao.getAllLocalCardsSync().associateBy { it.name }
-            val now = System.currentTimeMillis()
             val entities = cards.map { card ->
                 val prevEntity = existing[card.name]
-                val resolvedTs = getCardCreationTimestamp(card)
-                // If resolvedTs found an explicit historical date (older than 24h from now),
-                // prioritize that explicit historical date over any stale 'now' fallback previously saved in DB!
-                val createdTs = if (resolvedTs < now - 86400000L) {
-                    resolvedTs
-                } else {
-                    prevEntity?.createdTimestamp?.takeIf { it > 0L } ?: resolvedTs
-                }
+                val createdTs = prevEntity?.createdTimestamp?.takeIf { it > 0L } ?: getCardCreationTimestamp(card)
                 cardTimestampCache[card.name] = createdTs
                 com.example.data.local.LocalCardEntity.fromHotspotCard(
                     card = card,
@@ -334,60 +122,6 @@ class MikrotikRepository(
                 )
             }
             dao.insertOrUpdateLocalCards(entities)
-        } catch (_: Exception) {}
-    }
-
-    suspend fun syncProfilesToRoom(profiles: List<HotspotProfile>) {
-        val dao = appDao ?: return
-        try {
-            val hash = profiles.size * 31 + profiles.sumOf { it.name.hashCode() }
-            if (hash == lastSyncedProfilesHash && profiles.isNotEmpty()) return
-            lastSyncedProfilesHash = hash
-
-            val entities = profiles.map { com.example.data.local.LocalProfileEntity.fromHotspotProfile(it) }
-            dao.insertOrUpdateLocalProfiles(entities)
-        } catch (_: Exception) {}
-    }
-
-    suspend fun syncIpBindingsToRoom(bindings: List<IpBinding>) {
-        val dao = appDao ?: return
-        try {
-            val hash = bindings.size * 31 + bindings.sumOf { it.macAddress.hashCode() }
-            if (hash == lastSyncedBindingsHash && bindings.isNotEmpty()) return
-            lastSyncedBindingsHash = hash
-
-            val entities = bindings.map { com.example.data.local.LocalIpBindingEntity.fromIpBinding(it) }
-            dao.insertOrUpdateLocalIpBindings(entities)
-        } catch (_: Exception) {}
-    }
-
-    suspend fun syncSessionsToRoom(sessions: List<com.example.data.model.UserSessionRecord>) {
-        val dao = appDao ?: return
-        try {
-            val entities = sessions.map { s ->
-                com.example.data.local.SessionArchiveEntity(
-                    sessionId = s.id,
-                    username = s.username,
-                    ipAddress = s.ipAddress,
-                    macAddress = s.macAddress,
-                    loginTime = s.loginTime,
-                    logoutTime = s.logoutTime,
-                    duration = s.duration,
-                    bytesIn = s.bytesIn,
-                    bytesOut = s.bytesOut,
-                    totalBytes = s.totalBytes,
-                    terminateReason = s.terminateReason,
-                    profile = s.profile,
-                    price = s.price,
-                    isOnline = s.isOnline,
-                    deviceBrand = s.deviceInfo.brand,
-                    deviceModel = s.deviceInfo.modelName,
-                    nodeName = s.nodeName,
-                    timestamp = System.currentTimeMillis(),
-                    isQuotaExhausted = s.isQuotaExhausted
-                )
-            }
-            dao.insertOrUpdateSessions(entities)
         } catch (_: Exception) {}
     }
 
@@ -585,34 +319,17 @@ class MikrotikRepository(
         val sampleCards = mutableListOf<HotspotCard>()
         val sampleProfiles = _profiles.value
 
-        // October 2026
-        sampleCards.add(HotspotCard("c1", "784912", "784912", sampleProfiles[1].name, uptime = "2h 15m", bytesIn = 145 * 1024 * 1024L, bytesOut = 620 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي", comment = "vc-500-2026-10-15 | دفعة شهر 10"))
-        sampleCards.add(HotspotCard("c2", "319405", "319405", sampleProfiles[0].name, uptime = "42m", bytesIn = 35 * 1024 * 1024L, bytesOut = 280 * 1024 * 1024L, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي", comment = "vc-200-2026-10-02 | دفعة شهر 10"))
+        sampleCards.add(HotspotCard("c1", "784912", "784912", sampleProfiles[1].name, uptime = "2h 15m", bytesIn = 145 * 1024 * 1024L, bytesOut = 620 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي"))
+        sampleCards.add(HotspotCard("c2", "319405", "319405", sampleProfiles[0].name, uptime = "42m", bytesIn = 35 * 1024 * 1024L, bytesOut = 280 * 1024 * 1024L, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي"))
+        sampleCards.add(HotspotCard("c3", "849201", "849201", sampleProfiles[2].name, uptime = "1d 4h", bytesIn = 420 * 1024 * 1024L, bytesOut = 2450 * 1024 * 1024L, limitUptime = "7d", limitBytesTotal = 10240 * 1024 * 1024L, price = "2000 ر.ي"))
+        sampleCards.add(HotspotCard("c4", "651829", "651829", sampleProfiles[1].name, uptime = "5h 10m", bytesIn = 80 * 1024 * 1024L, bytesOut = 890 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي"))
 
-        // September 2026
-        sampleCards.add(HotspotCard("c3", "849201", "849201", sampleProfiles[2].name, uptime = "1d 4h", bytesIn = 420 * 1024 * 1024L, bytesOut = 2450 * 1024 * 1024L, limitUptime = "7d", limitBytesTotal = 10240 * 1024 * 1024L, price = "2000 ر.ي", comment = "vc-2000-2026-09-18 | دفعة شهر 9"))
-        sampleCards.add(HotspotCard("c4", "651829", "651829", sampleProfiles[1].name, uptime = "5h 10m", bytesIn = 80 * 1024 * 1024L, bytesOut = 890 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي", comment = "vc-500-2026-09-05 | دفعة شهر 9"))
+        sampleCards.add(HotspotCard("c5", "492018", "492018", sampleProfiles[1].name, uptime = "0s", bytesIn = 0, bytesOut = 0, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي"))
+        sampleCards.add(HotspotCard("c6", "910283", "910283", sampleProfiles[1].name, uptime = "0s", bytesIn = 0, bytesOut = 0, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي"))
+        sampleCards.add(HotspotCard("c7", "182940", "182940", sampleProfiles[0].name, uptime = "0s", bytesIn = 0, bytesOut = 0, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي"))
+        sampleCards.add(HotspotCard("c8", "502914", "502914", sampleProfiles[2].name, uptime = "0s", bytesIn = 0, bytesOut = 0, limitUptime = "7d", limitBytesTotal = 10240 * 1024 * 1024L, price = "2000 ر.ي"))
 
-        // August 2026
-        sampleCards.add(HotspotCard("c5", "492018", "492018", sampleProfiles[1].name, uptime = "0s", bytesIn = 0, bytesOut = 0, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي", comment = "vc-500-2026-08-20 | دفعة شهر 8"))
-        sampleCards.add(HotspotCard("c6", "910283", "910283", sampleProfiles[1].name, uptime = "12h", bytesIn = 300 * 1024 * 1024L, bytesOut = 1200 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي", comment = "vc-500-2026-08-11 | دفعة شهر 8"))
-
-        // July 2026
-        sampleCards.add(HotspotCard("c7", "182940", "182940", sampleProfiles[0].name, uptime = "1h", bytesIn = 40 * 1024 * 1024L, bytesOut = 320 * 1024 * 1024L, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي", comment = "vc-200-2026-07-25 | دفعة شهر 7"))
-
-        // June 2026
-        sampleCards.add(HotspotCard("c8", "502914", "502914", sampleProfiles[2].name, uptime = "4d", bytesIn = 800 * 1024 * 1024L, bytesOut = 4500 * 1024 * 1024L, limitUptime = "7d", limitBytesTotal = 10240 * 1024 * 1024L, price = "2000 ر.ي", comment = "vc-2000-2026-06-14 | دفعة شهر 6"))
-
-        // May 2026
-        sampleCards.add(HotspotCard("c9", "390124", "390124", sampleProfiles[0].name, uptime = "1h", bytesIn = 95 * 1024 * 1024L, bytesOut = 415 * 1024 * 1024L, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي", comment = "vc-200-2026-05-10 | دفعة شهر 5"))
-
-        // Historical Months (2026-04, 2026-03, 2026-02, 2026-01, 2025-12, 2025-11)
-        sampleCards.add(HotspotCard("c10", "260401", "260401", sampleProfiles[1].name, uptime = "8h", bytesIn = 210 * 1024 * 1024L, bytesOut = 1100 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي", comment = "vc-500-2026-04-12 | دفعة شهر 4"))
-        sampleCards.add(HotspotCard("c11", "260315", "260315", sampleProfiles[3].name, uptime = "20d", bytesIn = 3500 * 1024 * 1024L, bytesOut = 18500 * 1024 * 1024L, limitUptime = "30d", limitBytesTotal = 30720 * 1024 * 1024L, price = "6000 ر.ي", comment = "vc-6000-2026-03-05 | دفعة شهر 3"))
-        sampleCards.add(HotspotCard("c12", "260220", "260220", sampleProfiles[1].name, uptime = "6h", bytesIn = 150 * 1024 * 1024L, bytesOut = 750 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي", comment = "vc-500-2026-02-18 | دفعة شهر 2"))
-        sampleCards.add(HotspotCard("c13", "260110", "260110", sampleProfiles[2].name, uptime = "5d", bytesIn = 950 * 1024 * 1024L, bytesOut = 6200 * 1024 * 1024L, limitUptime = "7d", limitBytesTotal = 10240 * 1024 * 1024L, price = "2000 ر.ي", comment = "vc-2000-2026-01-22 | دفعة شهر 1"))
-        sampleCards.add(HotspotCard("c14", "251218", "251218", sampleProfiles[1].name, uptime = "10h", bytesIn = 320 * 1024 * 1024L, bytesOut = 1400 * 1024 * 1024L, limitUptime = "1d", limitBytesTotal = 2048 * 1024 * 1024L, price = "500 ر.ي", comment = "vc-500-2025-12-15 | دفعة ديسمبر 2025"))
-        sampleCards.add(HotspotCard("c15", "251105", "251105", sampleProfiles[0].name, uptime = "45m", bytesIn = 50 * 1024 * 1024L, bytesOut = 310 * 1024 * 1024L, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي", comment = "vc-200-2025-11-20 | دفعة نوفمبر 2025"))
+        sampleCards.add(HotspotCard("c9", "390124", "390124", sampleProfiles[0].name, uptime = "1h", bytesIn = 95 * 1024 * 1024L, bytesOut = 415 * 1024 * 1024L, limitUptime = "1h", limitBytesTotal = 500 * 1024 * 1024L, price = "200 ر.ي"))
 
         _cards.value = sampleCards
 
@@ -1395,7 +1112,6 @@ class MikrotikRepository(
                 if (liveProfiles.isNotEmpty() || _profiles.value.isEmpty()) {
                     _profiles.value = liveProfiles
                 }
-                syncProfilesToRoom(liveProfiles)
             }
             val bindResult = routerOsApiClient.getIpBindings()
             if (bindResult.isSuccess) {
@@ -1403,7 +1119,6 @@ class MikrotikRepository(
                 if (liveBindings.isNotEmpty() || _ipBindings.value.isEmpty()) {
                     _ipBindings.value = liveBindings
                 }
-                syncIpBindingsToRoom(liveBindings)
             }
 
             // 9. Fetch Interfaces & Neighbors for Per-Node Distribution
@@ -1878,7 +1593,6 @@ class MikrotikRepository(
 
                     if (profList.isNotEmpty()) {
                         _profiles.value = profList
-                        syncProfilesToRoom(profList)
                     }
                 }
 
@@ -1906,7 +1620,6 @@ class MikrotikRepository(
                     }
                     if (bindList.isNotEmpty()) {
                         _ipBindings.value = bindList
-                        syncIpBindingsToRoom(bindList)
                     }
                 }
 
@@ -2477,11 +2190,6 @@ class MikrotikRepository(
         }
 
         _userSessions.value = sessionList
-        
-        // Persist every session seen to Room for historical retention
-        CoroutineScope(Dispatchers.IO).launch {
-            syncSessionsToRoom(sessionList)
-        }
 
         // 6. Activity events log strictly from real active users
         val eventsList = mutableListOf<com.example.data.model.UserActivityEvent>()

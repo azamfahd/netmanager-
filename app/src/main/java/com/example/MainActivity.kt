@@ -34,7 +34,7 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels {
         val database = AppDatabase.getInstance(applicationContext)
-        val db = FirebaseFirestore.getInstance()
+        val db = FirebaseFirestore.getInstance(getString(R.string.firestore_database_id))
         val repository = MikrotikRepository(db, database.appDao())
         MainViewModelFactory(repository, database, db, applicationContext)
     }

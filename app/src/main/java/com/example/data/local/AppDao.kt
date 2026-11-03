@@ -286,28 +286,4 @@ interface AppDao {
 
     @Query("DELETE FROM router_task_queue")
     suspend fun clearAllTasks()
-
-    // ==========================================
-    // Local Profiles Persistence
-    // ==========================================
-    @Query("SELECT * FROM local_profiles ORDER BY name ASC")
-    fun getAllLocalProfilesFlow(): Flow<List<LocalProfileEntity>>
-
-    @Query("SELECT * FROM local_profiles ORDER BY name ASC")
-    suspend fun getAllLocalProfilesSync(): List<LocalProfileEntity>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertOrUpdateLocalProfiles(profiles: List<LocalProfileEntity>)
-
-    // ==========================================
-    // Local IP Bindings Persistence
-    // ==========================================
-    @Query("SELECT * FROM local_ip_bindings ORDER BY lastSyncTimestamp DESC")
-    fun getAllLocalIpBindingsFlow(): Flow<List<LocalIpBindingEntity>>
-
-    @Query("SELECT * FROM local_ip_bindings ORDER BY lastSyncTimestamp DESC")
-    suspend fun getAllLocalIpBindingsSync(): List<LocalIpBindingEntity>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertOrUpdateLocalIpBindings(bindings: List<LocalIpBindingEntity>)
 }
