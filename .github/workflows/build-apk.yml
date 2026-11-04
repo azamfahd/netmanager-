@@ -91,29 +91,35 @@ jobs:
 
           echo "Firebase config validated successfully."
 
-          # Restore debug.keystore from base64 if available, or generate a new one
-          if [ -f "debug.keystore.base64" ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-            echo "Successfully restored debug.keystore from debug.keystore.base64"
-          elif [ ! -f "debug.keystore" ]; then
-            keytool -genkeypair -v -keystore debug.keystore \
-              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass android -keypass android \
-              -dname "CN=Android Debug,O=Android,C=US"
-            echo "Generated new debug.keystore"
+      - name: Restore Release Signing Keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "${RELEASE_KEYSTORE_BASE64:-}" ]; then
+            echo "Error: Missing GitHub Secret RELEASE_KEYSTORE_BASE64."
+            exit 1
           fi
 
-      - name: Build Debug APK
-        run: |
-          ./gradlew assembleDebug --no-daemon --no-configuration-cache --no-build-cache --stacktrace -Djava.awt.headless=true
+          KEYSTORE_FILE="$RUNNER_TEMP/netmanager-release-key.jks"
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+          chmod 600 "$KEYSTORE_FILE"
+          echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
 
-      - name: Locate and Rename APK
+      - name: Build Release APK
+        env:
+          STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "${STORE_PASSWORD:-}" ]; then
+            echo "Error: Missing GitHub Secret RELEASE_KEYSTORE_PASSWORD."
+            exit 1
+          fi
+          ./gradlew assembleRelease --no-daemon --no-configuration-cache --no-build-cache --stacktrace -Djava.awt.headless=true
+
+      - name: Locate and Rename Release APK
         run: |
           mkdir -p output
-          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
-          fi
+          APK_PATH=$(find app/build/outputs/apk/release -type f -name "*.apk" | head -n 1)
           if [ -n "$APK_PATH" ] && [ -f "$APK_PATH" ]; then
             cp "$APK_PATH" output/NetManager-Mikrotik-Manager.apk
             echo "APK ready at output/NetManager-Mikrotik-Manager.apk"
