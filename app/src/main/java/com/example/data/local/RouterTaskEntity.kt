@@ -30,6 +30,7 @@ data class RouterTaskEntity(
         const val TYPE_DELETE_CARD = "DELETE_CARD"
         const val TYPE_TOGGLE_CARD = "TOGGLE_CARD"
         const val TYPE_REACTIVATE_CARD = "REACTIVATE_CARD"
+        const val TYPE_VERIFY_ACTIVATE_CARD = "VERIFY_ACTIVATE_CARD"
 
         /**
          * Calculates exponential backoff delay based on retryCount:
@@ -110,6 +111,28 @@ data class RouterTaskEntity(
             }
             return RouterTaskEntity(
                 taskType = TYPE_REACTIVATE_CARD,
+                cardId = card.id,
+                cardName = card.name,
+                payloadJson = json.toString(),
+                status = STATUS_PENDING
+            )
+        }
+
+        fun createVerifyActivateTask(card: HotspotCard): RouterTaskEntity {
+            val json = JSONObject().apply {
+                put("id", card.id)
+                put("name", card.name)
+                put("password", card.password)
+                put("profile", card.profile)
+                put("comment", card.comment)
+                put("disabled", false)
+                put("limitUptime", card.limitUptime)
+                put("limitBytesTotal", card.limitBytesTotal)
+                put("price", card.price)
+                put("cardType", card.cardType)
+            }
+            return RouterTaskEntity(
+                taskType = TYPE_VERIFY_ACTIVATE_CARD,
                 cardId = card.id,
                 cardName = card.name,
                 payloadJson = json.toString(),

@@ -1,6 +1,0 @@
-{
-  "summary":  "Implementation plan to fix package synchronization issues, improve data parsing robustness, and optimize network requests for MikroTik Hotspot Profiles.",
-  "updatedAt":  "2026-10-24T19:43:47.524995702Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

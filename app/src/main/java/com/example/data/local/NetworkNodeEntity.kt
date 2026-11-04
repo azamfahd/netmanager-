@@ -36,4 +36,76 @@ data class NetworkNodeEntity(
     val firmwareVersion: String = "",
     val lastSeenTime: Long = System.currentTimeMillis(),
     val lastCheckTime: Long = System.currentTimeMillis()
-)
+) {
+    companion object {
+        fun fromNetworkNode(node: com.example.data.model.NetworkNode): NetworkNodeEntity {
+            return NetworkNodeEntity(
+                id = node.id,
+                name = node.name,
+                ipAddress = node.ipAddress,
+                macAddress = node.macAddress,
+                interfaceName = node.interfaceName,
+                model = node.model,
+                role = node.role,
+                nodeType = node.nodeType.name,
+                status = node.effectiveStatus.name,
+                parentTowerId = node.parentTowerId,
+                parentTowerName = node.parentTowerName,
+                isOnline = node.isOnline,
+                pingMs = node.pingMs,
+                connectedUsers = node.connectedUsers,
+                uptime = node.uptime,
+                rxSpeedKbps = node.rxSpeedKbps,
+                txSpeedKbps = node.txSpeedKbps,
+                totalBytesConsumed = node.totalBytesConsumed,
+                signalDbm = node.signalDbm,
+                location = node.location,
+                cpuLoadPercent = node.cpuLoadPercent,
+                memoryUsagePercent = node.memoryUsagePercent,
+                temperature = node.temperature,
+                voltage = node.voltage,
+                frequency = node.frequency,
+                channelWidth = node.channelWidth,
+                ssid = node.ssid,
+                firmwareVersion = node.firmwareVersion,
+                lastSeenTime = node.lastSeenTime,
+                lastCheckTime = node.lastCheckTime
+            )
+        }
+    }
+
+    fun toNetworkNode(): com.example.data.model.NetworkNode {
+        return com.example.data.model.NetworkNode(
+            id = id,
+            name = name,
+            ipAddress = ipAddress,
+            macAddress = macAddress,
+            interfaceName = interfaceName,
+            model = model,
+            role = role,
+            nodeType = try { com.example.data.model.NetworkNodeType.valueOf(nodeType) } catch (_: Exception) { com.example.data.model.NetworkNodeType.DISTRIBUTION },
+            status = try { com.example.data.model.NodeStatus.valueOf(status) } catch (_: Exception) { com.example.data.model.NodeStatus.ACTIVE },
+            parentTowerId = parentTowerId,
+            parentTowerName = parentTowerName,
+            isOnline = isOnline,
+            pingMs = pingMs,
+            connectedUsers = connectedUsers,
+            uptime = uptime,
+            rxSpeedKbps = rxSpeedKbps,
+            txSpeedKbps = txSpeedKbps,
+            totalBytesConsumed = totalBytesConsumed,
+            signalDbm = signalDbm,
+            location = location,
+            cpuLoadPercent = cpuLoadPercent,
+            memoryUsagePercent = memoryUsagePercent,
+            temperature = temperature,
+            voltage = voltage,
+            frequency = frequency,
+            channelWidth = channelWidth,
+            ssid = ssid,
+            firmwareVersion = firmwareVersion,
+            lastSeenTime = lastSeenTime,
+            lastCheckTime = lastCheckTime
+        )
+    }
+}

@@ -1,6 +1,7 @@
 package com.example.ui.viewmodel
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -84,65 +85,27 @@ class MainViewModel(
     private val appContext: Context? = null
 ) : ViewModel() {
 
-    init {
-        repository.onDataRefreshedListener = { snapshot ->
-            val ctx = appContext
-            if (ctx != null) {
-                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    com.example.data.local.RouterCacheManager.saveSnapshot(
-                        context = ctx,
-                        ipAddress = snapshot.ipAddress,
-                        routerName = snapshot.routerName,
-                        resource = snapshot.resource,
-                        routerBoard = snapshot.routerBoard,
-                        cards = snapshot.cards,
-                        profiles = snapshot.profiles,
-                        activeUsers = snapshot.activeUsers,
-                        servers = snapshot.servers,
-                        nodes = snapshot.nodes,
-                        logs = snapshot.logs,
-                        ipBindings = snapshot.ipBindings
-                    )
-                    
-                    // Persist logs to Room
-                    val dao = database.appDao()
-                    snapshot.logs.forEach { log ->
-                        val timestamp = System.currentTimeMillis()
-                        val insertedId = dao.insertSystemEventLog(
-                            SystemEventLogEntity(
-                                actionType = if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام",
-                                targetType = "راوتر",
-                                targetName = "سجل خارجي",
-                                description = log.message,
-                                details = "Topic: ${log.topics}",
-                                timestamp = timestamp
-                            )
-                        )
-                        
-                        // Sync to Cloud
-                        syncToCloud("systemLogs", insertedId.toString(), mapOf(
-                            "id" to insertedId.toString(),
-                            "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
-                            "actionType" to (if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام"),
-                            "targetType" to "راوتر",
-                            "targetName" to "سجل خارجي",
-                            "description" to log.message,
-                            "status" to "INFO",
-                            "operatorUsername" to "system"
-                        ))
-                    }
-                }
-            }
-        }
 
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            repository.initializeFromLocalDatabase()
-        }
 
-        viewModelScope.launch {
-            delay(2500)
-            checkForUpdates(isManual = false)
-        }
+    data class ConflictData(
+        val recordType: String,
+        val recordName: String,
+        val localValue: String,
+        val remoteValue: String,
+        val onResolve: (Boolean) -> Unit
+    )
+
+    private val _conflictPromptState = MutableStateFlow<ConflictData?>(null)
+    val conflictPromptState: StateFlow<ConflictData?> = _conflictPromptState.asStateFlow()
+
+    fun promptOwnerForConflict(recordType: String, recordName: String, localVal: String, remoteVal: String, onResolve: (Boolean) -> Unit) {
+        _conflictPromptState.value = ConflictData(recordType, recordName, localVal, remoteVal, onResolve)
+    }
+
+    fun dismissConflictPrompt(keepLocal: Boolean) {
+        val current = _conflictPromptState.value
+        current?.onResolve?.invoke(keepLocal)
+        _conflictPromptState.value = null
     }
 
     private val _updateCheckState = MutableStateFlow<UpdateCheckState>(UpdateCheckState.Idle)
@@ -306,15 +269,14 @@ class MainViewModel(
     val systemEventLogs: StateFlow<List<com.example.data.local.SystemEventLogEntity>> = database.appDao().getAllSystemEventLogs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    private fun requireUserId(): String {
+    private fun getUserId(): String? {
         return Firebase.auth.currentUser?.uid
-            ?: throw IllegalStateException("يجب تسجيل الدخول أولاً للمزامنة السحابية")
     }
 
     private fun syncToCloud(collectionName: String, docId: String, data: Map<String, Any?>) {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                val uid = requireUserId()
+                val uid = getUserId() ?: return@launch
                 db.collection("users").document(uid).collection(collectionName).document(docId)
                     .set(data, SetOptions.merge())
                     .addOnFailureListener { e ->
@@ -1090,177 +1052,7 @@ class MainViewModel(
 
     private var previousActiveUsernames = emptySet<String>()
 
-    init {
-        viewModelScope.launch {
-            cards.collectLatest { cardList ->
-                checkAndMarkSoldCards(cardList)
-            }
-        }
-        viewModelScope.launch {
-            activeUsers.collectLatest { activeList ->
-                val now = System.currentTimeMillis()
-                val nowFormatted = com.example.data.network.NetworkUtils.formatArabicFullDateTime(now)
-                val currentCards = cards.value
 
-                if (activeList.isNotEmpty()) {
-                    activeList.forEach { user ->
-                        database.appDao().markCardAsSold(user.user, now)
-                        syncToCloud("posCards", user.user, mapOf(
-                            "isSold" to true,
-                            "soldAt" to com.google.firebase.Timestamp(java.util.Date(now))
-                        ))
-
-                        // Persistent subscriber login tracking (تاريخ تسجيل الدخول والأجهزة والأوقات)
-                        try {
-                            val activeLogin = database.appDao().getActiveLoginForUser(user.user)
-                            val card = currentCards.firstOrNull { it.name == user.user }
-                            val cardProf = card?.profile?.ifBlank { "افتراضي" } ?: "افتراضي"
-                            val cardPrice = card?.price?.ifBlank { "غير محدد" } ?: "غير محدد"
-                            val detectedDevice = com.example.data.util.DeviceDetector.detectDevice(user.macAddress, user.hostName, user.user)
-
-                            if (activeLogin == null) {
-                                val loginEntity = com.example.data.local.UserLoginHistoryEntity(
-                                    username = user.user,
-                                    loginTime = nowFormatted,
-                                    logoutTime = "متصل الآن",
-                                    duration = user.uptime.ifBlank { "0s" },
-                                    bytesIn = user.bytesIn,
-                                    bytesOut = user.bytesOut,
-                                    totalBytes = user.bytesIn + user.bytesOut,
-                                    ipAddress = user.address,
-                                    macAddress = user.macAddress,
-                                    deviceModel = detectedDevice.modelName,
-                                    deviceBrand = detectedDevice.brand,
-                                    deviceCategory = detectedDevice.category.name,
-                                    nodeName = user.nodeName,
-                                    profile = cardProf,
-                                    price = cardPrice,
-                                    terminateReason = "جلسة نشطة حالياً",
-                                    timestamp = now
-                                )
-                                val insertedId = database.appDao().insertLoginHistory(loginEntity)
-                                
-                                // Sync to Cloud
-                                syncToCloud("loginHistory", insertedId.toString(), mapOf(
-                                    "id" to insertedId.toString(),
-                                    "username" to user.user,
-                                    "ipAddress" to user.address,
-                                    "macAddress" to user.macAddress,
-                                    "timestamp" to com.google.firebase.Timestamp(java.util.Date(now)),
-                                    "profile" to cardProf
-                                ))
-                            } else {
-                                database.appDao().updateActiveLoginStats(
-                                    username = user.user,
-                                    bytesIn = user.bytesIn,
-                                    bytesOut = user.bytesOut,
-                                    totalBytes = user.bytesIn + user.bytesOut,
-                                    duration = user.uptime.ifBlank { "0s" }
-                                )
-                            }
-                        } catch (_: Exception) {}
-                    }
-                }
-
-                // Detect users who disconnected since last check to archive their logout and reason
-                val currentNames = activeList.map { it.user }.toSet()
-                if (previousActiveUsernames.isNotEmpty()) {
-                    val disconnectedNames = previousActiveUsernames - currentNames
-                    if (disconnectedNames.isNotEmpty()) {
-                        val logoutTimeFormatted = com.example.data.network.NetworkUtils.formatArabicFullDateTime(System.currentTimeMillis())
-                        disconnectedNames.forEach { discoName ->
-                            val matchingCard = currentCards.firstOrNull { it.name == discoName }
-                            val isQuotaOver = matchingCard != null && matchingCard.limitBytesTotal > 0L && (matchingCard.bytesIn + matchingCard.bytesOut) >= matchingCard.limitBytesTotal
-                            val isTimeOver = matchingCard != null && matchingCard.limitUptime.isNotBlank() && matchingCard.uptime == matchingCard.limitUptime
-                            val reason = when {
-                                isQuotaOver -> "انتهى الرصيد (استنفاد حجم البيانات المقررة)"
-                                isTimeOver -> "انتهت الصلاحية (انقضاء وقت الكرت: ${matchingCard.limitUptime})"
-                                matchingCard?.disabled == true -> "تم إيقاف الكرت من قبل الإدارة"
-                                else -> "انفصال الجلسة / خروج المستخدم"
-                            }
-                            try {
-                                val targetSessionId = "sess_active_$discoName"
-                                database.appDao().markSessionOffline(targetSessionId, logoutTimeFormatted, reason, isQuotaOver)
-
-                                val bytesIn = matchingCard?.bytesIn ?: 0L
-                                val bytesOut = matchingCard?.bytesOut ?: 0L
-                                val duration = matchingCard?.uptime ?: "0s"
-                                val telemetry = repository.getLastKnownTelemetryForUser(discoName)
-                                database.appDao().finalizeUserLogin(
-                                    username = discoName,
-                                    logoutTime = logoutTimeFormatted,
-                                    duration = duration,
-                                    bytesIn = bytesIn,
-                                    bytesOut = bytesOut,
-                                    totalBytes = bytesIn + bytesOut,
-                                    reason = reason,
-                                    ipAddress = telemetry?.ipAddress ?: "",
-                                    macAddress = telemetry?.macAddress ?: "",
-                                    deviceModel = telemetry?.deviceInfo?.modelName ?: "",
-                                    deviceBrand = telemetry?.deviceInfo?.brand ?: "",
-                                    deviceCategory = telemetry?.deviceInfo?.category?.name ?: "",
-                                    nodeName = telemetry?.nodeName ?: ""
-                                )
-                            } catch (_: Exception) {}
-                        }
-                    }
-                }
-                previousActiveUsernames = currentNames
-            }
-        }
-        viewModelScope.launch {
-            userSessions.collectLatest { sessionList ->
-                if (sessionList.isNotEmpty()) {
-                    try {
-                        val entities = sessionList.map { session ->
-                            val archiveAt = System.currentTimeMillis()
-                            val entity = com.example.data.local.SessionArchiveEntity(
-                                sessionId = session.id,
-                                username = session.username,
-                                ipAddress = session.ipAddress,
-                                macAddress = session.macAddress,
-                                isOnline = session.isOnline,
-                                loginTime = session.loginTime,
-                                logoutTime = session.logoutTime,
-                                duration = session.duration,
-                                bytesIn = session.bytesIn,
-                                bytesOut = session.bytesOut,
-                                totalBytes = session.totalBytes,
-                                terminateReason = session.terminateReason,
-                                profile = session.profile,
-                                price = session.price,
-                                nodeName = session.nodeName,
-                                deviceModel = session.deviceInfo.modelName,
-                                deviceBrand = session.deviceInfo.brand,
-                                deviceCategory = session.deviceInfo.category.name,
-                                packageLimitBytes = session.packageLimitBytes,
-                                isQuotaExhausted = session.isQuotaExhausted,
-                                timestamp = archiveAt
-                            )
-                            
-                            // Sync to Cloud
-                            syncToCloud("sessionArchive", session.id, mapOf(
-                                "id" to session.id,
-                                "username" to session.username,
-                                "macAddress" to session.macAddress,
-                                "ipAddress" to session.ipAddress,
-                                "loginTime" to session.loginTime,
-                                "logoutTime" to session.logoutTime,
-                                "duration" to session.duration,
-                                "totalBytes" to session.totalBytes,
-                                "timestamp" to com.google.firebase.Timestamp(java.util.Date(archiveAt))
-                            ))
-                            entity
-                        }
-                        database.appDao().insertOrUpdateSessions(entities)
-                    } catch (_: Exception) {}
-                }
-            }
-        }
-        viewModelScope.launch {
-            seedInitialPosDataIfEmpty()
-        }
-    }
 
     private suspend fun seedInitialPosDataIfEmpty() {
         try {
@@ -2006,11 +1798,23 @@ class MainViewModel(
         }
     }
 
+    private var pauseAutoRefreshUntil: Long = 0L
+
+    fun pauseAutoRefreshFor(durationMs: Long = 6000L) {
+        pauseAutoRefreshUntil = System.currentTimeMillis() + durationMs
+    }
+
     private fun startAutoRefresh() {
         stopAutoRefresh()
         refreshJob = viewModelScope.launch {
             while (isActive && _autoRefresh.value) {
-                delay(4000)
+                // Increased delay to 8 seconds to prevent rapid overwrites and respect router processing time
+                delay(8000)
+                
+                if (System.currentTimeMillis() < pauseAutoRefreshUntil) {
+                    continue
+                }
+                
                 val currentConn = _connectionState.value
                 if (currentConn is ConnectionState.Connected) {
                     if (currentConn.isDemo) {
@@ -2088,20 +1892,24 @@ class MainViewModel(
 
     fun reactivateCard(card: HotspotCard) {
         viewModelScope.launch {
+            pauseAutoRefreshFor(6000)
+            // 1. Instant optimistic update
+            val resetCard = card.copy(uptime = "0s", bytesIn = 0L, bytesOut = 0L, disabled = false)
+            repository.updateLocalCard(resetCard)
+            try {
+                database.appDao().insertOrUpdateLocalCard(
+                    com.example.data.local.LocalCardEntity.fromHotspotCard(resetCard)
+                )
+            } catch (_: Exception) {}
+
+            // 2. Execute on router
             val result = repository.reactivateCard(card)
             if (result.isSuccess) {
                 recordSystemEvent("تعديل", "كرت", card.name, "تمت إعادة تفعيل وتصفير عدادات استهلاك الكرت (${card.name}) في الراوتر", "SUCCESS")
                 _toastEvent.emit("تمت إعادة تفعيل وتصفير عدادات الكرت (${card.name}) بنجاح!")
             } else {
                 val errorMsg = result.exceptionOrNull()?.message.orEmpty()
-                // Enqueue in Task Queue for offline retry with Exponential Backoff
                 taskQueueManager.enqueueReactivateCard(card)
-                val resetCard = card.copy(uptime = "0s", bytesIn = 0L, bytesOut = 0L, disabled = false)
-                try {
-                    database.appDao().insertOrUpdateLocalCard(
-                        com.example.data.local.LocalCardEntity.fromHotspotCard(resetCard)
-                    )
-                } catch (_: Exception) {}
                 recordSystemEvent("طابور العمليات", "كرت", card.name, "تم حفظ إعادة التفعيل محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
                 _toastEvent.emit("تم حفظ إعادة التفعيل محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال (طابور العمليات)")
             }
@@ -2110,20 +1918,23 @@ class MainViewModel(
 
     fun updateCard(updatedCard: HotspotCard) {
         viewModelScope.launch {
+            pauseAutoRefreshFor(6000)
+            // 1. Instant optimistic update
+            repository.updateLocalCard(updatedCard)
+            try {
+                database.appDao().insertOrUpdateLocalCard(
+                    com.example.data.local.LocalCardEntity.fromHotspotCard(updatedCard)
+                )
+            } catch (_: Exception) {}
+
+            // 2. Execute on router
             val result = repository.updateCard(updatedCard)
             if (result.isSuccess) {
                 recordSystemEvent("تعديل", "كرت", updatedCard.name, "تم تحديث بيانات وإعدادات الكرت (${updatedCard.name}) في الراوتر", "SUCCESS", "الباقة: ${updatedCard.profile}, التعليق: ${updatedCard.comment}")
                 _toastEvent.emit("تم تحديث بيانات الكرت (${updatedCard.name}) بنجاح")
             } else {
                 val errorMsg = result.exceptionOrNull()?.message.orEmpty()
-                // Enqueue in Task Queue for offline retry with Exponential Backoff
                 taskQueueManager.enqueueEditCard(updatedCard)
-                // Optimistically update local database so changes are visible immediately and don't bounce back
-                try {
-                    database.appDao().insertOrUpdateLocalCard(
-                        com.example.data.local.LocalCardEntity.fromHotspotCard(updatedCard)
-                    )
-                } catch (_: Exception) {}
                 recordSystemEvent("طابور العمليات", "كرت", updatedCard.name, "تم حفظ تعديل الكرت محلياً وسيتم إرساله للراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
                 _toastEvent.emit("تم حفظ التعديل محلياً وسيتم إرساله للراوتر فور استعادة الاتصال (طابور العمليات)")
             }
@@ -2132,25 +1943,31 @@ class MainViewModel(
 
     fun toggleCardDisabled(cardId: String, currentDisabled: Boolean) {
         viewModelScope.launch {
+            pauseAutoRefreshFor(6000)
+            val targetDisabled = !currentDisabled
+            val targetCard = cards.value.find { it.id == cardId }
+            val targetName = targetCard?.name.orEmpty()
+
+            // 1. Instant optimistic update
+            if (targetCard != null) {
+                val updated = targetCard.copy(disabled = targetDisabled)
+                repository.updateLocalCard(updated)
+                try {
+                    database.appDao().insertOrUpdateLocalCard(
+                        com.example.data.local.LocalCardEntity.fromHotspotCard(updated)
+                    )
+                } catch (_: Exception) {}
+            }
+
+            // 2. Execute on router
             val result = repository.toggleCardDisabled(cardId, currentDisabled)
             if (result.isSuccess) {
-                val actionDesc = if (!currentDisabled) "تم إيقاف وتعطيل الكرت ($cardId) عن العمل في الراوتر" else "تم تفعيل وتشغيل الكرت ($cardId) في الراوتر"
-                recordSystemEvent("تعديل", "كرت", cardId, actionDesc, "SUCCESS")
-                _toastEvent.emit(if (!currentDisabled) "تم إيقاف الكرت" else "تم تفعيل الكرت")
+                val actionDesc = if (targetDisabled) "تم إيقاف وتعطيل الكرت (${targetName.ifBlank { cardId }}) عن العمل في الراوتر" else "تم تفعيل وتشغيل الكرت (${targetName.ifBlank { cardId }}) في الراوتر"
+                recordSystemEvent("تعديل", "كرت", targetName.ifBlank { cardId }, actionDesc, "SUCCESS")
+                _toastEvent.emit(if (targetDisabled) "تم إيقاف الكرت" else "تم تفعيل الكرت")
             } else {
                 val errorMsg = result.exceptionOrNull()?.message.orEmpty()
-                val targetCard = cards.value.find { it.id == cardId }
-                val targetName = targetCard?.name.orEmpty()
-                val targetDisabled = !currentDisabled
                 taskQueueManager.enqueueToggleDisabled(cardId, targetName, targetDisabled)
-                if (targetCard != null) {
-                    try {
-                        val updated = targetCard.copy(disabled = targetDisabled)
-                        database.appDao().insertOrUpdateLocalCard(
-                            com.example.data.local.LocalCardEntity.fromHotspotCard(updated)
-                        )
-                    } catch (_: Exception) {}
-                }
                 recordSystemEvent("طابور العمليات", "كرت", targetName.ifBlank { cardId }, "تم حفظ تغيير الحالة محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
                 _toastEvent.emit(if (targetDisabled) "تم حفظ إيقاف الكرت محلياً (طابور العمليات)" else "تم حفظ تفعيل الكرت محلياً (طابور العمليات)")
             }
@@ -2371,9 +2188,9 @@ class MainViewModel(
 
     fun createProfile(profile: HotspotProfile) {
         viewModelScope.launch {
+            pauseAutoRefreshFor(6000)
             val res = repository.createProfile(profile)
             if (res.isSuccess) {
-                repository.refreshData()
                 recordSystemEvent("إضافة", "باقة", profile.name, "تم إنشاء باقة جديدة (${profile.name}) في راوتر ميكروتك", "SUCCESS", "السرعة: ${profile.rateLimit}, الجلسة: ${profile.sessionTimeout}, الأجهزة: ${profile.sharedUsers}, السعر: ${profile.price}")
                 _toastEvent.emit("تم إنشاء باقة: ${profile.name} في الراوتر بنجاح")
             } else {
@@ -2385,9 +2202,9 @@ class MainViewModel(
 
     fun updateProfile(profile: HotspotProfile) {
         viewModelScope.launch {
+            pauseAutoRefreshFor(6000)
             val res = repository.updateProfile(profile)
             if (res.isSuccess) {
-                repository.refreshData()
                 recordSystemEvent("تعديل", "باقة", profile.name, "تم تحديث إعدادات باقة (${profile.name}) في راوتر ميكروتك", "SUCCESS", "السرعة: ${profile.rateLimit}, الجلسة: ${profile.sessionTimeout}, الأجهزة: ${profile.sharedUsers}, السعر: ${profile.price}")
                 _toastEvent.emit("تم حفظ وتحديث باقة: ${profile.name} في الراوتر بنجاح")
             } else {
@@ -2399,9 +2216,9 @@ class MainViewModel(
 
     fun deleteProfile(profile: HotspotProfile) {
         viewModelScope.launch {
+            pauseAutoRefreshFor(6000)
             val res = repository.deleteProfile(profile)
             if (res.isSuccess) {
-                repository.refreshData()
                 recordSystemEvent("حذف", "باقة", profile.name, "تم حذف باقة (${profile.name}) من راوتر ميكروتك", "SUCCESS")
                 _toastEvent.emit("تم حذف باقة: ${profile.name} من الراوتر بنجاح")
             } else {
@@ -2413,9 +2230,9 @@ class MainViewModel(
 
     fun syncProfileBetweenSystems(profile: HotspotProfile, targetSystem: String) {
         viewModelScope.launch {
+            pauseAutoRefreshFor(6000)
             val res = repository.syncProfileBetweenSystems(profile, targetSystem)
             if (res.isSuccess) {
-                repository.refreshData()
                 val targetLabel = if (targetSystem == "hotspot") "الهوتسبوت (Hotspot)" else "اليوزرمانجر (User Manager)"
                 recordSystemEvent("مزامنة", "باقة", profile.name, "تمت مزامنة الباقة (${profile.name}) مع $targetLabel بنجاح", "SUCCESS")
                 _toastEvent.emit("تمت مزامنة وتثبيت باقة (${profile.name}) مع $targetLabel بنجاح!")
@@ -2429,15 +2246,26 @@ class MainViewModel(
 
     fun verifyAndActivateCard(card: HotspotCard) {
         viewModelScope.launch {
+            pauseAutoRefreshFor(6000)
+            // 1. Instant optimistic update in memory and local DB
+            val activated = card.copy(disabled = false)
+            repository.updateLocalCard(activated)
+            try {
+                database.appDao().insertOrUpdateLocalCard(
+                    com.example.data.local.LocalCardEntity.fromHotspotCard(activated)
+                )
+            } catch (_: Exception) {}
+
+            // 2. Execute on router in background
             val res = repository.verifyAndActivateCard(card)
             if (res.isSuccess) {
-                repository.refreshData()
                 recordSystemEvent("تفعيل", "كرت", card.name, "تم التحقق وتفعيل الكرت (${card.name}) بالراوتر بنجاح", "SUCCESS")
                 _toastEvent.emit("تم التحقق وتفعيل الكرت (${card.name}) في الراوتر بنجاح! جاهز لتسجيل الدخول.")
             } else {
                 val errorMsg = res.exceptionOrNull()?.message ?: "فشل التحقق والتفعيل"
-                recordSystemEvent("تفعيل", "كرت", card.name, "فشل تفعيل الكرت (${card.name})", "FAILED", errorMsg)
-                _toastEvent.emit("فشل تفعيل الكرت: $errorMsg")
+                taskQueueManager.enqueueVerifyAndActivateCard(card)
+                recordSystemEvent("طابور العمليات", "كرت", card.name, "تم تفعيل الكرت محلياً وسيتم المزامنة مع الراوتر تلقائياً عند الاتصال.", "PENDING", errorMsg)
+                _toastEvent.emit("تم تفعيل الكرت محلياً وسيتم تنفيذه على الراوتر فوراً (طابور العمليات)")
             }
         }
     }
@@ -2558,10 +2386,16 @@ class MainViewModel(
                 if (!apkUrl.isNullOrBlank()) {
                     downloadAndInstallUpdate(context, apkUrl)
                 } else {
-                    _toastEvent.emit("لم يتم العثور على ملف APK جاهز للتنزيل في هذا الإصدار.")
+                    // Try direct download of NetManager-Mikrotik-Manager.apk from release tag
+                    val directTagUrl = "https://github.com/azamfahd/netmanager-/releases/download/${releaseInfo.tagName}/NetManager-Mikrotik-Manager.apk"
+                    _toastEvent.emit("جاري محاولة التنزيل المباشر لأحدث حزمة من المستودع...")
+                    downloadAndInstallUpdate(context, directTagUrl)
                 }
             }.onFailure { err ->
-                _toastEvent.emit("تعذر جلب التحديث: ${err.message}")
+                // Direct fallback: try downloading latest release apk directly
+                val directLatestUrl = "https://github.com/azamfahd/netmanager-/releases/latest/download/NetManager-Mikrotik-Manager.apk"
+                _toastEvent.emit("جاري التنزيل المباشر من صفحة إصدارات المستودع...")
+                downloadAndInstallUpdate(context, directLatestUrl)
             }
         }
     }
@@ -2618,6 +2452,276 @@ class MainViewModel(
                     onResult(emptyMap())
                 }
             }
+        }
+    }
+
+    init {
+        repository.onDataRefreshedListener = { snapshot ->
+            val ctx = appContext
+            if (ctx != null) {
+                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    com.example.data.local.RouterCacheManager.saveSnapshot(
+                        context = ctx,
+                        ipAddress = snapshot.ipAddress,
+                        routerName = snapshot.routerName,
+                        resource = snapshot.resource,
+                        routerBoard = snapshot.routerBoard,
+                        cards = snapshot.cards,
+                        profiles = snapshot.profiles,
+                        activeUsers = snapshot.activeUsers,
+                        servers = snapshot.servers,
+                        nodes = snapshot.nodes,
+                        logs = snapshot.logs,
+                        ipBindings = snapshot.ipBindings
+                    )
+                    
+                    // Persist logs to Room
+                    val dao = database.appDao()
+                    snapshot.logs.forEach { log ->
+                        val timestamp = System.currentTimeMillis()
+                        val insertedId = dao.insertSystemEventLog(
+                            SystemEventLogEntity(
+                                actionType = if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام",
+                                targetType = "راوتر",
+                                targetName = "سجل خارجي",
+                                description = log.message,
+                                details = "Topic: ${log.topics}",
+                                timestamp = timestamp
+                            )
+                        )
+                        
+                        // Sync to Cloud
+                        syncToCloud("systemLogs", insertedId.toString(), mapOf(
+                            "id" to insertedId.toString(),
+                            "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
+                            "actionType" to (if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام"),
+                            "targetType" to "راوتر",
+                            "targetName" to "سجل خارجي",
+                            "description" to log.message,
+                            "status" to "INFO",
+                            "operatorUsername" to "system"
+                        ))
+                    }
+                }
+            }
+        }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            repository.initializeFromLocalDatabase()
+        }
+
+        // 15-Minute Periodic Background Sync Worker
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            while (isActive) {
+                delay(15 * 60 * 1000L) // 15 minutes
+                if (_connectionState.value is ConnectionState.Connected) {
+                    try {
+                        repository.refreshData()
+                        runHeartbeatCheck(appContext)
+                        Log.d("MainViewModel", "Background incremental sync completed successfully.")
+                    } catch (e: Exception) {
+                        Log.e("MainViewModel", "Background sync failed: ${e.message}")
+                    }
+                }
+            }
+        }
+
+        // Materialized Aggregates Persistence Collector
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            revenueAnalytics.collectLatest { summary ->
+                try {
+                    val dao = database.appDao()
+                    dao.insertOrUpdateMaterializedSummary(
+                        com.example.data.local.MaterializedSummaryEntity(
+                            id = "global_summary",
+                            routerIp = (_connectionState.value as? ConnectionState.Connected)?.ipAddress ?: "192.168.88.1",
+                            totalEstimatedRevenue = summary.totalEstimatedRevenue,
+                            totalNetProfit = summary.totalNetProfit,
+                            activeCardsCount = summary.activeCardsCount,
+                            unusedCardsCount = summary.unusedCardsCount,
+                            expiredCardsCount = summary.expiredCardsCount,
+                            totalCardsCount = summary.totalCardsCount,
+                            totalActiveUsers = activeUsers.value.size,
+                            lastSyncTimestamp = System.currentTimeMillis()
+                        )
+                    )
+                } catch (_: Exception) {}
+            }
+        }
+
+        viewModelScope.launch {
+            delay(2500)
+            checkForUpdates(isManual = false)
+        }
+
+        viewModelScope.launch {
+            cards.collectLatest { cardList ->
+                checkAndMarkSoldCards(cardList)
+            }
+        }
+        viewModelScope.launch {
+            activeUsers.collectLatest { activeList ->
+                val now = System.currentTimeMillis()
+                val nowFormatted = com.example.data.network.NetworkUtils.formatArabicFullDateTime(now)
+                val currentCards = cards.value
+
+                if (activeList.isNotEmpty()) {
+                    activeList.forEach { user ->
+                        database.appDao().markCardAsSold(user.user, now)
+                        syncToCloud("posCards", user.user, mapOf(
+                            "isSold" to true,
+                            "soldAt" to com.google.firebase.Timestamp(java.util.Date(now))
+                        ))
+
+                        // Persistent subscriber login tracking (تاريخ تسجيل الدخول والأجهزة والأوقات)
+                        try {
+                            val activeLogin = database.appDao().getActiveLoginForUser(user.user)
+                            val card = currentCards.firstOrNull { it.name == user.user }
+                            val cardProf = card?.profile?.ifBlank { "افتراضي" } ?: "افتراضي"
+                            val cardPrice = card?.price?.ifBlank { "غير محدد" } ?: "غير محدد"
+                            val detectedDevice = com.example.data.util.DeviceDetector.detectDevice(user.macAddress, user.hostName, user.user)
+
+                            if (activeLogin == null) {
+                                val loginEntity = com.example.data.local.UserLoginHistoryEntity(
+                                    username = user.user,
+                                    loginTime = nowFormatted,
+                                    logoutTime = "متصل الآن",
+                                    duration = user.uptime.ifBlank { "0s" },
+                                    bytesIn = user.bytesIn,
+                                    bytesOut = user.bytesOut,
+                                    totalBytes = user.bytesIn + user.bytesOut,
+                                    ipAddress = user.address,
+                                    macAddress = user.macAddress,
+                                    deviceModel = detectedDevice.modelName,
+                                    deviceBrand = detectedDevice.brand,
+                                    deviceCategory = detectedDevice.category.name,
+                                    nodeName = user.nodeName,
+                                    profile = cardProf,
+                                    price = cardPrice,
+                                    terminateReason = "جلسة نشطة حالياً",
+                                    timestamp = now
+                                )
+                                val insertedId = database.appDao().insertLoginHistory(loginEntity)
+                                
+                                // Sync to Cloud
+                                syncToCloud("loginHistory", insertedId.toString(), mapOf(
+                                    "id" to insertedId.toString(),
+                                    "username" to user.user,
+                                    "ipAddress" to user.address,
+                                    "macAddress" to user.macAddress,
+                                    "timestamp" to com.google.firebase.Timestamp(java.util.Date(now)),
+                                    "profile" to cardProf
+                                ))
+                            } else {
+                                database.appDao().updateActiveLoginStats(
+                                    username = user.user,
+                                    bytesIn = user.bytesIn,
+                                    bytesOut = user.bytesOut,
+                                    totalBytes = user.bytesIn + user.bytesOut,
+                                    duration = user.uptime.ifBlank { "0s" }
+                                )
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+
+                // Detect users who disconnected since last check to archive their logout and reason
+                val currentNames = activeList.map { it.user }.toSet()
+                if (previousActiveUsernames.isNotEmpty()) {
+                    val disconnectedNames = previousActiveUsernames - currentNames
+                    if (disconnectedNames.isNotEmpty()) {
+                        val logoutTimeFormatted = com.example.data.network.NetworkUtils.formatArabicFullDateTime(System.currentTimeMillis())
+                        disconnectedNames.forEach { discoName ->
+                            val matchingCard = currentCards.firstOrNull { it.name == discoName }
+                            val isQuotaOver = matchingCard != null && matchingCard.limitBytesTotal > 0L && (matchingCard.bytesIn + matchingCard.bytesOut) >= matchingCard.limitBytesTotal
+                            val isTimeOver = matchingCard != null && matchingCard.limitUptime.isNotBlank() && matchingCard.uptime == matchingCard.limitUptime
+                            val reason = when {
+                                isQuotaOver -> "انتهى الرصيد (استنفاد حجم البيانات المقررة)"
+                                isTimeOver -> "انتهت الصلاحية (انقضاء وقت الكرت: ${matchingCard.limitUptime})"
+                                matchingCard?.disabled == true -> "تم إيقاف الكرت من قبل الإدارة"
+                                else -> "انفصال الجلسة / خروج المستخدم"
+                            }
+                            try {
+                                val targetSessionId = "sess_active_$discoName"
+                                database.appDao().markSessionOffline(targetSessionId, logoutTimeFormatted, reason, isQuotaOver)
+
+                                val bytesIn = matchingCard?.bytesIn ?: 0L
+                                val bytesOut = matchingCard?.bytesOut ?: 0L
+                                val duration = matchingCard?.uptime ?: "0s"
+                                val telemetry = repository.getLastKnownTelemetryForUser(discoName)
+                                database.appDao().finalizeUserLogin(
+                                    username = discoName,
+                                    logoutTime = logoutTimeFormatted,
+                                    duration = duration,
+                                    bytesIn = bytesIn,
+                                    bytesOut = bytesOut,
+                                    totalBytes = bytesIn + bytesOut,
+                                    reason = reason,
+                                    ipAddress = telemetry?.ipAddress ?: "",
+                                    macAddress = telemetry?.macAddress ?: "",
+                                    deviceModel = telemetry?.deviceInfo?.modelName ?: "",
+                                    deviceBrand = telemetry?.deviceInfo?.brand ?: "",
+                                    deviceCategory = telemetry?.deviceInfo?.category?.name ?: "",
+                                    nodeName = telemetry?.nodeName ?: ""
+                                )
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+                previousActiveUsernames = currentNames
+            }
+        }
+        viewModelScope.launch {
+            userSessions.collectLatest { sessionList ->
+                if (sessionList.isNotEmpty()) {
+                    try {
+                        val entities = sessionList.map { session ->
+                            val archiveAt = System.currentTimeMillis()
+                            val entity = com.example.data.local.SessionArchiveEntity(
+                                sessionId = session.id,
+                                username = session.username,
+                                ipAddress = session.ipAddress,
+                                macAddress = session.macAddress,
+                                isOnline = session.isOnline,
+                                loginTime = session.loginTime,
+                                logoutTime = session.logoutTime,
+                                duration = session.duration,
+                                bytesIn = session.bytesIn,
+                                bytesOut = session.bytesOut,
+                                totalBytes = session.totalBytes,
+                                terminateReason = session.terminateReason,
+                                profile = session.profile,
+                                price = session.price,
+                                nodeName = session.nodeName,
+                                deviceModel = session.deviceInfo.modelName,
+                                deviceBrand = session.deviceInfo.brand,
+                                deviceCategory = session.deviceInfo.category.name,
+                                packageLimitBytes = session.packageLimitBytes,
+                                isQuotaExhausted = session.isQuotaExhausted,
+                                timestamp = archiveAt
+                            )
+                            
+                            // Sync to Cloud
+                            syncToCloud("sessionArchive", session.id, mapOf(
+                                "id" to session.id,
+                                "username" to session.username,
+                                "macAddress" to session.macAddress,
+                                "ipAddress" to session.ipAddress,
+                                "loginTime" to session.loginTime,
+                                "logoutTime" to session.logoutTime,
+                                "duration" to session.duration,
+                                "totalBytes" to session.totalBytes,
+                                "timestamp" to com.google.firebase.Timestamp(java.util.Date(archiveAt))
+                            ))
+                            entity
+                        }
+                        database.appDao().insertOrUpdateSessions(entities)
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+        viewModelScope.launch {
+            seedInitialPosDataIfEmpty()
         }
     }
 

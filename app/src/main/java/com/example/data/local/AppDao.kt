@@ -284,6 +284,15 @@ interface AppDao {
     @Query("DELETE FROM router_task_queue WHERE status = 'COMPLETED'")
     suspend fun clearCompletedTasks()
 
+    @Query("SELECT * FROM materialized_summaries WHERE id = 'global_summary' LIMIT 1")
+    suspend fun getMaterializedSummary(): MaterializedSummaryEntity?
+
+    @Query("SELECT * FROM materialized_summaries WHERE id = 'global_summary' LIMIT 1")
+    fun getMaterializedSummaryFlow(): Flow<MaterializedSummaryEntity?>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateMaterializedSummary(summary: MaterializedSummaryEntity)
+
     @Query("DELETE FROM router_task_queue")
     suspend fun clearAllTasks()
 }

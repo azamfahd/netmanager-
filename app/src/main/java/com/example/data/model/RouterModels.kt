@@ -694,7 +694,8 @@ data class MonthlySalesSummary(
     val isCurrentMonth: Boolean = false,
     val growthRatePercent: Double = 0.0,
     val packageBreakdown: List<MonthlyPackageSales> = emptyList(),
-    val dailyBreakdown: List<DailySalesPoint> = emptyList()
+    val dailyBreakdown: List<DailySalesPoint> = emptyList(),
+    val totalBytesConsumed: Long = 0L
 )
 
 data class NetworkConsumptionReport(

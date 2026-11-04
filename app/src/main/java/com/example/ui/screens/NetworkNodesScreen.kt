@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -40,6 +41,12 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiTethering
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.PersonRemove
+import androidx.compose.material.icons.filled.AccountTree
+import com.example.ui.components.NodeClientItemCard
+import com.example.data.model.HotspotActiveUser
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -81,6 +88,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.animation.core.*
 import com.example.data.model.NetworkNode
 import com.example.data.model.NetworkNodeType
 import com.example.data.model.NodeSortOption
@@ -357,7 +365,7 @@ fun NetworkNodesScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 2. View Mode Tabs (Spiderweb Graph / List View / Load Analytics)
+            // 2. View Mode Tabs (Spiderweb Graph / Tree Hierarchy / List View / Load Analytics)
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -366,11 +374,13 @@ fun NetworkNodesScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
                         .padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     val tabs = listOf(
                         Triple(0, "🌐 المخطط السيبراني", Icons.Default.Dns),
+                        Triple(3, "🌳 شجرة الأبراج والفروع", Icons.Default.AccountTree),
                         Triple(1, "📋 قائمة النقاط", Icons.Default.CellTower),
                         Triple(2, "⚡ إحصائيات الضغط", Icons.Default.Speed)
                     )
@@ -379,14 +389,13 @@ fun NetworkNodesScreen(
                         val isSelected = selectedDisplayTab == index
                         Surface(
                             modifier = Modifier
-                                .weight(1f)
                                 .clickable { selectedDisplayTab = index },
                             shape = RoundedCornerShape(10.dp),
                             color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
                             contentColor = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
                         ) {
                             Row(
-                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp),
+                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp),
                                 horizontalArrangement = Arrangement.Center,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -779,6 +788,17 @@ fun NetworkNodesScreen(
                         }
                     }
                 }
+                3 -> { // 🌳 شجرة الأبراج والفروع الهيكلية والمشتركين
+                    val currentConfigState = viewModel.currentConfig.collectAsStateWithLifecycle()
+                    HierarchicalNetworkTreeView(
+                        nodes = displayedNodes,
+                        centralRouterName = "الراوتر المركزي (${currentConfigState.value.name.ifBlank { "سيرفر الشبكة" }})",
+                        centralRouterIp = currentConfigState.value.ipAddress,
+                        onNodeClick = { selectedNodeForDetail = it },
+                        onPingNode = { viewModel.pingNetworkNode(it) },
+                        onKickUser = { user -> viewModel.kickUser(user) }
+                    )
+                }
             }
         }
     }
@@ -849,6 +869,20 @@ fun NetworkNodeItem(
     val statusColor = Color(node.statusColorRgb)
     val statusBgColor = statusColor.copy(alpha = 0.14f)
 
+    val isOffline = node.effectiveStatus == NodeStatus.OFFLINE
+    
+    // Pulsing Red Glow for Offline Nodes
+    val infiniteTransition = rememberInfiniteTransition(label = "list_offline_glow")
+    val glowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.08f,
+        targetValue = 0.28f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "alpha"
+    )
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -856,9 +890,9 @@ fun NetworkNodeItem(
             .testTag("network_node_card_${node.id}"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
+            containerColor = if (isOffline) Color(0xFFD32F2F).copy(alpha = glowAlpha) else MaterialTheme.colorScheme.surface
         ),
-        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f)),
+        border = BorderStroke(1.dp, if (isOffline) Color(0xFFD32F2F).copy(alpha = 0.6f) else statusColor.copy(alpha = 0.35f)),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
@@ -1496,4 +1530,229 @@ fun AddNodeDialog(
             }
         }
     )
+}
+
+@Composable
+fun HierarchicalNetworkTreeView(
+    nodes: List<NetworkNode>,
+    centralRouterName: String,
+    centralRouterIp: String,
+    onNodeClick: (NetworkNode) -> Unit,
+    onPingNode: (String) -> Unit,
+    onKickUser: (HotspotActiveUser) -> Unit
+) {
+    // 1. Build the tree structure from the flat list
+    val treeNodes = remember(nodes) {
+        val nodeMap = nodes.associateBy { it.id }
+        // Roots are nodes with no parent OR parent not in the current list
+        val roots = nodes.filter { it.parentTowerId.isNullOrBlank() || !nodeMap.containsKey(it.parentTowerId) }
+        val childrenMap = nodes.filter { !it.parentTowerId.isNullOrBlank() && nodeMap.containsKey(it.parentTowerId) }
+            .groupBy { it.parentTowerId!! }
+        
+        roots.map { root -> buildTreeNode(root, childrenMap) }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        contentPadding = PaddingValues(bottom = 80.dp)
+    ) {
+        // Root Router Header
+        item {
+            RootRouterHeader(centralRouterName, centralRouterIp, nodes.size)
+        }
+
+        // Recursive Tree Items
+        treeNodes.forEach { root ->
+            renderRecursiveTree(root, 0, onNodeClick, onPingNode, onKickUser)
+        }
+        
+        if (treeNodes.isEmpty()) {
+            item {
+                Box(modifier = Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
+                    Text("لا توجد بيانات لبناء الشجرة الهيكلية", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+data class TreeNode(
+    val node: NetworkNode,
+    val children: List<TreeNode>
+)
+
+private fun buildTreeNode(node: NetworkNode, childrenMap: Map<String, List<NetworkNode>>): TreeNode {
+    val children = childrenMap[node.id]?.map { buildTreeNode(it, childrenMap) } ?: emptyList()
+    return TreeNode(node, children)
+}
+
+private fun androidx.compose.foundation.lazy.LazyListScope.renderRecursiveTree(
+    treeNode: TreeNode,
+    level: Int,
+    onNodeClick: (NetworkNode) -> Unit,
+    onPingNode: (String) -> Unit,
+    onKickUser: (HotspotActiveUser) -> Unit
+) {
+    item(key = treeNode.node.id) {
+        RecursiveNodeTreeItem(
+            treeNode = treeNode,
+            level = level,
+            onNodeClick = { onNodeClick(treeNode.node) },
+            onPing = { onPingNode(treeNode.node.id) }
+        )
+    }
+
+    if (treeNode.children.isNotEmpty()) {
+        treeNode.children.forEach { child ->
+            renderRecursiveTree(child, level + 1, onNodeClick, onPingNode, onKickUser)
+        }
+    }
+}
+
+@Composable
+fun RecursiveNodeTreeItem(
+    treeNode: TreeNode,
+    level: Int,
+    onNodeClick: () -> Unit,
+    onPing: () -> Unit
+) {
+    val node = treeNode.node
+    val isOffline = node.effectiveStatus == NodeStatus.OFFLINE
+    
+    // Pulsing Red Glow for Offline Nodes
+    val infiniteTransition = rememberInfiniteTransition(label = "offline_glow")
+    val glowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.05f,
+        targetValue = 0.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "alpha"
+    )
+
+    val paddingStart = (level * 20).dp
+    val statusColor = if (isOffline) Color(0xFFD32F2F) else Color(node.statusColorRgb)
+    
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = paddingStart, end = 8.dp, top = 2.dp, bottom = 2.dp)
+            .clickable(onClick = onNodeClick),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isOffline) Color(0xFFD32F2F).copy(alpha = glowAlpha) else MaterialTheme.colorScheme.surface
+        ),
+        border = BorderStroke(
+            width = if (level == 0) 1.dp else 0.5.dp,
+            color = statusColor.copy(alpha = if (level == 0) 0.4f else 0.2f)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Connector Line (Visual guide for tree)
+            if (level > 0) {
+                Box(
+                    modifier = Modifier
+                        .width(1.5.dp)
+                        .height(32.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+            }
+
+            // Icon
+            Box(
+                modifier = Modifier
+                    .size(if (level == 0) 42.dp else 36.dp)
+                    .clip(CircleShape)
+                    .background(statusColor.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = when (node.nodeType) {
+                        NetworkNodeType.MAIN_TOWER -> Icons.Default.CellTower
+                        NetworkNodeType.DISTRIBUTION -> Icons.Default.WifiTethering
+                        else -> Icons.Default.Home
+                    },
+                    contentDescription = null,
+                    tint = statusColor,
+                    modifier = Modifier.size(if (level == 0) 22.dp else 18.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // Info
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = node.name,
+                        fontWeight = if (level == 0) FontWeight.ExtraBold else FontWeight.Bold,
+                        fontSize = if (level == 0) 14.sp else 13.sp,
+                        color = if (isOffline) Color(0xFFD32F2F) else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1
+                    )
+                    if (isOffline) {
+                        Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(Color.Red))
+                    }
+                }
+                Text(
+                    text = "${node.ipAddress} • ${node.connectedUsers} مشترك",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // Actions
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (node.isOnline) {
+                    IconButton(onClick = onPing, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.NetworkPing, contentDescription = null, tint = statusColor, modifier = Modifier.size(16.dp))
+                    }
+                }
+                IconButton(onClick = onNodeClick, modifier = Modifier.size(30.dp)) {
+                    Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
+                }
+                if (treeNode.children.isNotEmpty()) {
+                    Icon(
+                        imageVector = Icons.Default.ExpandMore,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RootRouterHeader(name: String, ip: String, totalNodes: Int) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
+    ) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(44.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Router, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
+                }
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Column {
+                Text(text = name, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Text(text = "IP: $ip • إجمالي النقاط المسجلة: $totalNodes", fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
+            }
+        }
+    }
 }

@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit
 object AppUpdateManager {
 
     private const val GITHUB_OWNER = "azamfahd"
-    private const val GITHUB_REPO = "netmanager"
+    private const val GITHUB_REPO = "netmanager-"
     const val GITHUB_RELEASES_WEB_URL = "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases"
 
     private val httpClient = OkHttpClient.Builder()
@@ -32,12 +32,12 @@ object AppUpdateManager {
 
     /**
      * Checks GitHub API for the latest published release.
-     * Tries primary repo, fallback repo name, /releases/latest, and /releases array.
+     * Tries primary repo (netmanager-), fallback repo (netmanager), /releases/latest, and /releases array.
      * Returns Pair<GitHubReleaseInfo, isNewerVersion>.
      */
     suspend fun checkLatestRelease(currentVersion: String): Result<Pair<GitHubReleaseInfo, Boolean>> = withContext(Dispatchers.IO) {
         val repoCandidates = listOf(
-            Pair(GITHUB_OWNER, GITHUB_REPO),
+            Pair(GITHUB_OWNER, "netmanager-"),
             Pair(GITHUB_OWNER, "netmanager")
         )
 

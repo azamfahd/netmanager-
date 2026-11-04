@@ -1,33 +1,46 @@
-# خطة العمل المنفذة: إصلاح مشكلة رفض السيرفر للتعديلات وطابور المهام المحلي (Room Task Queue)
+# Implementation Plan - NetMaster Pro Local-First Architecture & Incremental Sync
 
-## 1. الإنجازات المكتملة
-1. **التعرف التلقائي الذكي على نظام الكروت (Smart System Auto-Detection):**
-   - تم دعم فحص مسار الكرت تلقائياً (Hotspot أو User Manager v6 أو User Manager v7).
-   - استخراج المعرف الداخلي الدقيق `.id` لاستخدامه في أوامر التعديل والحذف.
-
-2. **فصل الجلسات النشطة فوراً (Instant Active Session Terminate):**
-   - قطع أي جلسة نشطة للمستخدم في `/ip/hotspot/active` أو `/user-manager/session` قبل تنفيذ التعديل أو الحذف لضمان عدم رفض الراوتر للأمر أو قفل الكرت.
-
-3. **تصحيح أوامر RouterOS API و REST API:**
-   - استبعاد حقل `name` غير القابل للتعديل في طلبات الـ PATCH و `/set` لتجنب خطأ `cannot change user name` أو `!trap`.
-   - تنفيذ أمر تصفير العدادات (`reset-counters`) وتفعيل الحساب (`disabled=no`) بأمر مدمج ومباشر في إعادة التفعيل.
-
-4. **إنشاء طابور المهام المحلي (Room Task Queue):**
-   - إنشاء جدول `router_task_queue` عبر كيان `RouterTaskEntity` في قاعدة بيانات Room.
-   - دعم أنواع العمليات الأساسية: `EDIT_CARD`, `DELETE_CARD`, `TOGGLE_CARD`, `REACTIVATE_CARD`.
-   - ترقية إصدار قاعدة البيانات إلى 11 وتحديث `AppDao`.
-
-5. **تنفيذ آلية التراجع الأسي الذكية (Exponential Backoff):**
-   - فترات الانتظار المتصاعدة: (2 ثانية -> 4 ثوانٍ -> 8 ثوانٍ -> 16 ثانية -> 32 ثانية -> حد أقصى 60 ثانية).
-   - إدارة حالات المهام: `PENDING`, `PROCESSING`, `FAILED`, `COMPLETED`.
-   - محاولات ذكية تصل إلى 8 محاولات قبل وسم المهمة كـ `FAILED`، مع خيار إعادة المحاولة الفورية بضغطة زر.
-
-6. **التكامل الشامل مع الواجهة والعمل في الخلفية:**
-   - الحفظ التفاؤلي المحلي الفوري لمنع ارتداد الكرت أو عودته لما كان عليه عند بطء الاتصال أو انقطاعه.
-   - التشغيل التلقائي لطابور المهام عند الاتصال الأولي بالراوتر، أو استعادة الاتصال في دورة التحديث الدوري (Auto-Refresh)، أو الضغط على إعادة المزامنة (Retry Sync).
-   - عرض شريط تنبيهي ذكي وتفاعلي في شاشة الكروت `CardsScreen` يوضح عدد العمليات المعلقة في الطابور مع مؤشر تقدم وزر "إرسال الآن".
+## 1. Overview & Objectives
+Transform NetMaster Pro into a high-performance Local-First application with:
+- **Instant Local Startup**: Load data instantly from Room database without blocking on network requests.
+- **Incremental Sync**: Fetch only new, modified, or deleted records from MikroTik RouterOS using ID tracking, timestamps, and revision hashes.
+- **Background Synchronization**: Automatic background sync every 15 minutes with WorkManager / coroutine workers.
+- **Materialized Aggregates**: Store pre-calculated sales, profits, and summaries in Room to eliminate redundant computation.
+- **Database Indexing**: Add strategic indices on foreign keys, timestamps, and status columns for ultra-fast queries.
+- **Owner Conflict Resolution**: Prompt the network owner when local edits conflict with router changes.
 
 ---
 
-## 2. التحقق والاختبار
-- تم التحقق من نجاح البناء التراكمي للبرنامج عبر `compile_applet` بدون أي أخطاء برمجية.
+## 2. Proposed Changes
+
+### A. Database & Entities (`Room`)
+- **Add Indices**: Add `@Index` annotations on frequently queried columns in `AppDatabase.kt` (e.g., `saved_routers`, `local_cards`, `session_archive`, `system_event_logs`, `network_nodes`).
+- **Materialized Aggregates Table**: Create a new entity `MaterializedSummaryEntity` to store cached financial metrics, active card counts, and traffic summaries with a `lastUpdated` timestamp.
+- **Sync Tracking Metadata**: Add sync state fields (`isSynced`, `lastModifiedTimestamp`, `syncVersion`) to local entities.
+
+### B. Repository & Incremental Sync (`MikrotikRepository.kt`)
+- **Local-First Provider**: Expose Room flows immediately upon connection or startup.
+- **Incremental Sync Engine**: Implement delta-fetching comparing local record IDs/timestamps with live MikroTik REST API responses.
+- **Conflict Detector**: Compare local un-synced modifications against incoming router updates; trigger an interactive prompt dialog if a conflict is detected.
+
+### C. Background Worker (`AppSyncWorker.kt`)
+- **Periodic Sync**: Set up a WorkManager periodic worker (or robust coroutine scheduler) running every 15 minutes to perform incremental sync in the background without freezing the UI.
+- **Connectivity Awareness**: Skip or retry gracefully when the network is disconnected, implementing exponential backoff.
+
+### D. ViewModel & UI Enhancements (`MainViewModel.kt` & Screens)
+- **Sync Status Bar**: Display clear last-sync timestamps and sync progress indicators in the UI.
+- **Manual Sync Action**: Provide a manual pull-to-refresh or force-sync button.
+- **Conflict Resolution Dialog**: Composable dialog allowing the network owner to choose between keeping local edits or applying router updates.
+
+---
+
+## 3. Verification Plan
+
+### Automated Tests
+- Run unit and Robolectric tests via `gradle :app:testDebugUnitTest`.
+
+### Manual & Integration Verification
+1. Verify instant startup showing cached local data without network delay.
+2. Verify background sync running every 15 minutes updating delta records.
+3. Test conflict resolution dialog when simultaneous modifications occur.
+4. Verify performance improvement with large datasets.

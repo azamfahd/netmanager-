@@ -20,9 +20,10 @@ import androidx.room.RoomDatabase
         SystemEventLogEntity::class,
         LocalCardEntity::class,
         MonthlyProfitRecordEntity::class,
-        RouterTaskEntity::class
+        RouterTaskEntity::class,
+        MaterializedSummaryEntity::class
     ],
-    version = 11,
+    version = 15,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

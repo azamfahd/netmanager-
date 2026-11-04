@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
@@ -128,6 +129,7 @@ class MikrotikRepository(
     suspend fun initializeFromLocalDatabase() {
         val dao = appDao ?: return
         try {
+            // 1. Local Cards Cache
             val localCards = dao.getAllLocalCardsSync()
             if (localCards.isNotEmpty()) {
                 localCards.forEach {
@@ -140,7 +142,21 @@ class MikrotikRepository(
                     _cards.value = cardsList
                 }
             }
-        } catch (_: Exception) {}
+
+            // 2. Local Network Nodes Cache
+            val localNodes = dao.getAllNetworkNodesSync()
+            if (localNodes.isNotEmpty() && _networkNodes.value.isEmpty()) {
+                _networkNodes.value = localNodes.map { it.toNetworkNode() }
+            }
+
+            // 3. Cached Materialized Summary
+            val cachedSummary = dao.getMaterializedSummary()
+            if (cachedSummary != null) {
+                Log.d("MikrotikRepository", "Loaded cached materialized summary: rev=${cachedSummary.totalEstimatedRevenue}")
+            }
+        } catch (e: Exception) {
+            Log.e("MikrotikRepository", "Error initializing from local database: ${e.message}")
+        }
     }
 
     private val lastKnownUserTelemetry = java.util.concurrent.ConcurrentHashMap<String, UserKnownTelemetry>()
@@ -223,8 +239,29 @@ class MikrotikRepository(
     private val _cards = MutableStateFlow<List<HotspotCard>>(emptyList())
     val cards: StateFlow<List<HotspotCard>> = _cards.asStateFlow()
 
+    fun updateLocalCard(updatedCard: HotspotCard) {
+        _cards.value = _cards.value.map {
+            if (it.id == updatedCard.id || it.name == updatedCard.name) updatedCard else it
+        }
+    }
+
     private val _profiles = MutableStateFlow<List<HotspotProfile>>(emptyList())
     val profiles: StateFlow<List<HotspotProfile>> = _profiles.asStateFlow()
+
+    fun updateLocalProfile(profile: HotspotProfile) {
+        val current = _profiles.value.toMutableList()
+        val idx = current.indexOfFirst { it.id == profile.id || it.name.equals(profile.name, ignoreCase = true) }
+        if (idx >= 0) {
+            current[idx] = profile
+        } else {
+            current.add(profile)
+        }
+        _profiles.value = current
+    }
+
+    fun removeLocalProfile(profile: HotspotProfile) {
+        _profiles.value = _profiles.value.filter { it.id != profile.id && !it.name.equals(profile.name, ignoreCase = true) }
+    }
 
     private val _ipBindings = MutableStateFlow<List<IpBinding>>(emptyList())
     val ipBindings: StateFlow<List<IpBinding>> = _ipBindings.asStateFlow()
@@ -1655,38 +1692,62 @@ class MikrotikRepository(
                     }
                 } catch (_: Exception) {}
 
-                // Fetch wireless interfaces & neighbors
+                // 5. Fetch Wireless Interfaces, Neighbors and Registrations in parallel to reduce sync lag
+                val wirelessJob = async {
+                    try {
+                        val wReq = Request.Builder().url("$baseUrl/rest/interface/wireless").header("Authorization", credential).build()
+                        val wResp = httpClient.newCall(wReq).execute()
+                        if (wResp.isSuccessful) JSONArray(wResp.body?.string() ?: "[]") else JSONArray()
+                    } catch (_: Exception) { JSONArray() }
+                }
+
+                val neighborJob = async {
+                    try {
+                        val nReq = Request.Builder().url("$baseUrl/rest/ip/neighbor").header("Authorization", credential).build()
+                        val nResp = httpClient.newCall(nReq).execute()
+                        if (nResp.isSuccessful) JSONArray(nResp.body?.string() ?: "[]") else JSONArray()
+                    } catch (_: Exception) { JSONArray() }
+                }
+
+                val registrationsJob = async {
+                    try {
+                        val rReq = Request.Builder().url("$baseUrl/rest/interface/wireless/registration-table").header("Authorization", credential).build()
+                        val rResp = httpClient.newCall(rReq).execute()
+                        if (rResp.isSuccessful) JSONArray(rResp.body?.string() ?: "[]") else JSONArray()
+                    } catch (_: Exception) { JSONArray() }
+                }
+
+                val wirelessArray = wirelessJob.await()
+                val neighborArray = neighborJob.await()
+                val registrationsArray = registrationsJob.await()
+
                 val wirelessList = mutableListOf<Map<String, String>>()
-                try {
-                    val wReq = Request.Builder().url("$baseUrl/rest/interface/wireless").header("Authorization", credential).build()
-                    val wResp = httpClient.newCall(wReq).execute()
-                    if (wResp.isSuccessful) {
-                        val arr = JSONArray(wResp.body?.string() ?: "[]")
-                        for (i in 0 until arr.length()) {
-                            val o = arr.getJSONObject(i)
-                            val map = mutableMapOf<String, String>()
-                            o.keys().forEach { k -> map[k] = o.optString(k) }
-                            wirelessList.add(map)
-                        }
-                    }
-                } catch (_: Exception) {}
+                for (i in 0 until wirelessArray.length()) {
+                    val o = wirelessArray.getJSONObject(i)
+                    val m = mutableMapOf<String, String>()
+                    o.keys().forEach { m[it] = o.optString(it) }
+                    wirelessList.add(m)
+                }
 
                 val neighborsList = mutableListOf<Map<String, String>>()
-                try {
-                    val nReq = Request.Builder().url("$baseUrl/rest/ip/neighbor").header("Authorization", credential).build()
-                    val nResp = httpClient.newCall(nReq).execute()
-                    if (nResp.isSuccessful) {
-                        val arr = JSONArray(nResp.body?.string() ?: "[]")
-                        for (i in 0 until arr.length()) {
-                            val o = arr.getJSONObject(i)
-                            val map = mutableMapOf<String, String>()
-                            o.keys().forEach { k -> map[k] = o.optString(k) }
-                            neighborsList.add(map)
-                        }
-                    }
-                } catch (_: Exception) {}
+                for (i in 0 until neighborArray.length()) {
+                    val o = neighborArray.getJSONObject(i)
+                    val m = mutableMapOf<String, String>()
+                    o.keys().forEach { m[it] = o.optString(it) }
+                    neighborsList.add(m)
+                }
 
-                activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface) }
+                val wirelessRegs = mutableListOf<Map<String, String>>()
+                for (i in 0 until registrationsArray.length()) {
+                    val o = registrationsArray.getJSONObject(i)
+                    val m = mutableMapOf<String, String>()
+                    o.keys().forEach { m[it] = o.optString(it) }
+                    wirelessRegs.add(m)
+                }
+
+                CoroutineScope(Dispatchers.IO).launch {
+                    activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface, wirelessRegs) }
+                }
                 notifyDataRefreshed()
             } catch (_: Exception) {}
         }
@@ -1763,10 +1824,12 @@ class MikrotikRepository(
             )
         }
 
-        syncLiveSessionsAndNodes(config)
+        CoroutineScope(Dispatchers.IO).launch {
+            syncLiveSessionsAndNodes(config)
+        }
     }
 
-    private fun syncLiveSessionsAndNodes(
+    private suspend fun syncLiveSessionsAndNodes(
         config: RouterConnectionConfig,
         wirelessInterfaces: List<Map<String, String>> = emptyList(),
         neighbors: List<Map<String, String>> = emptyList(),
@@ -1782,8 +1845,34 @@ class MikrotikRepository(
         val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else "192.168.88"
         val serverName = realIdentity.ifBlank { config.name.ifBlank { "السيرفر الرئيسي ($routerIpBase)" } }
 
-        // 1. Gather all candidate sub-nodes (Wireless APs, Neighbor APs, and Custom Added Nodes)
+        // 1. Gather all candidate sub-nodes (Wireless APs, Neighbor APs, and Persistent DB Nodes)
         val candidateSubNodes = mutableListOf<com.example.data.model.NetworkNode>()
+        
+        // Load persistent nodes from DB to ensure we show "Closed/Offline" ones
+        val dbNodes = try {
+            appDao?.getAllNetworkNodesSync()?.map { 
+                com.example.data.model.NetworkNode(
+                    id = it.id,
+                    name = it.name,
+                    ipAddress = it.ipAddress,
+                    macAddress = it.macAddress,
+                    interfaceName = it.interfaceName,
+                    model = it.model,
+                    role = it.role,
+                    nodeType = com.example.data.model.NetworkNodeType.valueOf(it.nodeType),
+                    status = com.example.data.model.NodeStatus.OFFLINE, // Default to offline, discovery will update it
+                    parentTowerId = it.parentTowerId,
+                    parentTowerName = it.parentTowerName,
+                    isOnline = false,
+                    location = it.location,
+                    ssid = it.ssid,
+                    connectedUsers = 0,
+                    connectedClients = emptyList()
+                )
+            }
+        } catch (e: Exception) {
+            emptyList<com.example.data.model.NetworkNode>()
+        }
 
         // A. Real wireless AP interfaces from router
         wirelessInterfaces.forEachIndexed { idx, w ->
@@ -1804,6 +1893,7 @@ class MikrotikRepository(
                     model = "MikroTik Wireless ($band)",
                     role = "أكسس بوينت لاسلكي ($ifName)",
                     isOnline = isRunning,
+                    status = if (isRunning) com.example.data.model.NodeStatus.ACTIVE else com.example.data.model.NodeStatus.OFFLINE,
                     pingMs = 2L,
                     uptime = _resourceState.value.uptime,
                     signalDbm = "-55 dBm",
@@ -1849,6 +1939,7 @@ class MikrotikRepository(
                     model = nPlatform,
                     role = "أكسس بوينت / برج متصل ($nInterface)",
                     isOnline = true,
+                    status = com.example.data.model.NodeStatus.ACTIVE,
                     pingMs = 3L,
                     uptime = _resourceState.value.uptime,
                     signalDbm = "-58 dBm",
@@ -1858,7 +1949,19 @@ class MikrotikRepository(
             )
         }
 
-        // C. Custom user-added nodes
+        // C. Merge with DB nodes: ensuring even offline ones stay in the list
+        dbNodes?.forEach { dbNode ->
+            val discovered = candidateSubNodes.find { 
+                (dbNode.macAddress.isNotBlank() && it.macAddress.equals(dbNode.macAddress, true)) || 
+                (dbNode.ipAddress.isNotBlank() && it.ipAddress == dbNode.ipAddress) 
+            }
+            if (discovered == null) {
+                // Not found in this scan -> Add as offline persistent node
+                candidateSubNodes.add(dbNode)
+            }
+        }
+
+        // D. Custom user-added nodes (in-memory additions during session)
         customAddedNodes.forEach { customNode ->
             if (candidateSubNodes.none { it.id == customNode.id || it.ipAddress == customNode.ipAddress }) {
                 candidateSubNodes.add(customNode)
@@ -2069,7 +2172,20 @@ class MikrotikRepository(
         val nodesList = mutableListOf<com.example.data.model.NetworkNode>()
         nodesList.add(mainRouterNode)
         nodesList.addAll(processedSubNodes)
-        _networkNodes.value = nodesList.distinctBy { it.id.ifBlank { it.ipAddress } }
+        val distinctNodes = nodesList.distinctBy { it.id.ifBlank { it.ipAddress } }
+        _networkNodes.value = distinctNodes
+
+        // Persist discovered and matched nodes to DB so they appear as "Offline" later if not found
+        runBlocking {
+            try {
+                val entities = distinctNodes.map { 
+                    com.example.data.local.NetworkNodeEntity.fromNetworkNode(it) 
+                }
+                appDao?.insertOrUpdateNetworkNodes(entities)
+            } catch (e: Exception) {
+                // Ignore DB errors during background sync to prevent app crash
+            }
+        }
 
         // 4. Update _activeUsers so each user's nodeName reflects the actual connected node
         _activeUsers.value = activeList.map { u ->
@@ -2319,6 +2435,111 @@ class MikrotikRepository(
         }
     }
 
+    suspend fun refreshCardsFromRouter() {
+        val config = activeConfig ?: return
+        if (config.isDemoMode) return
+        withContext(Dispatchers.IO) {
+            if (isApiSocketMode) {
+                val hotspotCardsRes = routerOsApiClient.getHotspotUsers()
+                val umCardsRes = routerOsApiClient.getUserManagerUsers()
+                val hotspotCards = hotspotCardsRes.getOrNull()
+                val umCards = umCardsRes.getOrNull()
+                if (hotspotCards != null || umCards != null) {
+                    val combinedCards = mutableListOf<HotspotCard>()
+                    hotspotCards?.let { combinedCards.addAll(it) }
+                    val existingNames = combinedCards.map { it.name }.toSet()
+                    umCards?.forEach { umCard ->
+                        if (!existingNames.contains(umCard.name)) {
+                            combinedCards.add(umCard)
+                        }
+                    }
+                    val distinctCards = combinedCards.distinctBy { it.name }
+                    val sortedCards = sortCardsByNewestFirst(distinctCards)
+                    if (sortedCards.isNotEmpty()) {
+                        _cards.value = sortedCards
+                        syncCardsToRoom(sortedCards)
+                    }
+                }
+            } else {
+                try {
+                    val protocol = if (config.useHttps) "https" else "http"
+                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                    val credential = Credentials.basic(config.username, config.password)
+                    val cardList = mutableListOf<HotspotCard>()
+
+                    val userReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user").header("Authorization", credential).build()
+                    val userResp = httpClient.newCall(userReq).execute()
+                    if (userResp.isSuccessful) {
+                        val userArray = JSONArray(userResp.body?.string() ?: "[]")
+                        for (i in 0 until userArray.length()) {
+                            val obj = userArray.getJSONObject(i)
+                            val name = obj.optString("name", "card$i")
+                            val comment = obj.optString("comment", "")
+                            val profile = obj.optString("profile", "default")
+                            val price = extractPriceFromText(comment, profile, name)
+                            cardList.add(
+                                HotspotCard(
+                                    id = obj.optString(".id", "u$i"),
+                                    name = name,
+                                    password = obj.optString("password", ""),
+                                    profile = profile,
+                                    uptime = obj.optString("uptime", "0s"),
+                                    bytesIn = obj.optLong("bytes-in", 0L),
+                                    bytesOut = obj.optLong("bytes-out", 0L),
+                                    limitUptime = obj.optString("limit-uptime", ""),
+                                    limitBytesTotal = obj.optLong("limit-bytes-total", 0L),
+                                    comment = comment,
+                                    disabled = obj.optBoolean("disabled", false),
+                                    price = price
+                                )
+                            )
+                        }
+                    }
+
+                    try {
+                        val umReq = Request.Builder().url("$baseUrl/rest/user-manager/user").header("Authorization", credential).build()
+                        val umResp = httpClient.newCall(umReq).execute()
+                        if (umResp.isSuccessful) {
+                            val umArray = JSONArray(umResp.body?.string() ?: "[]")
+                            val existingNames = cardList.map { it.name }.toSet()
+                            for (i in 0 until umArray.length()) {
+                                val obj = umArray.getJSONObject(i)
+                                val name = obj.optString("name", "")
+                                if (name.isNotBlank() && !existingNames.contains(name)) {
+                                    val comment = obj.optString("comment", "")
+                                    val profile = obj.optString("actual-profile", obj.optString("profile", "default"))
+                                    val price = extractPriceFromText(comment, profile, name)
+                                    cardList.add(
+                                        HotspotCard(
+                                            id = obj.optString(".id", "um$i"),
+                                            name = name,
+                                            password = obj.optString("password", ""),
+                                            profile = profile,
+                                            uptime = obj.optString("uptime", "0s"),
+                                            bytesIn = obj.optLong("download-used", 0L),
+                                            bytesOut = obj.optLong("upload-used", 0L),
+                                            limitUptime = obj.optString("time-limit", ""),
+                                            limitBytesTotal = obj.optLong("download-limit", 0L),
+                                            comment = comment,
+                                            disabled = obj.optBoolean("disabled", false),
+                                            price = price
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    val sortedCards = sortCardsByNewestFirst(cardList.distinctBy { it.name })
+                    if (sortedCards.isNotEmpty()) {
+                        _cards.value = sortedCards
+                        syncCardsToRoom(sortedCards)
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
     suspend fun refreshData(): Result<Unit> {
         val config = activeConfig ?: return Result.failure(Exception("لم يتم ضبط إعدادات الاتصال"))
         if (config.isDemoMode) {
@@ -2504,22 +2725,71 @@ class MikrotikRepository(
                         val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                         val credential = Credentials.basic(config.username, config.password)
 
-                        // 1. Reset counters via REST action
-                        val resetBody = JSONObject().put("numbers", card.id).toString().toRequestBody("application/json".toMediaType())
-                        val resetReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/reset-counters").post(resetBody).header("Authorization", credential).build()
-                        httpClient.newCall(resetReq).execute()
+                        // 0. Disconnect active session first
+                        if (card.name.isNotBlank()) {
+                            try {
+                                val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${card.name}").get().header("Authorization", credential).build()
+                                val actResp = httpClient.newCall(actReq).execute()
+                                if (actResp.isSuccessful) {
+                                    val arr = JSONArray(actResp.body?.string().orEmpty())
+                                    for (i in 0 until arr.length()) {
+                                        val actId = arr.getJSONObject(i).optString(".id")
+                                        if (actId.isNotBlank()) {
+                                            val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/$actId").delete().header("Authorization", credential).build()
+                                            httpClient.newCall(delReq).execute()
+                                        }
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
 
-                        // 2. Enable card
-                        val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
-                        val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/${card.id}").patch(enableBody).header("Authorization", credential).build()
-                        val hsResp = httpClient.newCall(hsReq).execute()
+                        // 1. Resolve Hotspot real .id
+                        var realId = if (card.id.startsWith("*")) card.id else ""
+                        if (realId.isBlank() && card.name.isNotBlank()) {
+                            try {
+                                val findReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${card.name}").get().header("Authorization", credential).build()
+                                val findResp = httpClient.newCall(findReq).execute()
+                                if (findResp.isSuccessful) {
+                                    val arr = JSONArray(findResp.body?.string().orEmpty())
+                                    if (arr.length() > 0) {
+                                        realId = arr.getJSONObject(0).optString(".id")
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
 
-                        if (!hsResp.isSuccessful) {
-                            // Try UM v7
-                            val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${card.name}").patch(enableBody).header("Authorization", credential).build()
-                            val um7Resp = httpClient.newCall(um7Req).execute()
-                            if (!um7Resp.isSuccessful) {
-                                // Try UM v6
+                        if (realId.isNotBlank()) {
+                            // Reset counters & enable in Hotspot
+                            val resetBody = JSONObject().put("numbers", realId).toString().toRequestBody("application/json".toMediaType())
+                            val resetReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/reset-counters").post(resetBody).header("Authorization", credential).build()
+                            httpClient.newCall(resetReq).execute()
+
+                            val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
+                            val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/$realId").patch(enableBody).header("Authorization", credential).build()
+                            val hsResp = httpClient.newCall(hsReq).execute()
+                            if (!hsResp.isSuccessful) {
+                                val err = hsResp.body?.string().orEmpty()
+                                return@withContext Result.failure(Exception("رفض الراوتر إعادة تفعيل الكرت في الهوتسبوت: $err"))
+                            }
+                        } else {
+                            // Try User Manager v7
+                            var umSuccess = false
+                            try {
+                                val umResetBody = JSONObject().put("numbers", card.name).toString().toRequestBody("application/json".toMediaType())
+                                val umResetReq = Request.Builder().url("$baseUrl/rest/user-manager/user/reset-counters").post(umResetBody).header("Authorization", credential).build()
+                                httpClient.newCall(umResetReq).execute()
+
+                                val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
+                                val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${card.name}").patch(enableBody).header("Authorization", credential).build()
+                                val um7Resp = httpClient.newCall(um7Req).execute()
+                                if (um7Resp.isSuccessful) {
+                                    umSuccess = true
+                                }
+                            } catch (_: Exception) {}
+
+                            if (!umSuccess) {
+                                // Try User Manager v6
+                                val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
                                 val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${card.name}").patch(enableBody).header("Authorization", credential).build()
                                 val um6Resp = httpClient.newCall(um6Req).execute()
                                 if (!um6Resp.isSuccessful) {
@@ -3384,17 +3654,95 @@ class MikrotikRepository(
                         val protocol = if (config.useHttps) "https" else "http"
                         val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                         val credential = Credentials.basic(config.username, config.password)
-                        val patchJson = JSONObject().apply {
-                            put("disabled", "false")
-                            put("server", "all")
-                            put("profile", card.profile.trim().ifBlank { "default" })
-                        }.toString()
-                        val patchReq = Request.Builder()
-                            .url("$baseUrl/rest/ip/hotspot/user/${card.id}")
-                            .patch(patchJson.toRequestBody("application/json".toMediaType()))
-                            .header("Authorization", credential)
-                            .build()
-                        httpClient.newCall(patchReq).execute()
+                        val cleanProfile = card.profile.trim().ifBlank { "default" }
+
+                        // 1. Disconnect any active session
+                        if (card.name.isNotBlank()) {
+                            try {
+                                val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${card.name}").get().header("Authorization", credential).build()
+                                val actResp = httpClient.newCall(actReq).execute()
+                                if (actResp.isSuccessful) {
+                                    val arr = JSONArray(actResp.body?.string().orEmpty())
+                                    for (i in 0 until arr.length()) {
+                                        val actId = arr.getJSONObject(i).optString(".id")
+                                        if (actId.isNotBlank()) {
+                                            val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/$actId").delete().header("Authorization", credential).build()
+                                            httpClient.newCall(delReq).execute()
+                                        }
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
+
+                        // 2. Query hotspot user to find real .id
+                        var realId = if (card.id.startsWith("*")) card.id else ""
+                        if (realId.isBlank()) {
+                            try {
+                                val getReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${card.name}").get().header("Authorization", credential).build()
+                                val getResp = httpClient.newCall(getReq).execute()
+                                if (getResp.isSuccessful) {
+                                    val arr = JSONArray(getResp.body?.string().orEmpty())
+                                    if (arr.length() > 0) {
+                                        realId = arr.getJSONObject(0).optString(".id")
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
+
+                        if (realId.isNotBlank()) {
+                            val patchJson = JSONObject().apply {
+                                put("disabled", "false")
+                                put("server", "all")
+                                put("profile", cleanProfile)
+                            }.toString()
+                            val patchReq = Request.Builder()
+                                .url("$baseUrl/rest/ip/hotspot/user/$realId")
+                                .patch(patchJson.toRequestBody("application/json".toMediaType()))
+                                .header("Authorization", credential)
+                                .build()
+                            val patchResp = httpClient.newCall(patchReq).execute()
+                            if (!patchResp.isSuccessful) {
+                                val err = patchResp.body?.string().orEmpty()
+                                return@withContext Result.failure(Exception("رفض الراوتر تفعيل الكرت في الهوتسبوت: $err"))
+                            }
+                        } else {
+                            // Try user manager v7
+                            var um7Success = false
+                            try {
+                                val umPatch = JSONObject().apply { put("disabled", "false") }.toString()
+                                val umReq = Request.Builder()
+                                    .url("$baseUrl/rest/user-manager/user/${card.name}")
+                                    .patch(umPatch.toRequestBody("application/json".toMediaType()))
+                                    .header("Authorization", credential)
+                                    .build()
+                                val umResp = httpClient.newCall(umReq).execute()
+                                if (umResp.isSuccessful) {
+                                    um7Success = true
+                                }
+                            } catch (_: Exception) {}
+
+                            if (!um7Success) {
+                                // Add user to hotspot
+                                val addJson = JSONObject().apply {
+                                    put("name", card.name)
+                                    put("password", card.password.ifBlank { card.name })
+                                    put("profile", cleanProfile)
+                                    put("disabled", "false")
+                                    put("server", "all")
+                                    if (card.comment.isNotBlank()) put("comment", card.comment)
+                                }.toString()
+                                val addReq = Request.Builder()
+                                    .url("$baseUrl/rest/ip/hotspot/user")
+                                    .post(addJson.toRequestBody("application/json".toMediaType()))
+                                    .header("Authorization", credential)
+                                    .build()
+                                val addResp = httpClient.newCall(addReq).execute()
+                                if (!addResp.isSuccessful) {
+                                    val err = addResp.body?.string().orEmpty()
+                                    return@withContext Result.failure(Exception("رفض الراوتر تفعيل أو إضافة الكرت: $err"))
+                                }
+                            }
+                        }
                         Result.success(true)
                     } catch (e: Exception) {
                         Result.failure(e)
@@ -3403,73 +3751,14 @@ class MikrotikRepository(
             }
             if (res.isFailure) return res
         }
+        val activated = card.copy(disabled = false)
         _cards.value = _cards.value.map {
-            if (it.id == card.id || it.name == card.name) {
-                it.copy(disabled = false)
-            } else it
+            if (it.id == card.id || it.name == card.name) activated else it
         }
-        return Result.success(true)
-    }
-
-    private suspend fun refreshCardsFromRouter() {
         try {
-            if (isApiSocketMode) {
-                val hotspotCards = routerOsApiClient.getHotspotUsers().getOrDefault(emptyList())
-                val umCards = routerOsApiClient.getUserManagerUsers().getOrDefault(emptyList())
-                val combined = mutableListOf<HotspotCard>()
-                combined.addAll(hotspotCards)
-                val existingNames = hotspotCards.map { it.name }.toSet()
-                umCards.forEach {
-                    if (!existingNames.contains(it.name)) combined.add(it)
-                }
-                if (combined.isNotEmpty()) {
-                    _cards.value = combined.distinctBy { it.name }
-                }
-            } else {
-                activeConfig?.let { config ->
-                    val protocol = if (config.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
-                    val credential = Credentials.basic(config.username, config.password)
-                    val cardList = mutableListOf<HotspotCard>()
-                    try {
-                        val req = Request.Builder().url("$baseUrl/rest/ip/hotspot/user").header("Authorization", credential).build()
-                        val resp = httpClient.newCall(req).execute()
-                        if (resp.isSuccessful) {
-                            val arr = JSONArray(resp.body?.string() ?: "[]")
-                            for (i in 0 until arr.length()) {
-                                val obj = arr.getJSONObject(i)
-                                val name = obj.optString("name", "")
-                                if (name.isNotBlank()) {
-                                    val comment = obj.optString("comment", "")
-                                    val profile = obj.optString("profile", "default")
-                                    cardList.add(
-                                        HotspotCard(
-                                            id = obj.optString(".id", "c$i"),
-                                            name = name,
-                                            password = obj.optString("password", ""),
-                                            profile = profile,
-                                            uptime = obj.optString("uptime", "0s"),
-                                            bytesIn = obj.optLong("bytes-in", 0L),
-                                            bytesOut = obj.optLong("bytes-out", 0L),
-                                            limitUptime = obj.optString("limit-uptime", ""),
-                                            limitBytesTotal = obj.optLong("limit-bytes-total", 0L),
-                                            comment = comment,
-                                            disabled = obj.optBoolean("disabled", false),
-                                            price = extractPriceFromText(comment, profile, name)
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                    } catch (_: Exception) {}
-                    if (cardList.isNotEmpty()) {
-                        _cards.value = cardList.distinctBy { it.name }
-                    } else {
-                        _cards.value = emptyList()
-                    }
-                }
-            }
+            appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(activated))
         } catch (_: Exception) {}
+        return Result.success(true)
     }
 
     suspend fun createProfile(profile: HotspotProfile): Result<Boolean> {
@@ -3492,12 +3781,16 @@ class MikrotikRepository(
                         val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                         val credential = Credentials.basic(config.username, config.password)
                         
+                        val cleanRateLimit = profile.rateLimit.trim()
+                        val cleanTimeout = profile.sessionTimeout.trim()
+                        val formattedTimeout = routerOsApiClient.formatRouterOsTime(cleanTimeout)
+
                         if (profile.source.contains("usermanager") || profile.source == "both") {
                             val umJson = JSONObject().apply {
                                 put("name", profile.name)
                                 val valTime = routerOsApiClient.formatRouterOsTime(profile.validity.ifBlank { profile.sessionTimeout }) ?: "1d"
                                 put("validity", valTime)
-                                val priceNum = profile.priceNumber.takeIf { it > 0 } ?: 0.0
+                                val priceNum = profile.priceNumber.takeIf { it > 0 } ?: profile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 0.0
                                 if (priceNum > 0) put("price", priceNum.toInt().toString())
                             }.toString()
                             val postUm = Request.Builder()
@@ -3510,10 +3803,18 @@ class MikrotikRepository(
                         if (profile.source == "hotspot" || profile.source == "both") {
                             val jsonBody = JSONObject().apply {
                                 put("name", profile.name)
-                                put("rate-limit", profile.rateLimit)
-                                put("shared-users", profile.sharedUsers.toString())
-                                if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
-                                if (profile.price.isNotBlank()) put("comment", "price=${profile.price}")
+                                if (cleanRateLimit.isNotBlank() && cleanRateLimit != "غير محدد" && cleanRateLimit != "مفتوح") {
+                                    put("rate-limit", cleanRateLimit)
+                                }
+                                put("shared-users", if (profile.sharedUsers > 0) profile.sharedUsers.toString() else "1")
+                                if (!formattedTimeout.isNullOrBlank()) {
+                                    put("session-timeout", formattedTimeout)
+                                }
+                                if (profile.price.isNotBlank() && profile.price != "0" && profile.price != "مجاني") {
+                                    put("comment", "price=${profile.price}")
+                                } else if (profile.comment.isNotBlank()) {
+                                    put("comment", profile.comment)
+                                }
                             }.toString()
 
                             val postReq = Request.Builder()
@@ -3521,7 +3822,13 @@ class MikrotikRepository(
                                 .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(postReq).execute()
+                            val resp = httpClient.newCall(postReq).execute()
+                            if (!resp.isSuccessful) {
+                                val err = resp.body?.string().orEmpty()
+                                if (!err.contains("already exists", ignoreCase = true)) {
+                                    return@withContext Result.failure(Exception("رفض الراوتر إنشاء الباقة: $err"))
+                                }
+                            }
                         }
                         Result.success(true)
                     } catch (e: Exception) {
@@ -3556,21 +3863,82 @@ class MikrotikRepository(
                         val protocol = if (config.useHttps) "https" else "http"
                         val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                         val credential = Credentials.basic(config.username, config.password)
+                        val cleanRateLimit = profile.rateLimit.trim()
+                        val cleanTimeout = profile.sessionTimeout.trim()
+                        val formattedTimeout = routerOsApiClient.formatRouterOsTime(cleanTimeout)
+
+                        val isUserManager = profile.source.contains("usermanager")
+
+                        if (isUserManager) {
+                            var umProfileId = if (profile.id.startsWith("*")) profile.id else ""
+                            if (umProfileId.isBlank()) {
+                                try {
+                                    val getReq = Request.Builder().url("$baseUrl/rest/user-manager/profile?name=${profile.name}").get().header("Authorization", credential).build()
+                                    val getResp = httpClient.newCall(getReq).execute()
+                                    if (getResp.isSuccessful) {
+                                        val arr = JSONArray(getResp.body?.string().orEmpty())
+                                        if (arr.length() > 0) umProfileId = arr.getJSONObject(0).optString(".id")
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                            val targetId = umProfileId.ifBlank { profile.name }
+                            val umJson = JSONObject().apply {
+                                val valTime = profile.validity.ifBlank { profile.sessionTimeout }.let { routerOsApiClient.formatRouterOsTime(it) } ?: "1d"
+                                put("validity", valTime)
+                                val priceNum = profile.priceNumber.takeIf { it > 0 } ?: profile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 0.0
+                                if (priceNum > 0) put("price", priceNum.toInt().toString())
+                            }.toString()
+                            val patchUm = Request.Builder()
+                                .url("$baseUrl/rest/user-manager/profile/$targetId")
+                                .patch(umJson.toRequestBody("application/json".toMediaType()))
+                                .header("Authorization", credential)
+                                .build()
+                            val resp = httpClient.newCall(patchUm).execute()
+                            if (!resp.isSuccessful) {
+                                val err = resp.body?.string().orEmpty()
+                                return@withContext Result.failure(Exception("رفض الراوتر تعديل باقة يوزرمانجر: $err"))
+                            }
+                            return@withContext Result.success(true)
+                        }
+
+                        // Hotspot profile update
+                        var realId = if (profile.id.startsWith("*")) profile.id else ""
+                        if (realId.isBlank()) {
+                            try {
+                                val getReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile?name=${profile.name}").get().header("Authorization", credential).build()
+                                val getResp = httpClient.newCall(getReq).execute()
+                                if (getResp.isSuccessful) {
+                                    val arr = JSONArray(getResp.body?.string().orEmpty())
+                                    if (arr.length() > 0) realId = arr.getJSONObject(0).optString(".id")
+                                }
+                            } catch (_: Exception) {}
+                        }
+                        val effectiveId = realId.ifBlank { profile.name }
+
                         val jsonBody = JSONObject().apply {
-                            put("rate-limit", profile.rateLimit)
-                            put("shared-users", profile.sharedUsers.toString())
-                            if (profile.sessionTimeout.isNotBlank()) put("session-timeout", profile.sessionTimeout)
-                            if (profile.price.isNotBlank()) put("comment", "price=${profile.price}")
+                            if (cleanRateLimit.isNotBlank() && cleanRateLimit != "غير محدد" && cleanRateLimit != "مفتوح") {
+                                put("rate-limit", cleanRateLimit)
+                            }
+                            put("shared-users", if (profile.sharedUsers > 0) profile.sharedUsers.toString() else "1")
+                            if (!formattedTimeout.isNullOrBlank()) {
+                                put("session-timeout", formattedTimeout)
+                            }
+                            if (profile.price.isNotBlank() && profile.price != "0" && profile.price != "مجاني") {
+                                put("comment", "price=${profile.price}")
+                            } else if (profile.comment.isNotBlank()) {
+                                put("comment", profile.comment)
+                            }
                         }.toString()
 
                         val patchReq = Request.Builder()
-                            .url("$baseUrl/rest/ip/hotspot/user/profile/${profile.id}")
+                            .url("$baseUrl/rest/ip/hotspot/user/profile/$effectiveId")
                             .patch(jsonBody.toRequestBody("application/json".toMediaType()))
                             .header("Authorization", credential)
                             .build()
                         val resp = httpClient.newCall(patchReq).execute()
                         if (!resp.isSuccessful) {
-                            Result.failure(Exception("فشل تعديل الباقة عبر واجهة REST (رمز: ${resp.code})"))
+                            val err = resp.body?.string().orEmpty()
+                            return@withContext Result.failure(Exception("فشل تعديل الباقة عبر واجهة REST: $err"))
                         } else {
                             Result.success(true)
                         }

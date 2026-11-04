@@ -91,6 +91,18 @@ class RouterTaskQueueManager(
     }
 
     /**
+     * Enqueue a card verification and activation operation.
+     */
+    suspend fun enqueueVerifyAndActivateCard(card: HotspotCard): Long {
+        return withContext(Dispatchers.IO) {
+            val task = RouterTaskEntity.createVerifyActivateTask(card)
+            val insertedId = appDao.insertTask(task)
+            Log.d(TAG, "Enqueued VERIFY_ACTIVATE_CARD task #$insertedId for card ${card.name}")
+            insertedId
+        }
+    }
+
+    /**
      * Process pending tasks in queue using Exponential Backoff retry mechanism.
      * Only processes tasks where nextAttemptTimestamp <= current system time.
      */
@@ -229,6 +241,11 @@ class RouterTaskQueueManager(
                     val card = RouterTaskEntity.parseCardFromPayload(task.payloadJson)
                         ?: return Result.failure(Exception("تعذر استخراج بيانات الكرت للإعادة"))
                     repository.reactivateCard(card)
+                }
+                RouterTaskEntity.TYPE_VERIFY_ACTIVATE_CARD -> {
+                    val card = RouterTaskEntity.parseCardFromPayload(task.payloadJson)
+                        ?: return Result.failure(Exception("تعذر استخراج بيانات الكرت للتفعيل"))
+                    repository.verifyAndActivateCard(card)
                 }
                 else -> {
                     Result.failure(Exception("نوع المهمة غير معروف: ${task.taskType}"))

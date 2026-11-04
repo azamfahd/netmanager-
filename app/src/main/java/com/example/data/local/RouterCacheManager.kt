@@ -27,7 +27,8 @@ data class RouterSnapshot(
     val nodes: List<NetworkNode>,
     val logs: List<SystemLogEntry>,
     val ipBindings: List<IpBinding> = emptyList(),
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val isDemo: Boolean = false
 )
 
 object RouterCacheManager {
@@ -101,6 +102,8 @@ object RouterCacheManager {
                             put("comment", c.comment)
                             put("disabled", c.disabled)
                             put("price", c.price)
+                            put("posAgent", c.posAgent)
+                            put("cardType", c.cardType)
                         })
                     }
                 })
@@ -115,6 +118,7 @@ object RouterCacheManager {
                             put("validity", p.validity)
                             put("price", p.price)
                             put("dataLimit", p.dataLimit)
+                            put("source", p.source)
                         })
                     }
                 })
@@ -216,6 +220,7 @@ object RouterCacheManager {
             val tempFile = File(context.filesDir, "${targetFile.name}.tmp")
             tempFile.writeText(root.toString())
             if (tempFile.exists()) {
+                if (targetFile.exists()) targetFile.delete()
                 tempFile.renameTo(targetFile)
             }
         } catch (e: Exception) {}
@@ -283,7 +288,9 @@ object RouterCacheManager {
                         limitBytesTotal = o.optLong("limitBytesTotal", 0L),
                         comment = o.optString("comment", ""),
                         disabled = o.optBoolean("disabled", false),
-                        price = o.optString("price", "")
+                        price = o.optString("price", ""),
+                        posAgent = o.optString("posAgent", ""),
+                        cardType = o.optString("cardType", "hotspot")
                     )
                 )
             }
@@ -304,7 +311,8 @@ object RouterCacheManager {
                         rateLimit = o.optString("rateLimit", ""),
                         validity = o.optString("validity", ""),
                         price = o.optString("price", ""),
-                        dataLimit = o.optString("dataLimit", "")
+                        dataLimit = o.optString("dataLimit", ""),
+                        source = o.optString("source", "hotspot")
                     )
                 )
             }
@@ -457,7 +465,8 @@ object RouterCacheManager {
                 nodes = nodesList,
                 logs = logsList,
                 ipBindings = bindingsList,
-                timestamp = time
+                timestamp = time,
+                isDemo = isDemoSnapshot
             )
         } catch (e: Exception) {}
         return null
