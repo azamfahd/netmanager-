@@ -1,11 +1,21 @@
 package com.example.data.local
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.example.data.model.HotspotCard
 import org.json.JSONObject
 
-@Entity(tableName = "router_task_queue")
+@Entity(
+    tableName = "router_task_queue",
+    indices = [
+        Index(value = ["status"]),
+        Index(value = ["nextAttemptTimestamp"]),
+        Index(value = ["status", "nextAttemptTimestamp"]),
+        Index(value = ["cardName"]),
+        Index(value = ["createdAt"])
+    ]
+)
 data class RouterTaskEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,

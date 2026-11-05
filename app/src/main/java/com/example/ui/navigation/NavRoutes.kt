@@ -4,6 +4,9 @@ import kotlinx.serialization.Serializable
 
 sealed interface Screen {
     @Serializable
+    data object MainPager : Screen
+
+    @Serializable
     data object Dashboard : Screen
 
     @Serializable

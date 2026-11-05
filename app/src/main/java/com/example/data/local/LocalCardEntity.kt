@@ -1,10 +1,20 @@
 package com.example.data.local
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.example.data.model.HotspotCard
 
-@Entity(tableName = "local_cards")
+@Entity(
+    tableName = "local_cards",
+    indices = [
+        Index(value = ["createdTimestamp"]),
+        Index(value = ["profile"]),
+        Index(value = ["disabled"]),
+        Index(value = ["sourceSystem"]),
+        Index(value = ["cardId"])
+    ]
+)
 data class LocalCardEntity(
     @PrimaryKey
     val name: String,

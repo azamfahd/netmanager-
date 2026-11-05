@@ -2,10 +2,14 @@ package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,6 +21,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -25,14 +31,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.navigation.NavDestination.Companion.hasRoute
-import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.example.data.model.ConnectionState
+import com.example.data.model.NodeStatus
 import com.example.data.model.UpdateCheckState
 import com.example.ui.components.AppUpdateDialog
 import com.example.ui.components.StatusPill
@@ -40,20 +44,21 @@ import com.example.ui.components.StatusType
 import com.example.ui.navigation.Screen
 import com.example.ui.theme.StatusActiveGreen
 import com.example.ui.theme.StatusActiveGreenBg
+import com.example.ui.theme.StatusErrorRed
 import com.example.ui.viewmodel.MainViewModel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-enum class MainTab(val title: String, val icon: ImageVector, val route: Screen) {
-    DASHBOARD("الرئيسية", Icons.Default.Dashboard, Screen.Dashboard),
-    ACTIVE_USERS("المتصلين", Icons.Default.Group, Screen.ActiveUsers),
-    CARDS("الكروت", Icons.Default.ConfirmationNumber, Screen.Cards),
-    POS_AGENTS("الموزعون", Icons.Default.Store, Screen.POSAgents),
-    PROFILES("الباقات", Icons.Default.Tune, Screen.Profiles),
-    NODES("الأبراج", Icons.Default.CellTower, Screen.Nodes),
-    TOOLS("الأدوات", Icons.Default.Build, Screen.Tools),
-    FINANCE("المالية", Icons.Default.MonetizationOn, Screen.Finance),
-    LOGS("سجل العمليات", Icons.AutoMirrored.Filled.ListAlt, Screen.SystemEventLog)
+enum class MainTab(val title: String, val icon: ImageVector) {
+    DASHBOARD("الرئيسية", Icons.Default.Dashboard),
+    ACTIVE_USERS("المتصلين", Icons.Default.Group),
+    CARDS("الكروت", Icons.Default.ConfirmationNumber),
+    POS_AGENTS("الموزعون", Icons.Default.Store),
+    PROFILES("الباقات", Icons.Default.Tune),
+    NODES("الأبراج", Icons.Default.CellTower),
+    TOOLS("الأدوات", Icons.Default.Build),
+    FINANCE("المالية", Icons.Default.MonetizationOn),
+    LOGS("سجل العمليات", Icons.AutoMirrored.Filled.ListAlt)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -64,8 +69,6 @@ fun MainScreen(
     modifier: Modifier = Modifier
 ) {
     val navController = rememberNavController()
-    val scope = rememberCoroutineScope()
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     val activeUsers by viewModel.activeUsers.collectAsStateWithLifecycle()
@@ -83,8 +86,6 @@ fun MainScreen(
     var showUpdateDialog by remember { mutableStateOf(false) }
     
     val snackbarHostState = remember { SnackbarHostState() }
-    val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentDestination = navBackStackEntry?.destination
 
     LaunchedEffect(Unit) {
         viewModel.toastEvent.collectLatest { message ->
@@ -96,348 +97,169 @@ fun MainScreen(
     val routerTitle = connectedState?.routerName ?: "راوتر ميكروتك"
     val routerIp = connectedState?.ipAddress ?: ""
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(
-                modifier = Modifier.width(300.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.primaryContainer)
-                        .padding(24.dp)
-                ) {
-                    Column {
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            TopAppBar(
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Router,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+                        Column {
+                            Text(
+                                text = routerTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1
+                            )
+                            if (routerIp.isNotBlank()) {
+                                Text(
+                                    text = routerIp,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                },
+                actions = {
+                    IconButton(
+                        onClick = { viewModel.refreshData() },
+                        modifier = Modifier.testTag("btn_top_refresh")
+                    ) {
                         Icon(
-                            imageVector = Icons.Default.Router,
-                            contentDescription = null,
-                            modifier = Modifier.size(48.dp),
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "تحديث البيانات",
                             tint = MaterialTheme.colorScheme.primary
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "NetManager",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "إدارة متقدمة للشبكة",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
                     }
-                }
-                
-                Spacer(modifier = Modifier.height(12.dp))
-                
-                NavigationDrawerItem(
-                    label = { Text("نقاط وأبراج الشبكة") },
-                    icon = { Icon(Icons.Default.CellTower, null) },
-                    selected = currentDestination?.hasRoute<Screen.Nodes>() == true,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        navController.navigate(Screen.Nodes)
-                    },
-                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
-                )
-                
-                NavigationDrawerItem(
-                    label = { Text("الموزعون ونقاط البيع") },
-                    icon = { Icon(Icons.Default.Store, null) },
-                    selected = currentDestination?.hasRoute<Screen.POSAgents>() == true,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        navController.navigate(Screen.POSAgents)
-                    },
-                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
-                )
-                
-                NavigationDrawerItem(
-                    label = { Text("باقات السرعات") },
-                    icon = { Icon(Icons.Default.Tune, null) },
-                    selected = currentDestination?.hasRoute<Screen.Profiles>() == true,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        navController.navigate(Screen.Profiles)
-                    },
-                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
-                )
-                
-                NavigationDrawerItem(
-                    label = { Text("أدوات الشبكة") },
-                    icon = { Icon(Icons.Default.Build, null) },
-                    selected = currentDestination?.hasRoute<Screen.Tools>() == true,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        navController.navigate(Screen.Tools)
-                    },
-                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
-                )
-                
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                
-                NavigationDrawerItem(
-                    label = { Text("سجل العمليات") },
-                    icon = { Icon(Icons.AutoMirrored.Filled.ListAlt, null) },
-                    selected = currentDestination?.hasRoute<Screen.SystemEventLog>() == true,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        navController.navigate(Screen.SystemEventLog)
-                    },
-                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
-                )
-                
-                NavigationDrawerItem(
-                    label = { Text("التدقيق والصلاحيات") },
-                    icon = { Icon(Icons.Default.AdminPanelSettings, null) },
-                    selected = currentDestination?.hasRoute<Screen.AdminAudit>() == true,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        navController.navigate(Screen.AdminAudit)
-                    },
-                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
-                )
-            }
-        }
-    ) {
-        Scaffold(
-            modifier = modifier.fillMaxSize(),
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            topBar = {
-                TopAppBar(
-                    title = {
-                        Text(
-                            text = routerTitle,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, "القائمة")
-                        }
-                    },
-                    actions = {
-                        if (updateCheckState is UpdateCheckState.UpdateAvailable) {
-                            IconButton(onClick = { showUpdateDialog = true }) {
-                                BadgedBox(badge = {
-                                    Badge { Text("!", fontSize = 10.sp) }
-                                }) {
-                                    Icon(Icons.Default.SystemUpdate, "تحديث متاح")
-                                }
+
+                    if (updateCheckState is UpdateCheckState.UpdateAvailable) {
+                        IconButton(onClick = { showUpdateDialog = true }) {
+                            BadgedBox(badge = {
+                                Badge { Text("!", fontSize = 10.sp) }
+                            }) {
+                                Icon(Icons.Default.SystemUpdate, "تحديث متاح", tint = MaterialTheme.colorScheme.primary)
                             }
                         }
-                        
-                        StatusPill(
-                            text = if (connectedState?.isOffline == true) "أوفلاين" else "متصل",
-                            type = if (connectedState?.isOffline == true) StatusType.WARNING else StatusType.SUCCESS,
-                            modifier = Modifier.padding(end = 12.dp)
-                        )
                     }
-                )
-            },
-            bottomBar = {
-                NavigationBar(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)),
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 8.dp,
-                    windowInsets = WindowInsets.navigationBars
-                ) {
-                    val tabsToShow = MainTab.entries.toList()
                     
-                    tabsToShow.forEach { tab ->
-                        val isSelected = currentDestination?.hierarchy?.any { it.hasRoute(tab.route::class) } == true
-                        
-                        NavigationBarItem(
-                            selected = isSelected,
-                            onClick = {
-                                navController.navigate(tab.route) {
-                                    popUpTo(Screen.Dashboard) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
-                            icon = {
-                                if (tab == MainTab.ACTIVE_USERS && activeUsers.isNotEmpty()) {
-                                    BadgedBox(
-                                        badge = {
-                                            Badge(
-                                                containerColor = MaterialTheme.colorScheme.error,
-                                                contentColor = MaterialTheme.colorScheme.onError
-                                            ) {
-                                                Text("${activeUsers.size}")
-                                            }
-                                        }
-                                    ) {
-                                        Icon(tab.icon, contentDescription = tab.title)
-                                    }
-                                } else {
-                                    Icon(tab.icon, contentDescription = tab.title)
-                                }
-                            },
-                            label = {
-                                Text(
-                                    text = tab.title,
-                                    fontSize = 10.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                    maxLines = 1
-                                )
-                            },
-                            alwaysShowLabel = false,
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = MaterialTheme.colorScheme.primary,
-                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                indicatorColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                            )
-                        )
-                    }
-                }
-            }
-        ) { innerPadding ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-            ) {
-                // Update Banner
-                if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
-                    UpdateBanner(
-                        tagName = (updateCheckState as UpdateCheckState.UpdateAvailable).release.tagName,
-                        onUpdateClick = { showUpdateDialog = true },
-                        onDismiss = { viewModel.dismissUpdateBanner() }
+                    StatusPill(
+                        text = if (connectedState?.isOffline == true) "أوفلاين" else "متصل",
+                        type = if (connectedState?.isOffline == true) StatusType.WARNING else StatusType.SUCCESS,
+                        modifier = Modifier.padding(end = 8.dp)
                     )
                 }
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            // Update Banner
+            if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
+                UpdateBanner(
+                    tagName = (updateCheckState as UpdateCheckState.UpdateAvailable).release.tagName,
+                    onUpdateClick = { showUpdateDialog = true },
+                    onDismiss = { viewModel.dismissUpdateBanner() }
+                )
+            }
 
-                NavHost(
-                    navController = navController,
-                    startDestination = Screen.Dashboard,
-                    modifier = Modifier.weight(1f),
-                    enterTransition = { fadeIn() + slideInHorizontally() },
-                    exitTransition = { fadeOut() + slideOutHorizontally() },
-                    popEnterTransition = { fadeIn() + slideInHorizontally() },
-                    popExitTransition = { fadeOut() + slideOutHorizontally() }
-                ) {
-                    composable<Screen.Dashboard> {
-                        DashboardScreen(
-                            viewModel = viewModel,
-                            onNavigateToActiveUsers = { navController.navigate(Screen.ActiveUsers) },
-                            onNavigateToCards = { navController.navigate(Screen.Cards) },
-                            onNavigateToProfiles = { navController.navigate(Screen.Profiles) },
-                            onOpenBatchGenerator = { showBatchGeneratorDialog = true },
-                            onOpenPrintScreen = {
-                                viewModel.setPrintableCards(viewModel.cards.value)
-                                navController.navigate(Screen.VoucherPrint)
-                            },
-                            onNavigateToFinance = { navController.navigate(Screen.Finance) }
-                        )
-                    }
-                    composable<Screen.ActiveUsers> {
-                        ActiveUsersScreen(
-                            viewModel = viewModel,
-                            onOpenSessionDetail = { session ->
-                                navController.navigate(Screen.UserSessionDetail(session.username))
-                            }
-                        )
-                    }
-                    composable<Screen.Cards> {
-                        CardsScreen(
-                            viewModel = viewModel,
-                            onOpenBatchGenerator = {
-                                preselectedAgentIdForBatch = 0L
-                                showBatchGeneratorDialog = true
-                            },
-                            onOpenPrintScreen = { navController.navigate(Screen.VoucherPrint) },
-                            onOpenSessionDetail = { session ->
-                                navController.navigate(Screen.UserSessionDetail(session.username))
-                            }
-                        )
-                    }
-                    composable<Screen.Finance> {
-                        FinanceAnalyticsScreen(
-                            viewModel = viewModel,
-                            onNavigateToCards = { navController.navigate(Screen.Cards) },
-                            onNavigateToPosAgents = { navController.navigate(Screen.POSAgents) }
-                        )
-                    }
-                    composable<Screen.Nodes> {
-                        NetworkNodesScreen(viewModel = viewModel)
-                    }
-                    composable<Screen.POSAgents> {
-                        PosAgentsScreen(
-                            viewModel = viewModel,
-                            onOpenBatchGeneratorForAgent = { agent ->
-                                preselectedAgentIdForBatch = agent.id
-                                showBatchGeneratorDialog = true
-                            }
-                        )
-                    }
-                    composable<Screen.Profiles> {
-                        ProfilesScreen(viewModel = viewModel)
-                    }
-                    composable<Screen.Tools> {
-                        NetworkToolsScreen(
-                            viewModel = viewModel,
-                            onOpenSystemEventLog = { navController.navigate(Screen.SystemEventLog) },
-                            onTriggerSignIn = onTriggerSignIn
-                        )
-                    }
-                    composable<Screen.SystemEventLog> {
-                        SystemEventLogScreen(
-                            viewModel = viewModel,
-                            onBackClick = { navController.popBackStack() }
-                        )
-                    }
-                    composable<Screen.AdminAudit> {
-                        val adminUsers by viewModel.adminUsers.collectAsStateWithLifecycle()
-                        val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
-                        AdminAuditScreen(
-                            adminUsers = adminUsers,
-                            auditLogs = auditLogs,
-                            onBackClick = { navController.popBackStack() },
-                            onAddAdmin = { newAdmin -> viewModel.addAdminUser(newAdmin) }
-                        )
-                    }
-                    composable<Screen.VoucherPrint> {
-                        val printableCards by viewModel.printableCards.collectAsStateWithLifecycle()
-                        VoucherPrintScreen(
-                            cards = printableCards,
-                            onBackClick = { navController.popBackStack() }
-                        )
-                    }
-                    composable<Screen.UserSessionDetail> { backStackEntry ->
-                        val args = backStackEntry.toRoute<Screen.UserSessionDetail>()
-                        val sessionHistory by viewModel.getLoginHistoryForUser(args.username).collectAsStateWithLifecycle(emptyList())
-                        val subscriberProfile by viewModel.getSubscriberProfileFlow(args.username).collectAsStateWithLifecycle(null)
-                        val activeUsersList by viewModel.activeUsers.collectAsStateWithLifecycle()
-                        val targetSession = activeUsersList.find { it.user == args.username } ?: return@composable
-                        
-                        val userSessionRecord = com.example.data.model.UserSessionRecord(
-                            id = targetSession.id,
-                            username = targetSession.user,
-                            ipAddress = targetSession.address,
-                            macAddress = targetSession.macAddress,
-                            duration = targetSession.uptime,
-                            bytesIn = targetSession.bytesIn,
-                            bytesOut = targetSession.bytesOut,
-                            isOnline = true
-                        )
+            NavHost(
+                navController = navController,
+                startDestination = Screen.MainPager,
+                modifier = Modifier.weight(1f),
+                enterTransition = { fadeIn() + slideInHorizontally() },
+                exitTransition = { fadeOut() + slideOutHorizontally() },
+                popEnterTransition = { fadeIn() + slideInHorizontally() },
+                popExitTransition = { fadeOut() + slideOutHorizontally() }
+            ) {
+                composable<Screen.MainPager> {
+                    MainPagerContent(
+                        viewModel = viewModel,
+                        activeUsersCount = activeUsers.size,
+                        hasOfflineNodes = networkNodes.any { it.effectiveStatus == NodeStatus.OFFLINE },
+                        onOpenBatchGenerator = { preselectedId ->
+                            preselectedAgentIdForBatch = preselectedId
+                            showBatchGeneratorDialog = true
+                        },
+                        onOpenPrintScreen = { cards ->
+                            viewModel.setPrintableCards(cards)
+                            navController.navigate(Screen.VoucherPrint)
+                        },
+                        onOpenSessionDetail = { username ->
+                            navController.navigate(Screen.UserSessionDetail(username))
+                        },
+                        onOpenAdminAudit = {
+                            navController.navigate(Screen.AdminAudit)
+                        },
+                        onTriggerSignIn = onTriggerSignIn
+                    )
+                }
+                composable<Screen.AdminAudit> {
+                    val adminUsers by viewModel.adminUsers.collectAsStateWithLifecycle()
+                    val auditLogs by viewModel.auditLogs.collectAsStateWithLifecycle()
+                    AdminAuditScreen(
+                        adminUsers = adminUsers,
+                        auditLogs = auditLogs,
+                        onBackClick = { navController.popBackStack() },
+                        onAddAdmin = { newAdmin -> viewModel.addAdminUser(newAdmin) }
+                    )
+                }
+                composable<Screen.VoucherPrint> {
+                    val printableCards by viewModel.printableCards.collectAsStateWithLifecycle()
+                    VoucherPrintScreen(
+                        cards = printableCards,
+                        onBackClick = { navController.popBackStack() }
+                    )
+                }
+                composable<Screen.UserSessionDetail> { backStackEntry ->
+                    val args = backStackEntry.toRoute<Screen.UserSessionDetail>()
+                    val sessionHistory by viewModel.getLoginHistoryForUser(args.username).collectAsStateWithLifecycle(emptyList())
+                    val subscriberProfile by viewModel.getSubscriberProfileFlow(args.username).collectAsStateWithLifecycle(null)
+                    val activeUsersList by viewModel.activeUsers.collectAsStateWithLifecycle()
+                    val targetSession = activeUsersList.find { it.user == args.username } ?: return@composable
+                    
+                    val userSessionRecord = com.example.data.model.UserSessionRecord(
+                        id = targetSession.id,
+                        username = targetSession.user,
+                        ipAddress = targetSession.address,
+                        macAddress = targetSession.macAddress,
+                        duration = targetSession.uptime,
+                        bytesIn = targetSession.bytesIn,
+                        bytesOut = targetSession.bytesOut,
+                        isOnline = true
+                    )
 
-                        UserSessionDetailScreen(
-                            session = userSessionRecord,
-                            subscriberProfile = subscriberProfile,
-                            loginHistory = sessionHistory,
-                            onBackClick = { navController.popBackStack() },
-                            onKickUser = {
-                                viewModel.kickUser(targetSession)
-                                navController.popBackStack()
-                            },
-                            onRefresh = { viewModel.refreshData() }
-                        )
-                    }
+                    UserSessionDetailScreen(
+                        session = userSessionRecord,
+                        subscriberProfile = subscriberProfile,
+                        loginHistory = sessionHistory,
+                        onBackClick = { navController.popBackStack() },
+                        onKickUser = {
+                            viewModel.kickUser(targetSession)
+                            navController.popBackStack()
+                        },
+                        onRefresh = { viewModel.refreshData() }
+                    )
                 }
             }
         }
@@ -526,6 +348,245 @@ fun MainScreen(
                 }
             }
         )
+    }
+}
+
+@Composable
+fun MainPagerContent(
+    viewModel: MainViewModel,
+    activeUsersCount: Int,
+    hasOfflineNodes: Boolean,
+    onOpenBatchGenerator: (Long) -> Unit,
+    onOpenPrintScreen: (List<com.example.data.model.HotspotCard>) -> Unit,
+    onOpenSessionDetail: (String) -> Unit,
+    onOpenAdminAudit: () -> Unit,
+    onTriggerSignIn: () -> Unit
+) {
+    val pagerState = rememberPagerState(initialPage = 0) { MainTab.entries.size }
+    val scope = rememberCoroutineScope()
+    val tabScrollState = rememberScrollState()
+
+    // Smoothly scroll the floating dock so that the selected tab is always in view
+    LaunchedEffect(pagerState.currentPage) {
+        val totalTabs = MainTab.entries.size
+        if (totalTabs > 1 && tabScrollState.maxValue > 0) {
+            val targetScroll = (tabScrollState.maxValue.toFloat() * (pagerState.currentPage.toFloat() / (totalTabs - 1).toFloat())).toInt()
+            tabScrollState.animateScrollTo(targetScroll)
+        }
+    }
+
+    // BackHandler: if not on Dashboard (page 0), return to Dashboard smoothly
+    BackHandler(enabled = pagerState.currentPage != 0) {
+        scope.launch {
+            pagerState.animateScrollToPage(0)
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxSize(),
+            beyondViewportPageCount = 1
+        ) { page ->
+            when (MainTab.entries[page]) {
+                MainTab.DASHBOARD -> DashboardScreen(
+                    viewModel = viewModel,
+                    onNavigateToActiveUsers = { scope.launch { pagerState.animateScrollToPage(MainTab.ACTIVE_USERS.ordinal) } },
+                    onNavigateToCards = { scope.launch { pagerState.animateScrollToPage(MainTab.CARDS.ordinal) } },
+                    onNavigateToProfiles = { scope.launch { pagerState.animateScrollToPage(MainTab.PROFILES.ordinal) } },
+                    onOpenBatchGenerator = { onOpenBatchGenerator(0L) },
+                    onOpenPrintScreen = {
+                        onOpenPrintScreen(viewModel.cards.value)
+                    },
+                    onNavigateToFinance = { scope.launch { pagerState.animateScrollToPage(MainTab.FINANCE.ordinal) } },
+                    modifier = Modifier.padding(bottom = 78.dp)
+                )
+                MainTab.ACTIVE_USERS -> ActiveUsersScreen(
+                    viewModel = viewModel,
+                    onOpenSessionDetail = { session ->
+                        onOpenSessionDetail(session.username)
+                    },
+                    modifier = Modifier.padding(bottom = 78.dp)
+                )
+                MainTab.CARDS -> CardsScreen(
+                    viewModel = viewModel,
+                    onOpenBatchGenerator = {
+                        onOpenBatchGenerator(0L)
+                    },
+                    onOpenPrintScreen = { onOpenPrintScreen(viewModel.cards.value) },
+                    onOpenSessionDetail = { session ->
+                        onOpenSessionDetail(session.username)
+                    },
+                    modifier = Modifier.padding(bottom = 78.dp)
+                )
+                MainTab.POS_AGENTS -> PosAgentsScreen(
+                    viewModel = viewModel,
+                    onOpenBatchGeneratorForAgent = { agent ->
+                        onOpenBatchGenerator(agent.id)
+                    },
+                    modifier = Modifier.padding(bottom = 78.dp)
+                )
+                MainTab.PROFILES -> ProfilesScreen(
+                    viewModel = viewModel,
+                    modifier = Modifier.padding(bottom = 78.dp)
+                )
+                MainTab.NODES -> NetworkNodesScreen(
+                    viewModel = viewModel,
+                    modifier = Modifier.padding(bottom = 78.dp)
+                )
+                MainTab.TOOLS -> NetworkToolsScreen(
+                    viewModel = viewModel,
+                    onOpenSystemEventLog = { scope.launch { pagerState.animateScrollToPage(MainTab.LOGS.ordinal) } },
+                    onTriggerSignIn = onTriggerSignIn,
+                    onOpenAdminAudit = onOpenAdminAudit,
+                    modifier = Modifier.padding(bottom = 78.dp)
+                )
+                MainTab.FINANCE -> FinanceAnalyticsScreen(
+                    viewModel = viewModel,
+                    onNavigateToCards = { scope.launch { pagerState.animateScrollToPage(MainTab.CARDS.ordinal) } },
+                    onNavigateToPosAgents = { scope.launch { pagerState.animateScrollToPage(MainTab.POS_AGENTS.ordinal) } },
+                    modifier = Modifier.padding(bottom = 78.dp)
+                )
+                MainTab.LOGS -> SystemEventLogScreen(
+                    viewModel = viewModel,
+                    onBackClick = { scope.launch { pagerState.animateScrollToPage(0) } },
+                    modifier = Modifier.padding(bottom = 78.dp)
+                )
+            }
+        }
+
+        // Floating Bottom Navigation Dock with Neon / Glowing Effect
+        FloatingBottomNavigationDock(
+            pagerState = pagerState,
+            tabScrollState = tabScrollState,
+            activeUsersCount = activeUsersCount,
+            hasOfflineNodes = hasOfflineNodes,
+            onTabSelected = { index ->
+                scope.launch {
+                    pagerState.animateScrollToPage(index)
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+        )
+    }
+}
+
+@Composable
+fun FloatingBottomNavigationDock(
+    pagerState: PagerState,
+    tabScrollState: androidx.compose.foundation.ScrollState,
+    activeUsersCount: Int,
+    hasOfflineNodes: Boolean,
+    onTabSelected: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(58.dp)
+            .shadow(
+                elevation = 16.dp,
+                shape = RoundedCornerShape(29.dp),
+                spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                ambientColor = MaterialTheme.colorScheme.surfaceTint.copy(alpha = 0.2f)
+            ),
+        shape = RoundedCornerShape(29.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+        border = BorderStroke(
+            1.2.dp,
+            Brush.horizontalGradient(
+                listOf(
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+                    MaterialTheme.colorScheme.secondary.copy(alpha = 0.4f),
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                )
+            )
+        ),
+        tonalElevation = 6.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .horizontalScroll(tabScrollState)
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            MainTab.entries.forEach { tab ->
+                val isSelected = pagerState.currentPage == tab.ordinal
+
+                val activeBackground = Brush.horizontalGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.primary,
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
+                    )
+                )
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .then(
+                            if (isSelected) {
+                                Modifier
+                                    .background(activeBackground)
+                                    .shadow(
+                                        elevation = 6.dp,
+                                        shape = RoundedCornerShape(22.dp),
+                                        spotColor = MaterialTheme.colorScheme.primary
+                                    )
+                            } else {
+                                Modifier.background(Color.Transparent)
+                            }
+                        )
+                        .clickable { onTabSelected(tab.ordinal) }
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                        .testTag("floating_tab_${tab.name.lowercase()}"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.TopEnd) {
+                            Icon(
+                                imageVector = tab.icon,
+                                contentDescription = tab.title,
+                                modifier = Modifier.size(18.dp),
+                                tint = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                            if (tab == MainTab.ACTIVE_USERS && activeUsersCount > 0) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .offset(x = 2.dp, y = (-2).dp)
+                                        .clip(CircleShape)
+                                        .background(if (isSelected) Color(0xFFFFEB3B) else StatusErrorRed)
+                                )
+                            } else if (tab == MainTab.NODES && hasOfflineNodes) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .offset(x = 2.dp, y = (-2).dp)
+                                        .clip(CircleShape)
+                                        .background(StatusErrorRed)
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = tab.title,
+                            fontSize = 12.sp,
+                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                            color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

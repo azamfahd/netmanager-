@@ -2508,6 +2508,18 @@ class MainViewModel(
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             repository.initializeFromLocalDatabase()
+            val ctx = appContext
+            if (ctx != null) {
+                try {
+                    val latest = com.example.data.local.RouterCacheManager.getLatestSnapshot(ctx)
+                    if (latest != null) {
+                        _latestCachedSnapshot.value = latest
+                        if (repository.cards.value.isEmpty()) {
+                            repository.restoreFromSnapshot(latest)
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
         }
 
         // 15-Minute Periodic Background Sync Worker

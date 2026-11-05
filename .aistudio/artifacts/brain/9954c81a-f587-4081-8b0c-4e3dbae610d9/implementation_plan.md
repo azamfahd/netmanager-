@@ -1,46 +1,37 @@
-# Implementation Plan - NetMaster Pro Local-First Architecture & Incremental Sync
+# خطة إعادة تصميم وتطوير شريط التنقل والواجهة الرئيسية (NetMaster Pro UI/UX) - مكتمل بنجاح ✅
 
-## 1. Overview & Objectives
-Transform NetMaster Pro into a high-performance Local-First application with:
-- **Instant Local Startup**: Load data instantly from Room database without blocking on network requests.
-- **Incremental Sync**: Fetch only new, modified, or deleted records from MikroTik RouterOS using ID tracking, timestamps, and revision hashes.
-- **Background Synchronization**: Automatic background sync every 15 minutes with WorkManager / coroutine workers.
-- **Materialized Aggregates**: Store pre-calculated sales, profits, and summaries in Room to eliminate redundant computation.
-- **Database Indexing**: Add strategic indices on foreign keys, timestamps, and status columns for ultra-fast queries.
-- **Owner Conflict Resolution**: Prompt the network owner when local edits conflict with router changes.
+تمت إعادة هيكلة الواجهة الرئيسية وشريط التنقل السفلي في NetMaster Pro من خلال التخلص التام من القائمة الجانبية (Drawer)، وتطبيق شريط تنقل سفلي عائم (Floating Dock) قابل للتمرير الأفقي السلس بمؤشرات مضيئة، مع ربطه بـ `HorizontalPager` للسماح بالسحب اليدوي الطبيعي بين كافة أقسام الشبكة التسعة بحركات انسيابية فائقة الجودة.
 
 ---
 
-## 2. Proposed Changes
+## حالة التنفيذ (Execution Status)
 
-### A. Database & Entities (`Room`)
-- **Add Indices**: Add `@Index` annotations on frequently queried columns in `AppDatabase.kt` (e.g., `saved_routers`, `local_cards`, `session_archive`, `system_event_logs`, `network_nodes`).
-- **Materialized Aggregates Table**: Create a new entity `MaterializedSummaryEntity` to store cached financial metrics, active card counts, and traffic summaries with a `lastUpdated` timestamp.
-- **Sync Tracking Metadata**: Add sync state fields (`isSynced`, `lastModifiedTimestamp`, `syncVersion`) to local entities.
-
-### B. Repository & Incremental Sync (`MikrotikRepository.kt`)
-- **Local-First Provider**: Expose Room flows immediately upon connection or startup.
-- **Incremental Sync Engine**: Implement delta-fetching comparing local record IDs/timestamps with live MikroTik REST API responses.
-- **Conflict Detector**: Compare local un-synced modifications against incoming router updates; trigger an interactive prompt dialog if a conflict is detected.
-
-### C. Background Worker (`AppSyncWorker.kt`)
-- **Periodic Sync**: Set up a WorkManager periodic worker (or robust coroutine scheduler) running every 15 minutes to perform incremental sync in the background without freezing the UI.
-- **Connectivity Awareness**: Skip or retry gracefully when the network is disconnected, implementing exponential backoff.
-
-### D. ViewModel & UI Enhancements (`MainViewModel.kt` & Screens)
-- **Sync Status Bar**: Display clear last-sync timestamps and sync progress indicators in the UI.
-- **Manual Sync Action**: Provide a manual pull-to-refresh or force-sync button.
-- **Conflict Resolution Dialog**: Composable dialog allowing the network owner to choose between keeping local edits or applying router updates.
+- [x] **إلغاء القائمة الجانبية (`ModalNavigationDrawer`)**: إزالة القائمة الجانبية بالكامل وأيقونة الهامبرغر، مما منح الشاشة اتساعاً ووضوحاً أكبر.
+- [x] **الشريط السفلي العائم (`FloatingBottomNavigationDock`)**: تصميم كبسولة عائمة شبه شفافة بحدود سيبرانية متوهجة ومؤشرات مضيئة للتبويب النشط.
+- [x] **التمرير الأفقي للشريط السفلي**: دعم التمرير الأفقي مع مزامنة تلقائية لتركيز التبويب النشط في المنتصف دائماً.
+- [x] **إيماءات السحب باليد بين الشاشات (`HorizontalPager`)**: ربط جميع الأقسام التسعة بـ `HorizontalPager` مع دعم السحب الأفقي الحر والاحتفاظ بحالة التمرير في كل قسم.
+- [x] **الشارات الذكية والتنبيهات**: إضافة شارة عدد المتصلين النشطين ونقطة التنبيه الحمراء للأبراج الطافية/المغلقة في الشريط السفلي.
+- [x] **الشاشات الفرعية والتحكم بالرجوع (`BackHandler`)**: إتاحة الرجوع السلس إلى لوحة التحكم الرئيسية عند الضغط على زر الرجوع من أي قسم، مع إتاحة شاشات التدقيق وطباعة الكروت وتفاصيل الجلسات.
+- [x] **التحقق والبناء**: نجاح بناء التطبيق وتجميعه بالكامل (`compile_applet`) دون أخطاء.
 
 ---
 
-## 3. Verification Plan
+## المخطط المعماري بعد التنفيذ
 
-### Automated Tests
-- Run unit and Robolectric tests via `gradle :app:testDebugUnitTest`.
-
-### Manual & Integration Verification
-1. Verify instant startup showing cached local data without network delay.
-2. Verify background sync running every 15 minutes updating delta records.
-3. Test conflict resolution dialog when simultaneous modifications occur.
-4. Verify performance improvement with large datasets.
+```
+┌────────────────────────────────────────────────────────┐
+│    TopAppBar (أيقونة الراوتر + الاسم + IP + حالة الاتصال)│
+└────────────────────────────────────────────────────────┘
+                            │
+┌────────────────────────────────────────────────────────┐
+│            HorizontalPager (9 Pages with Swipe)         │
+│  [الرئيسية] [المتصلين] [الكروت] [الموزعين] [الباقات]...   │
+└────────────────────────────────────────────────────────┘
+                            │
+               تزامن حي بإيماءة السحب والنقر
+                            │
+┌────────────────────────────────────────────────────────┐
+│      Floating Bottom Dock (عائم + مؤشر مشع + شارات)   │
+│  [ الرئيسية ] [ المتصلين 🔴 ] [ الكروت ] [ الأبراج ] ... │
+└────────────────────────────────────────────────────────┘
+```

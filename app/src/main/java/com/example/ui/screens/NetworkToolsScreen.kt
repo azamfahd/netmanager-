@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.ListAlt
+import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.PlayArrow
@@ -90,6 +91,7 @@ fun NetworkToolsScreen(
     viewModel: MainViewModel,
     onOpenSystemEventLog: () -> Unit = {},
     onTriggerSignIn: () -> Unit = {},
+    onOpenAdminAudit: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -699,6 +701,21 @@ fun NetworkToolsScreen(
                         Icon(Icons.Default.ListAlt, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("فتح ومراقبة سجل أحداث النظام (شفافية كاملة)", fontWeight = FontWeight.Bold)
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedButton(
+                        onClick = onOpenAdminAudit,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .testTag("btn_open_admin_audit")
+                    ) {
+                        Icon(Icons.Default.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("سجل التدقيق والصلاحيات الإدارية", fontWeight = FontWeight.Bold)
                     }
                 }
             }

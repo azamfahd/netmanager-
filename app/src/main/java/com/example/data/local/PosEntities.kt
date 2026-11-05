@@ -21,7 +21,10 @@ data class PosAgentEntity(
     indices = [
         Index(value = ["agentId"]),
         Index(value = ["isSold"]),
-        Index(value = ["batchId"])
+        Index(value = ["batchId"]),
+        Index(value = ["cardName"]),
+        Index(value = ["soldAt"]),
+        Index(value = ["agentId", "isSold"])
     ]
 )
 data class PosCardAssignmentEntity(
