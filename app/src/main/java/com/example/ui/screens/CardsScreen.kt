@@ -119,6 +119,7 @@ fun CardsScreen(
     onOpenBatchGenerator: () -> Unit,
     onOpenPrintScreen: () -> Unit,
     onOpenSessionDetail: ((UserSessionRecord) -> Unit)? = null,
+    onOpenAnalytics: ((String, String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val filteredCards by viewModel.filteredCards.collectAsStateWithLifecycle()
@@ -737,7 +738,10 @@ fun CardsScreen(
             session = session,
             subscriberProfile = subscriberProfile,
             loginHistory = userHistory,
-            onDismiss = { selectedSessionForDetail = null }
+            onDismiss = { selectedSessionForDetail = null },
+            onOpenAnalytics = { type ->
+                onOpenAnalytics?.invoke(session.username, type)
+            }
         )
     }
 

@@ -41,4 +41,7 @@ sealed interface Screen {
 
     @Serializable
     data class UserSessionDetail(val username: String) : Screen
+
+    @Serializable
+    data class UsageAnalytics(val username: String, val type: String) : Screen
 }

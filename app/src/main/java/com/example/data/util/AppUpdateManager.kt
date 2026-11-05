@@ -90,21 +90,21 @@ object AppUpdateManager {
                 }
 
                 if (codeLatest == 404) {
-                    lastError = "لم يتم العثور على إصدارات منشورة في GitHub ($owner/$repo). قم بنشر Release أولاً عبر GitHub Actions."
+                    lastError = "لم يتم العثور على إصدارات جديدة حالياً."
                 } else if (codeLatest == 403) {
-                    lastError = "تم تجاوز حد طلبات GitHub المؤقت (Rate Limit). يرجى المحاولة بعد قليل أو زيارة صفحة الإصدارات مباشرة."
+                    lastError = "الخدمة مشغولة مؤقتاً، يرجى المحاولة بعد قليل."
                 } else {
-                    lastError = "فشل الاتصال بخادم GitHub (رمز الخطأ: $codeLatest)"
+                    lastError = "تعذر الاتصال بسيرفر التحديثات (رمز الخطأ: $codeLatest)"
                 }
             } catch (e: Exception) {
-                lastError = "تعذر الاتصال بـ GitHub: ${e.localizedMessage ?: e.message}"
+                lastError = "تعذر الاتصال بسيرفر التحديثات: ${e.localizedMessage ?: e.message}"
             }
         }
 
         if (isRateLimited) {
-            Result.failure(Exception("تم تجاوز حد طلبات GitHub المؤقت (Rate Limit). يرجى فتح صفحة المستودع: $GITHUB_RELEASES_WEB_URL"))
+            Result.failure(Exception("الخدمة مشغولة حالياً، يرجى المحاولة بعد قليل."))
         } else {
-            Result.failure(Exception(lastError ?: "تعذر التحقق من تحديثات GitHub"))
+            Result.failure(Exception(lastError ?: "تعذر التحقق من التحديثات"))
         }
     }
 
@@ -172,6 +172,25 @@ object AppUpdateManager {
         }
 
         return cleanRemote != cleanCurrent && cleanRemote > cleanCurrent
+    }
+
+    /**
+     * Determines whether an update is a minor / lightweight update (patch or small revision).
+     */
+    fun isMinorUpdate(remoteTag: String, currentVersion: String): Boolean {
+        val cleanRemote = remoteTag.trim().removePrefix("v").removePrefix("V").trim()
+        val cleanCurrent = currentVersion.trim().removePrefix("v").removePrefix("V").trim()
+
+        val remoteParts = cleanRemote.split(".").mapNotNull { it.toIntOrNull() }
+        val currentParts = cleanCurrent.split(".").mapNotNull { it.toIntOrNull() }
+
+        if (remoteParts.isNotEmpty() && currentParts.isNotEmpty()) {
+            // Same major version means it's a minor / patch update
+            if (remoteParts[0] == currentParts[0]) {
+                return true
+            }
+        }
+        return true
     }
 
     /**

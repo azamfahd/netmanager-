@@ -64,6 +64,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -99,7 +100,8 @@ fun UserDetailDialog(
     subscriberProfile: SubscriberFullProfile? = null,
     loginHistory: List<UserLoginHistoryEntity> = emptyList(),
     onDismiss: () -> Unit,
-    onKickUser: (() -> Unit)? = null
+    onKickUser: (() -> Unit)? = null,
+    onOpenAnalytics: ((String) -> Unit)? = null
 ) {
     val context = LocalContext.current
 
@@ -130,6 +132,7 @@ fun UserDetailDialog(
 
     var isMaximized by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = الاستهلاك الكلي, 1 = الباقات, 2 = الجلسات والأجهزة
+    var selectedMetricDetail by remember { mutableStateOf<String?>(null) } // "total", "download", "upload"
 
     val lifetimeTotalBytes = subscriberProfile?.lifetimeTotalBytes ?: session.totalBytes
     val lifetimeDownloadBytes = subscriberProfile?.lifetimeBytesOut ?: session.bytesOut
@@ -270,83 +273,121 @@ fun UserDetailDialog(
 
                 // TAB 0: الاستهلاك التراكمي الشامل لكل الأوقات والرصيد
                 if (selectedTab == 0) {
-                    // Cumulative Lifetime Card
+                    // Cumulative Lifetime Card (Enhanced Modern Material 3 Design)
                     Card(
-                        shape = RoundedCornerShape(14.dp),
+                        shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                            containerColor = MaterialTheme.colorScheme.surface
                         ),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                        border = BorderStroke(1.dp, RouterBlue.copy(alpha = 0.25f)),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
-                            Row(
+                            // Smart Analytics Grid (2x2 Interactive Design)
+                            Column(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Icon(Icons.Default.DataUsage, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                    Text(
-                                        text = "الاستهلاك التراكمي لكل الأوقات:",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    UsageMetricCard(
+                                        modifier = Modifier.weight(1f),
+                                        title = "الإجمالي",
+                                        value = NetworkUtils.formatBytes(lifetimeTotalBytes),
+                                        icon = Icons.Default.DataUsage,
+                                        color = RouterBlue,
+                                        onClick = { onOpenAnalytics?.invoke("total") }
+                                    )
+                                    UsageMetricCard(
+                                        modifier = Modifier.weight(1f),
+                                        title = "التحميل",
+                                        value = NetworkUtils.formatBytes(lifetimeDownloadBytes),
+                                        icon = Icons.Default.ArrowDownward,
+                                        color = StatusActiveGreen,
+                                        onClick = { onOpenAnalytics?.invoke("download") }
                                     )
                                 }
-                                Text(
-                                    text = NetworkUtils.formatBytes(lifetimeTotalBytes),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column {
-                                    Text(text = "التحميل الكلي:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Text(text = NetworkUtils.formatBytes(lifetimeDownloadBytes), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
-                                }
-                                Column {
-                                    Text(text = "الرفع الكلي:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Text(text = NetworkUtils.formatBytes(lifetimeUploadBytes), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = RouterBlue)
-                                }
-                                Column {
-                                    Text(text = "الوقت الكلي:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Text(text = lifetimeUptimeStr, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    UsageMetricCard(
+                                        modifier = Modifier.weight(1f),
+                                        title = "الرفع",
+                                        value = NetworkUtils.formatBytes(lifetimeUploadBytes),
+                                        icon = Icons.Default.ArrowUpward,
+                                        color = Color(0xFF673AB7),
+                                        onClick = { onOpenAnalytics?.invoke("upload") }
+                                    )
+                                    UsageMetricCard(
+                                        modifier = Modifier.weight(1f),
+                                        title = "الوقت الكلي",
+                                        value = lifetimeUptimeStr,
+                                        icon = Icons.Default.Schedule,
+                                        color = Color(0xFFFF9800),
+                                        onClick = { onOpenAnalytics?.invoke("time") }
+                                    )
                                 }
                             }
 
-                            HorizontalDivider(thickness = 0.5.dp)
+                            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
-                            // Current vs Lifetime
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(text = "استهلاك الجلسة الحالية:", style = MaterialTheme.typography.bodySmall)
-                                Text(text = NetworkUtils.formatBytes(session.totalBytes), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(text = "مدة الجلسة الحالية:", style = MaterialTheme.typography.bodySmall)
-                                Text(text = session.duration, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(text = "عدد الجلسات المسجلة:", style = MaterialTheme.typography.bodySmall)
-                                Text(text = "$totalSessionsCount جلسات", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = RouterBlue)
+                            // Additional Session Metrics
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Icon(Icons.Default.Schedule, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(text = "إجمالي الوقت المستهلك:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Text(text = lifetimeUptimeStr, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(text = "عدد الجلسات التراكمية المسجلة:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = RouterBlue.copy(alpha = 0.15f)
+                                    ) {
+                                        Text(
+                                            text = "$totalSessionsCount جلسات تفعيل",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = RouterBlue,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Icon(Icons.Default.Timer, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(text = "استهلاك الجلسة الحالية:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Text(text = NetworkUtils.formatBytes(session.totalBytes), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
@@ -593,4 +634,60 @@ fun UserDetailDialog(
             }
         }
     )
+}
+
+@Composable
+fun UsageMetricCard(
+    modifier: Modifier = Modifier,
+    title: String,
+    value: String,
+    icon: ImageVector,
+    color: Color,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick),
+        color = color.copy(alpha = 0.08f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.3f))
+    ) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(color.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = color,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = color,
+                maxLines = 1
+            )
+            
+            Text(
+                text = value,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Black,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1
+            )
+        }
+    }
 }

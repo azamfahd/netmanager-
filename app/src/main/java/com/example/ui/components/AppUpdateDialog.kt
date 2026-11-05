@@ -50,6 +50,10 @@ import com.example.ui.theme.NetworkCyan
 import com.example.ui.theme.RouterBlue
 import com.example.ui.theme.StatusActiveGreen
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material3.Switch
+
 @Composable
 fun AppUpdateDialog(
     release: GitHubReleaseInfo,
@@ -57,11 +61,14 @@ fun AppUpdateDialog(
     downloadState: UpdateDownloadState,
     onDownloadAndInstall: (downloadUrl: String) -> Unit,
     onInstallDownloaded: (java.io.File) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    autoUpdateMinorReleases: Boolean = true,
+    onToggleAutoUpdateMinor: ((Boolean) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val isDownloading = downloadState is UpdateDownloadState.Downloading
     val isCompleted = downloadState is UpdateDownloadState.Completed
+    val isMinor = release.isMinorUpdate
 
     AlertDialog(
         onDismissRequest = {
@@ -161,6 +168,84 @@ fun AppUpdateDialog(
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = StatusActiveGreen
+                            )
+                        }
+                    }
+                }
+
+                // Minor / Lightweight update direct banner
+                if (isMinor) {
+                    Surface(
+                        color = StatusActiveGreen.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, StatusActiveGreen.copy(alpha = 0.35f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(StatusActiveGreen.copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Bolt,
+                                    contentDescription = null,
+                                    tint = StatusActiveGreen,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "تحديث خفيف وسريع ⚡",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = StatusActiveGreen
+                                )
+                                Text(
+                                    text = "تحديث بسيط ومباشر يتم تطبيقه تلقائياً لتحسين الأداء والحفاظ على كل البيانات.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Automatic Update for Minor Releases Toggle
+                if (onToggleAutoUpdateMinor != null) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "تحديث التحديثات البسيطة تلقائياً",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "تنزيل وتطبيق التحديثات الخفيفة مباشرة بدون خطوات معقدة",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = autoUpdateMinorReleases,
+                                onCheckedChange = onToggleAutoUpdateMinor
                             )
                         }
                     }
@@ -320,17 +405,23 @@ fun AppUpdateDialog(
                 ) {
                     Icon(Icons.Default.SystemUpdate, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("تثبيت النسخة الآن فوق الحالية", fontWeight = FontWeight.Bold)
+                    Text("تثبيت التحديث الآن ⚡", fontWeight = FontWeight.Bold)
                 }
             } else {
                 val apkUrl = release.apkAsset?.downloadUrl ?: release.htmlUrl
                 val isSameVersion = release.tagName.trim().removePrefix("v").removePrefix("V") == currentVersion.trim().removePrefix("v").removePrefix("V")
-                val buttonText = if (isSameVersion) "تثبيت آخر نسخة على أي حال" else "تحديث وتثبيت الآن"
+                val buttonText = when {
+                    isSameVersion -> "إعادة تثبيت آخر تحديث"
+                    release.isMinorUpdate -> "تحديث وتثبيت مباشر ⚡"
+                    else -> "تحديث وتثبيت الآن"
+                }
                 Button(
                     onClick = { onDownloadAndInstall(apkUrl) },
                     enabled = !isDownloading,
                     shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = RouterBlue)
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (release.isMinorUpdate) RouterBlue else RouterBlue
+                    )
                 ) {
                     if (isDownloading) {
                         CircularProgressIndicator(
@@ -339,9 +430,12 @@ fun AppUpdateDialog(
                             strokeWidth = 2.dp
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("جاري التنزيل...")
+                        Text("جاري التنزيل المباشر...")
                     } else {
-                        Icon(Icons.Default.Download, contentDescription = null)
+                        Icon(
+                            if (release.isMinorUpdate) Icons.Default.Bolt else Icons.Default.Download,
+                            contentDescription = null
+                        )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(buttonText, fontWeight = FontWeight.Bold)
                     }
@@ -349,29 +443,15 @@ fun AppUpdateDialog(
             }
         },
         dismissButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (!isDownloading) {
                 OutlinedButton(
-                    onClick = {
-                        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(release.htmlUrl))
-                        browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        context.startActivity(browserIntent)
-                    },
+                    onClick = onDismiss,
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("GitHub", fontSize = 12.sp)
-                }
-
-                if (!isDownloading) {
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("لاحقاً")
-                    }
+                    Text("لاحقاً")
                 }
             }
         }
     )
 }
+

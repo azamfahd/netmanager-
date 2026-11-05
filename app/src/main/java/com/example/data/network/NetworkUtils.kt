@@ -423,4 +423,24 @@ object NetworkUtils {
         }
         return items
     }
+    fun parseSizeToBytes(sizeStr: String): Long {
+        if (sizeStr.isBlank()) return 0L
+        val clean = sizeStr.trim().uppercase()
+        // If it's a plain number (bytes)
+        val plainLong = clean.toLongOrNull()
+        if (plainLong != null) return plainLong
+
+        return try {
+            val numericPart = clean.filter { it.isDigit() || it == '.' }.toDoubleOrNull() ?: 0.0
+            val multiplier = when {
+                clean.endsWith("G") || clean.contains("GB") -> 1024L * 1024L * 1024L
+                clean.endsWith("M") || clean.contains("MB") -> 1024L * 1024L
+                clean.endsWith("K") || clean.contains("KB") -> 1024L
+                else -> 1L
+            }
+            (numericPart * multiplier).toLong()
+        } catch (_: Exception) {
+            0L
+        }
+    }
 }

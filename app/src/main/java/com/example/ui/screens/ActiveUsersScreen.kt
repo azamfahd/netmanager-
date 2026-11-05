@@ -117,6 +117,7 @@ import com.example.ui.viewmodel.MainViewModel
 fun ActiveUsersScreen(
     viewModel: MainViewModel,
     onOpenSessionDetail: ((UserSessionRecord) -> Unit)? = null,
+    onOpenAnalytics: ((String, String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val activeUsers by viewModel.filteredActiveUsers.collectAsStateWithLifecycle()
@@ -399,7 +400,10 @@ fun ActiveUsersScreen(
             onDismiss = { selectedSessionForDetail = null },
             onKickUser = if (targetSession.isOnline) {
                 { userToKick = targetSession }
-            } else null
+            } else null,
+            onOpenAnalytics = { type ->
+                onOpenAnalytics?.invoke(targetSession.username, type)
+            }
         )
     }
 

@@ -58,3 +58,11 @@ data class SubscriberFullProfile(
     // Complete Sessions History List
     val sessionHistory: List<UserSessionRecord> = emptyList()
 )
+
+data class AppUsageItem(
+    val appName: String,
+    val category: String,
+    val bytesUsed: Long,
+    val percentage: Float,
+    val color: Long = 0xFF1976D2 // Default blue
+)

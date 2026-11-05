@@ -23,7 +23,14 @@ data class GitHubReleaseInfo(
     val publishedAt: String,
     val htmlUrl: String,
     val apkAsset: GitHubReleaseAsset?
-)
+) {
+    val isMinorUpdate: Boolean
+        get() {
+            val clean = tagName.trim().removePrefix("v").removePrefix("V")
+            val parts = clean.split(".")
+            return parts.size >= 3 || (apkAsset != null && apkAsset.size in 1..(35 * 1024 * 1024L))
+        }
+}
 
 sealed class UpdateCheckState {
     object Idle : UpdateCheckState()
@@ -31,7 +38,8 @@ sealed class UpdateCheckState {
     data class UpdateAvailable(
         val release: GitHubReleaseInfo,
         val currentVersion: String,
-        val isNewer: Boolean
+        val isNewer: Boolean,
+        val isMinorUpdate: Boolean = release.isMinorUpdate
     ) : UpdateCheckState()
     data class UpToDate(
         val currentVersion: String,

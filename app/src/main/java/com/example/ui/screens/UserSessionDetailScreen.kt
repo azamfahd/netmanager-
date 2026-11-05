@@ -109,6 +109,7 @@ fun UserSessionDetailScreen(
     onBackClick: () -> Unit,
     onKickUser: (() -> Unit)? = null,
     onRefresh: () -> Unit = {},
+    onOpenAnalytics: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -429,7 +430,7 @@ fun UserSessionDetailScreen(
                                 Column {
                                     Text(
                                         text = "الاستهلاك التراكمي لكل الأوقات (Lifetime)",
-                                        style = MaterialTheme.typography.titleMedium,
+                                        style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
@@ -442,7 +443,8 @@ fun UserSessionDetailScreen(
 
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = MaterialTheme.colorScheme.primaryContainer
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                modifier = Modifier.clickable { onOpenAnalytics?.invoke("total") }
                             ) {
                                 Text(
                                     text = NetworkUtils.formatBytes(lifetimeTotalBytes),
@@ -461,7 +463,9 @@ fun UserSessionDetailScreen(
                         ) {
                             // Lifetime Download
                             Surface(
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { onOpenAnalytics?.invoke("download") },
                                 shape = RoundedCornerShape(14.dp),
                                 color = StatusActiveGreenBg,
                                 border = BorderStroke(1.dp, StatusActiveGreen.copy(alpha = 0.35f))
@@ -478,7 +482,9 @@ fun UserSessionDetailScreen(
 
                             // Lifetime Upload
                             Surface(
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { onOpenAnalytics?.invoke("upload") },
                                 shape = RoundedCornerShape(14.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
                                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
@@ -495,7 +501,9 @@ fun UserSessionDetailScreen(
 
                             // Cumulative Uptime
                             Surface(
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { onOpenAnalytics?.invoke("time") },
                                 shape = RoundedCornerShape(14.dp),
                                 color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.35f),
                                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.35f))
@@ -535,10 +543,10 @@ fun UserSessionDetailScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text(text = "استهلاك الجلسة الحالية:", style = MaterialTheme.typography.bodySmall)
+                                    Text(text = "استهلاك الجلسة الحالية:", style = MaterialTheme.typography.labelSmall)
                                     Text(
                                         text = "${NetworkUtils.formatBytes(session.totalBytes)} (تحميل: ${NetworkUtils.formatBytes(session.bytesOut)} • رفع: ${NetworkUtils.formatBytes(session.bytesIn)})",
-                                        style = MaterialTheme.typography.bodySmall,
+                                        style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold,
                                         color = RouterBlue
                                     )
@@ -548,10 +556,10 @@ fun UserSessionDetailScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text(text = "مدة الجلسة الحالية:", style = MaterialTheme.typography.bodySmall)
+                                    Text(text = "مدة الجلسة الحالية:", style = MaterialTheme.typography.labelSmall)
                                     Text(
                                         text = session.duration,
-                                        style = MaterialTheme.typography.bodySmall,
+                                        style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold
                                     )
                                 }

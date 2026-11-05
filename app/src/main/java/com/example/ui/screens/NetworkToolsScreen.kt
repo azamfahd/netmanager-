@@ -364,12 +364,12 @@ fun NetworkToolsScreen(
                             }
                             Column {
                                 Text(
-                                    text = "تحديثات وترقية البرنامج (GitHub Releases)",
+                                    text = "تحديثات وترقية البرنامج",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "فحص التحديثات والمزامنة المباشرة مع المستودع",
+                                    text = "فحص التحديثات وتنزيل أحدث إصدار مع التثبيت المباشر",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -577,18 +577,6 @@ fun NetworkToolsScreen(
                             showUpdateDialog = true
                             manualCheckTriggered = false
                         }
-                    }
-                    
-                    // Show dialog if update check state is UpdateAvailable
-                    if (showUpdateDialog && updateCheckState is UpdateCheckState.UpdateAvailable) {
-                         AppUpdateDialog(
-                            release = (updateCheckState as UpdateCheckState.UpdateAvailable).release,
-                            currentVersion = viewModel.currentAppVersion,
-                            downloadState = updateDownloadState,
-                            onDownloadAndInstall = { url -> viewModel.downloadAndInstallUpdate(context, url) },
-                            onInstallDownloaded = { file -> AppUpdateManager.installApk(context, file) },
-                            onDismiss = { showUpdateDialog = false }
-                        )
                     }
                 }
             }
@@ -1085,6 +1073,7 @@ fun NetworkToolsScreen(
         )
     }
 
+    val autoUpdateMinor by viewModel.autoUpdateMinorReleases.collectAsStateWithLifecycle()
     if (showUpdateDialog) {
         val checkState = updateCheckState
         if (checkState is UpdateCheckState.UpdateAvailable) {
@@ -1092,6 +1081,8 @@ fun NetworkToolsScreen(
                 release = checkState.release,
                 currentVersion = viewModel.currentAppVersion,
                 downloadState = updateDownloadState,
+                autoUpdateMinorReleases = autoUpdateMinor,
+                onToggleAutoUpdateMinor = { viewModel.setAutoUpdateMinorReleases(it) },
                 onDownloadAndInstall = { url ->
                     viewModel.downloadAndInstallUpdate(context, url)
                 },

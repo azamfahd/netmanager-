@@ -176,8 +176,10 @@ fun MainScreen(
         ) {
             // Update Banner
             if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
+                val availableRelease = (updateCheckState as UpdateCheckState.UpdateAvailable).release
                 UpdateBanner(
-                    tagName = (updateCheckState as UpdateCheckState.UpdateAvailable).release.tagName,
+                    tagName = availableRelease.tagName,
+                    isMinorUpdate = availableRelease.isMinorUpdate,
                     onUpdateClick = { showUpdateDialog = true },
                     onDismiss = { viewModel.dismissUpdateBanner() }
                 )
@@ -211,7 +213,19 @@ fun MainScreen(
                         onOpenAdminAudit = {
                             navController.navigate(Screen.AdminAudit)
                         },
+                        onOpenAnalytics = { username, type ->
+                            navController.navigate(Screen.UsageAnalytics(username, type))
+                        },
                         onTriggerSignIn = onTriggerSignIn
+                    )
+                }
+                composable<Screen.UsageAnalytics> { backStackEntry ->
+                    val args = backStackEntry.toRoute<Screen.UsageAnalytics>()
+                    UsageAnalyticsScreen(
+                        username = args.username,
+                        type = args.type,
+                        viewModel = viewModel,
+                        onBackClick = { navController.popBackStack() }
                     )
                 }
                 composable<Screen.AdminAudit> {
@@ -236,18 +250,53 @@ fun MainScreen(
                     val sessionHistory by viewModel.getLoginHistoryForUser(args.username).collectAsStateWithLifecycle(emptyList())
                     val subscriberProfile by viewModel.getSubscriberProfileFlow(args.username).collectAsStateWithLifecycle(null)
                     val activeUsersList by viewModel.activeUsers.collectAsStateWithLifecycle()
-                    val targetSession = activeUsersList.find { it.user == args.username } ?: return@composable
-                    
-                    val userSessionRecord = com.example.data.model.UserSessionRecord(
-                        id = targetSession.id,
-                        username = targetSession.user,
-                        ipAddress = targetSession.address,
-                        macAddress = targetSession.macAddress,
-                        duration = targetSession.uptime,
-                        bytesIn = targetSession.bytesIn,
-                        bytesOut = targetSession.bytesOut,
-                        isOnline = true
-                    )
+                    val userSessionsList by viewModel.userSessions.collectAsStateWithLifecycle()
+                    val allCardsList by viewModel.cards.collectAsStateWithLifecycle()
+
+                    val targetActive = activeUsersList.find { it.user.equals(args.username, ignoreCase = true) }
+                    val targetArchived = userSessionsList.find { it.username.equals(args.username, ignoreCase = true) }
+                    val targetCard = allCardsList.find { it.name.equals(args.username, ignoreCase = true) }
+
+                    val userSessionRecord = if (targetActive != null) {
+                        com.example.data.model.UserSessionRecord(
+                            id = targetActive.id,
+                            username = targetActive.user,
+                            ipAddress = targetActive.address,
+                            macAddress = targetActive.macAddress,
+                            duration = targetActive.uptime,
+                            bytesIn = targetActive.bytesIn,
+                            bytesOut = targetActive.bytesOut,
+                            isOnline = true,
+                            profile = targetActive.serverName
+                        )
+                    } else if (targetArchived != null) {
+                        targetArchived
+                    } else if (targetCard != null) {
+                        com.example.data.model.UserSessionRecord(
+                            id = targetCard.id,
+                            username = targetCard.name,
+                            ipAddress = "غير متصل",
+                            macAddress = "غير مسجل",
+                            duration = targetCard.uptime.ifBlank { "0s" },
+                            bytesIn = targetCard.bytesIn,
+                            bytesOut = targetCard.bytesOut,
+                            totalBytes = targetCard.bytesIn + targetCard.bytesOut,
+                            isOnline = false,
+                            profile = targetCard.profile,
+                            price = targetCard.price,
+                            comment = targetCard.comment.ifBlank { "كرت جاهز للبيع" }
+                        )
+                    } else {
+                        com.example.data.model.UserSessionRecord(
+                            id = "card_${args.username}",
+                            username = args.username,
+                            ipAddress = "غير متصل",
+                            macAddress = "غير مسجل",
+                            duration = "0s",
+                            isOnline = false,
+                            comment = "تفاصيل الكرت"
+                        )
+                    }
 
                     UserSessionDetailScreen(
                         session = userSessionRecord,
@@ -255,8 +304,13 @@ fun MainScreen(
                         loginHistory = sessionHistory,
                         onBackClick = { navController.popBackStack() },
                         onKickUser = {
-                            viewModel.kickUser(targetSession)
+                            if (targetActive != null) {
+                                viewModel.kickUser(targetActive)
+                            }
                             navController.popBackStack()
+                        },
+                        onOpenAnalytics = { type ->
+                            navController.navigate(Screen.UsageAnalytics(args.username, type))
                         },
                         onRefresh = { viewModel.refreshData() }
                     )
@@ -293,6 +347,7 @@ fun MainScreen(
         )
     }
 
+    val autoUpdateMinor by viewModel.autoUpdateMinorReleases.collectAsStateWithLifecycle()
     if (showUpdateDialog) {
         val checkState = updateCheckState
         if (checkState is UpdateCheckState.UpdateAvailable) {
@@ -301,6 +356,8 @@ fun MainScreen(
                 release = checkState.release,
                 currentVersion = viewModel.currentAppVersion,
                 downloadState = updateDownloadState,
+                autoUpdateMinorReleases = autoUpdateMinor,
+                onToggleAutoUpdateMinor = { viewModel.setAutoUpdateMinorReleases(it) },
                 onDownloadAndInstall = { url ->
                     viewModel.downloadAndInstallUpdate(context, url)
                 },
@@ -360,6 +417,7 @@ fun MainPagerContent(
     onOpenPrintScreen: (List<com.example.data.model.HotspotCard>) -> Unit,
     onOpenSessionDetail: (String) -> Unit,
     onOpenAdminAudit: () -> Unit,
+    onOpenAnalytics: (String, String) -> Unit,
     onTriggerSignIn: () -> Unit
 ) {
     val pagerState = rememberPagerState(initialPage = 0) { MainTab.entries.size }
@@ -406,6 +464,9 @@ fun MainPagerContent(
                     onOpenSessionDetail = { session ->
                         onOpenSessionDetail(session.username)
                     },
+                    onOpenAnalytics = { username, type ->
+                        onOpenAnalytics(username, type)
+                    },
                     modifier = Modifier.padding(bottom = 78.dp)
                 )
                 MainTab.CARDS -> CardsScreen(
@@ -416,6 +477,9 @@ fun MainPagerContent(
                     onOpenPrintScreen = { onOpenPrintScreen(viewModel.cards.value) },
                     onOpenSessionDetail = { session ->
                         onOpenSessionDetail(session.username)
+                    },
+                    onOpenAnalytics = { username, type ->
+                        onOpenAnalytics(username, type)
                     },
                     modifier = Modifier.padding(bottom = 78.dp)
                 )
@@ -591,9 +655,14 @@ fun FloatingBottomNavigationDock(
 }
 
 @Composable
-fun UpdateBanner(tagName: String, onUpdateClick: () -> Unit, onDismiss: () -> Unit) {
+fun UpdateBanner(
+    tagName: String,
+    isMinorUpdate: Boolean = false,
+    onUpdateClick: () -> Unit,
+    onDismiss: () -> Unit
+) {
     Surface(
-        color = MaterialTheme.colorScheme.primaryContainer,
+        color = if (isMinorUpdate) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.primaryContainer,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -608,18 +677,20 @@ fun UpdateBanner(tagName: String, onUpdateClick: () -> Unit, onDismiss: () -> Un
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "يوجد تحديث جديد ($tagName)",
+                    text = if (isMinorUpdate) "⚡ تحديث خفيف متاح ($tagName)" else "يوجد تحديث جديد ($tagName)",
                     style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = if (isMinorUpdate) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onPrimaryContainer
                 )
                 Text(
-                    text = "اضغط للتنزيل والتثبيت مباشرة",
-                    style = MaterialTheme.typography.bodySmall
+                    text = if (isMinorUpdate) "تحسينات سريعة - اضغط للتحديث المباشر والتثبيت" else "اضغط للتنزيل والتثبيت مباشرة",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isMinorUpdate) MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )
             }
             Row {
                 TextButton(onClick = onUpdateClick) {
-                    Text("تحديث")
+                    Text(if (isMinorUpdate) "تحديث فوري ⚡" else "تحديث")
                 }
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Default.Close, null, modifier = Modifier.size(16.dp))

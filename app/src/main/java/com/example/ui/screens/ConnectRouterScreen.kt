@@ -1441,6 +1441,7 @@ fun ConnectRouterScreen(
         }
     }
 
+    val autoUpdateMinor by viewModel.autoUpdateMinorReleases.collectAsStateWithLifecycle()
     if (showUpdateDialog) {
         val checkState = updateCheckState
         if (checkState is UpdateCheckState.UpdateAvailable) {
@@ -1448,6 +1449,8 @@ fun ConnectRouterScreen(
                 release = checkState.release,
                 currentVersion = viewModel.currentAppVersion,
                 downloadState = updateDownloadState,
+                autoUpdateMinorReleases = autoUpdateMinor,
+                onToggleAutoUpdateMinor = { viewModel.setAutoUpdateMinorReleases(it) },
                 onDownloadAndInstall = { url ->
                     viewModel.downloadAndInstallUpdate(context, url)
                 },

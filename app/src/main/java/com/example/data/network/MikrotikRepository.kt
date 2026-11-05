@@ -1498,7 +1498,9 @@ class MikrotikRepository(
                                 bytesIn = obj.optLong("bytes-in", 0),
                                 bytesOut = obj.optLong("bytes-out", 0),
                                 limitUptime = obj.optString("limit-uptime", ""),
-                                limitBytesTotal = obj.optLong("limit-bytes-total", 0),
+                                limitBytesTotal = obj.optLong("limit-bytes-total", 0L).takeIf { it > 0 }
+                                    ?: obj.optLong("limit-bytes-out", 0L).takeIf { it > 0 }
+                                    ?: obj.optLong("limit-bytes-in", 0L),
                                 comment = comment,
                                 disabled = obj.optBoolean("disabled", false),
                                 price = price
@@ -1531,7 +1533,8 @@ class MikrotikRepository(
                                         bytesIn = obj.optLong("download-used", 0L),
                                         bytesOut = obj.optLong("upload-used", 0L),
                                         limitUptime = obj.optString("time-limit", ""),
-                                        limitBytesTotal = obj.optLong("download-limit", 0L),
+                                        limitBytesTotal = obj.optLong("total-limit", 0L).takeIf { it > 0 }
+                                            ?: obj.optLong("download-limit", 0L),
                                         comment = comment,
                                         disabled = obj.optBoolean("disabled", false),
                                         price = price
@@ -1606,6 +1609,10 @@ class MikrotikRepository(
                                             val comment = obj.optString("comment", "")
                                             val priceStr = extractPriceFromText(comment, name, "")
                                             val (up, down) = parseRateLimitSpeeds(rateLimit)
+                                            val totalLimit = obj.optLong("total-limit", 0L)
+                                            val dlLimit = obj.optLong("download-limit", 0L)
+                                            val resolvedDataLimit = if (totalLimit > 0L) totalLimit.toString() else if (dlLimit > 0L) dlLimit.toString() else ""
+
                                             profList.add(
                                                 HotspotProfile(
                                                     id = obj.optString(".id", "${src}_$i"),
@@ -1617,6 +1624,7 @@ class MikrotikRepository(
                                                     uploadLimit = up,
                                                     downloadLimit = down,
                                                     validity = "1d",
+                                                    dataLimit = resolvedDataLimit,
                                                     source = src,
                                                     comment = comment
                                                 )
@@ -2487,7 +2495,9 @@ class MikrotikRepository(
                                     bytesIn = obj.optLong("bytes-in", 0L),
                                     bytesOut = obj.optLong("bytes-out", 0L),
                                     limitUptime = obj.optString("limit-uptime", ""),
-                                    limitBytesTotal = obj.optLong("limit-bytes-total", 0L),
+                                    limitBytesTotal = obj.optLong("limit-bytes-total", 0L).takeIf { it > 0 }
+                                        ?: obj.optLong("limit-bytes-out", 0L).takeIf { it > 0 }
+                                        ?: obj.optLong("limit-bytes-in", 0L),
                                     comment = comment,
                                     disabled = obj.optBoolean("disabled", false),
                                     price = price
@@ -2519,7 +2529,8 @@ class MikrotikRepository(
                                             bytesIn = obj.optLong("download-used", 0L),
                                             bytesOut = obj.optLong("upload-used", 0L),
                                             limitUptime = obj.optString("time-limit", ""),
-                                            limitBytesTotal = obj.optLong("download-limit", 0L),
+                                            limitBytesTotal = obj.optLong("total-limit", 0L).takeIf { it > 0 }
+                                                ?: obj.optLong("download-limit", 0L),
                                             comment = comment,
                                             disabled = obj.optBoolean("disabled", false),
                                             price = price
