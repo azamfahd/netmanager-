@@ -42,6 +42,9 @@ fun UsageAnalyticsScreen(
 ) {
     val appUsageItems by viewModel.getUsageBreakdown(username, type).collectAsStateWithLifecycle(emptyList())
     val subscriberProfile by viewModel.getSubscriberProfileFlow(username).collectAsStateWithLifecycle(null)
+    val inspectedApps by viewModel.inspectedApps.collectAsStateWithLifecycle()
+    val isInspecting by viewModel.isInspecting.collectAsStateWithLifecycle()
+    val displayItems = if (inspectedApps.isNotEmpty()) inspectedApps else appUsageItems
 
     val title = when (type.lowercase()) {
         "download" -> "تحليل حجم التحميل للجلسات"
@@ -134,10 +137,33 @@ fun UsageAnalyticsScreen(
                 }
             }
 
+            // Deep App Inspection Action Button
+            item {
+                Button(
+                    onClick = {
+                        val ip = subscriberProfile?.usedIpAddresses?.firstOrNull() ?: "192.168.88.10"
+                        viewModel.inspectSubscriberTraffic(ip)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = themeColor)
+                ) {
+                    if (isInspecting) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("جاري فحص وتصنيف التطبيقات النشطة...")
+                    } else {
+                        Icon(Icons.Default.Analytics, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("فحص وتصنيف التطبيقات العميق (YouTube, Insta, TikTok...) ⚡", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
             // 2. Visual Chart (Doughnut)
             item {
                 Text(
-                    text = "توزيع الاستهلاك حسب الجلسات والأجهزة",
+                    text = if (inspectedApps.isNotEmpty()) "تحليل التطبيقات والمنصات المكتشفة" else "توزيع الاستهلاك حسب الجلسات والأجهزة",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 4.dp)
@@ -163,10 +189,10 @@ fun UsageAnalyticsScreen(
                         ) {
                             Canvas(modifier = Modifier.size(120.dp)) {
                                 var startAngle = -90f
-                                if (appUsageItems.isEmpty()) {
+                                if (displayItems.isEmpty()) {
                                     drawCircle(color = Color.LightGray.copy(alpha = 0.3f), style = androidx.compose.ui.graphics.drawscope.Stroke(width = 25f))
                                 } else {
-                                    appUsageItems.forEach { item ->
+                                    displayItems.forEach { item ->
                                         val sweepAngle = (item.percentage / 100f) * 360f
                                         drawArc(
                                             color = Color(item.color),
@@ -180,14 +206,14 @@ fun UsageAnalyticsScreen(
                                 }
                             }
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("توزيع", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("الجلسات", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                Text(if (inspectedApps.isNotEmpty()) "تطبيقات" else "توزيع", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(if (inspectedApps.isNotEmpty()) "مكتشفة" else "الجلسات", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                             }
                         }
 
                         // Legend
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            appUsageItems.take(4).forEach { item ->
+                            displayItems.take(4).forEach { item ->
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -202,8 +228,8 @@ fun UsageAnalyticsScreen(
                                     Text(text = "${item.percentage.toInt()}%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                                 }
                             }
-                            if (appUsageItems.size > 4) {
-                                Text(text = "+ ${appUsageItems.size - 4} أخرى", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (displayItems.size > 4) {
+                                Text(text = "+ ${displayItems.size - 4} أخرى", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -213,14 +239,14 @@ fun UsageAnalyticsScreen(
             // 3. Detailed Usage List
             item {
                 Text(
-                    text = "سجل الجلسات التفصيلي للاستهلاك",
+                    text = if (inspectedApps.isNotEmpty()) "قائمة التطبيقات والمنصات النشطة للمشترك" else "سجل الجلسات التفصيلي للاستهلاك",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 4.dp)
                 )
             }
 
-            items(appUsageItems) { item ->
+            items(displayItems) { item ->
                 AppUsageListItem(item = item, type = type)
             }
             

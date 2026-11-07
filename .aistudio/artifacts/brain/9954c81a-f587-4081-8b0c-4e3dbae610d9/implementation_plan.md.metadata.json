@@ -1,6 +1,6 @@
 {
-  "summary": "خطة تدقيق وإصلاح وهيكلة هندسية شاملة لمشروع NetMaster Pro:\n1. حل مشكلة اقتصار خريطة الشبكة على 13 راوتر/نقطة من خلال فك قيود المعرفات الثابتة، ودمج اكتشاف الجيران (/ip/neighbor)، ومسح النطاق الفرعي المصرح به (Authorized Subnet Ping/Port Scan)، ومسح سجلات التسجيل اللاسلكي وعقد RoMON المتاحة بدون تعديل إعدادات الراوتر.\n2. بناء طبقة اتصالات MikroTik مركزية عالية الموثوقية بروابط معادة الاستخدام، مهل متكيفة، ومنع التكرار (Idempotency).\n3. تفعيل المزامنة التزايدية الذكية (Incremental Sync) كل دقيقة مع الحفظ الدائم محلياً في Room Database وتحميل فوري للبيانات عند بدء التطبيق.\n4. تثبيت دقة قراءة حدود باقات User Manager (Data Limits) في RouterOS v6 و v7 بدون فرض \"غير محدد\" خطأً.\n5. تأمين عزل بيانات المستخدمين (Tenant Isolation) وحماية بيانات الاعتماد.",
-  "updatedAt": "2026-11-06T19:25:44.419764177Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Implementation plan for on-demand Deep App Traffic Inspection feature in subscriber usage analytics, enabling real-time app detection (YouTube, Instagram, Facebook, TikTok, PUBG, WhatsApp, Telegram, etc.) with a dedicated analysis button on usage cards.",
+  "updatedAt":  "2026-11-07T21:31:06.701067685Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }

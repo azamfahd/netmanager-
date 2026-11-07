@@ -25,7 +25,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RouterTaskEntity::class,
         MaterializedSummaryEntity::class
     ],
-    version = 16,
+    version = 17,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -58,6 +58,38 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val existingColumns = mutableSetOf<String>()
+                try {
+                    val cursor = db.query("PRAGMA table_info(network_nodes)")
+                    while (cursor.moveToNext()) {
+                        val nameIdx = cursor.getColumnIndex("name")
+                        if (nameIdx >= 0) {
+                            existingColumns.add(cursor.getString(nameIdx))
+                        }
+                    }
+                    cursor.close()
+                } catch (_: Exception) {}
+
+                if (!existingColumns.contains("firmwareVersion")) {
+                    try {
+                        db.execSQL("ALTER TABLE `network_nodes` ADD COLUMN `firmwareVersion` TEXT NOT NULL DEFAULT ''")
+                    } catch (_: Exception) {}
+                }
+                if (!existingColumns.contains("vlanId")) {
+                    try {
+                        db.execSQL("ALTER TABLE `network_nodes` ADD COLUMN `vlanId` INTEGER DEFAULT NULL")
+                    } catch (_: Exception) {}
+                }
+                if (!existingColumns.contains("parentInterface")) {
+                    try {
+                        db.execSQL("ALTER TABLE `network_nodes` ADD COLUMN `parentInterface` TEXT DEFAULT NULL")
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -65,8 +97,8 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "netmanager_database"
                 )
-                    .addMigrations(MIGRATION_15_16)
-                    .fallbackToDestructiveMigration()
+                    .addMigrations(MIGRATION_15_16, MIGRATION_16_17)
+                    .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                 INSTANCE = instance
                 instance

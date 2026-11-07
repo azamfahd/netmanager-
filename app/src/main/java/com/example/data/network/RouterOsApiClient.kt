@@ -2585,6 +2585,42 @@ class RouterOsApiClient {
         outStream = null
     }
 
+    suspend fun getDnsCache(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/ip/dns/cache/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getFirewallConnections(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/ip/firewall/connection/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
     private fun hexStringToByteArray(s: String): ByteArray {
         val len = s.length
         val data = ByteArray(len / 2)
