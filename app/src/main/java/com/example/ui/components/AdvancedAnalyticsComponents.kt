@@ -219,19 +219,12 @@ fun LiveBandwidthChartCard(
     bandwidthHistory: List<BandwidthPoint>,
     modifier: Modifier = Modifier
 ) {
-    val points = if (bandwidthHistory.size >= 2) bandwidthHistory else listOf(
-        BandwidthPoint(1, 1500.0, 600.0),
-        BandwidthPoint(2, 2800.0, 1100.0),
-        BandwidthPoint(3, 2100.0, 900.0),
-        BandwidthPoint(4, 3800.0, 1600.0),
-        BandwidthPoint(5, 3450.0, 1500.0),
-        BandwidthPoint(6, 4200.0, 1900.0)
-    )
+    val points = bandwidthHistory
 
-    val currentPoint = points.last()
-    val maxRx = points.maxOfOrNull { it.rxKbps } ?: 5000.0
-    val maxTx = points.maxOfOrNull { it.txKbps } ?: 2500.0
-    val chartMax = max(maxRx, maxTx).coerceAtLeast(1000.0) * 1.25
+    val currentPoint = points.lastOrNull() ?: BandwidthPoint(0, 0.0, 0.0)
+    val maxRx = points.maxOfOrNull { it.rxKbps } ?: 100.0
+    val maxTx = points.maxOfOrNull { it.txKbps } ?: 100.0
+    val chartMax = max(maxRx, maxTx).coerceAtLeast(100.0) * 1.25
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val pulseAlpha by infiniteTransition.animateFloat(
@@ -604,13 +597,11 @@ fun PeakHoursAnalysisCard(
     peakStats: List<PeakHourStat>,
     modifier: Modifier = Modifier
 ) {
-    val stats = if (peakStats.isNotEmpty()) peakStats else (0..23).map { h ->
-        PeakHourStat(h, (h * 2 + 5), h in 19..22, (h.toFloat() / 24f))
-    }
+    val stats = peakStats
 
     val currentHour = remember { java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY) }
-    val maxUsers = stats.maxOfOrNull { it.userCount } ?: 1
-    val peakHourItem = stats.maxByOrNull { it.userCount }
+    val maxUsers = stats.maxOfOrNull { it.userCount }?.coerceAtLeast(1) ?: 1
+    val peakHourItem = if (stats.isNotEmpty()) stats.maxByOrNull { it.userCount } else null
 
     Card(
         modifier = modifier.fillMaxWidth(),

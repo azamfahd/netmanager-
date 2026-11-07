@@ -266,6 +266,26 @@ fun NodeDetailDialog(
                             Text("المنفذ: ${node.interfaceName}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
 
+                        if (node.vlanId != null && node.vlanId != 0) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(Icons.Default.Dns, contentDescription = null, modifier = Modifier.size(16.dp), tint = RouterBlue)
+                                    Text("VLAN ID: ${node.vlanId}", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
+                                
+                                node.parentInterface?.let {
+                                    Text("عبر منفذ: $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,

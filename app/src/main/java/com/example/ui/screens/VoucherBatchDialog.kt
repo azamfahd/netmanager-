@@ -872,13 +872,18 @@ fun VoucherBatchDialog(
                                         fontSize = 11.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    val dataText = if (activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد") {
-                                        activeProfileObj.dataLimit
-                                    } else "مفتوح"
+                                    val dataText = when {
+                                        activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد" && activeProfileObj.dataLimit != "مفتوح" -> {
+                                            activeProfileObj.dataLimit
+                                        }
+                                        activeProfileObj.dataLimit.equals("مفتوح", ignoreCase = true) -> "مفتوح (غير محدود)"
+                                        else -> "غير محدد في الراوتر"
+                                    }
                                     Text(
                                         text = "📊 البيانات: $dataText",
                                         fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        fontWeight = if (activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد") FontWeight.Bold else FontWeight.Normal,
+                                        color = if (activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                     Text(
                                         text = "💰 ${activeProfileObj.price}",
@@ -1391,8 +1396,13 @@ fun VoucherBatchDialog(
 
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("حصة البيانات:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                val dataText = if (activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد") activeProfileObj.dataLimit
-                                    else "مفتوح (غير محدد)"
+                                val dataText = when {
+                                    activeProfileObj.dataLimit.isNotBlank() && activeProfileObj.dataLimit != "غير محدد" && activeProfileObj.dataLimit != "مفتوح" -> {
+                                        activeProfileObj.dataLimit
+                                    }
+                                    activeProfileObj.dataLimit.equals("مفتوح", ignoreCase = true) -> "مفتوح (غير محدد)"
+                                    else -> "غير محدد في الراوتر"
+                                }
                                 Text(dataText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
                             }
 

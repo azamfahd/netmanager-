@@ -34,6 +34,8 @@ data class NetworkNodeEntity(
     val channelWidth: String = "20/40/80 MHz",
     val ssid: String = "",
     val firmwareVersion: String = "",
+    val vlanId: Int? = null,
+    val parentInterface: String? = null,
     val lastSeenTime: Long = System.currentTimeMillis(),
     val lastCheckTime: Long = System.currentTimeMillis()
 ) {
@@ -68,6 +70,8 @@ data class NetworkNodeEntity(
                 channelWidth = node.channelWidth,
                 ssid = node.ssid,
                 firmwareVersion = node.firmwareVersion,
+                vlanId = node.vlanId,
+                parentInterface = node.parentInterface,
                 lastSeenTime = node.lastSeenTime,
                 lastCheckTime = node.lastCheckTime
             )
@@ -103,7 +107,8 @@ data class NetworkNodeEntity(
             frequency = frequency,
             channelWidth = channelWidth,
             ssid = ssid,
-            firmwareVersion = firmwareVersion,
+            vlanId = vlanId,
+            parentInterface = parentInterface,
             lastSeenTime = lastSeenTime,
             lastCheckTime = lastCheckTime
         )

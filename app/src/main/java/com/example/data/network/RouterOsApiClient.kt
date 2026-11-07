@@ -51,16 +51,18 @@ class RouterOsApiClient {
     fun getCachedProfiles(): List<HotspotProfile> = synchronized(cachedProfiles) { cachedProfiles.toList() }
 
     suspend fun ensureConnected(): Boolean = withContext(Dispatchers.IO) {
-        synchronized(socketLock) {
-            val s = socket
-            if (s != null && !s.isClosed && s.isConnected && !s.isInputShutdown && !s.isOutputShutdown) {
-                return@synchronized true
-            }
-            if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
-                return@synchronized reconnectInternal()
-            }
-            false
+        ensureConnectedInternal()
+    }
+
+    private fun ensureConnectedInternal(): Boolean = synchronized(socketLock) {
+        val s = socket
+        if (s != null && !s.isClosed && s.isConnected && !s.isInputShutdown && !s.isOutputShutdown) {
+            return@synchronized true
         }
+        if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
+            return@synchronized reconnectInternal()
+        }
+        false
     }
 
     suspend fun connectAndLogin(
@@ -83,8 +85,8 @@ class RouterOsApiClient {
                 val sock = Socket()
                 sock.tcpNoDelay = true
                 sock.keepAlive = true
-                sock.connect(InetSocketAddress(cleanHost, port), timeoutMs)
-                sock.soTimeout = 12000
+                sock.connect(InetSocketAddress(cleanHost, port), timeoutMs.coerceAtLeast(8000))
+                sock.soTimeout = 25000 // 25 seconds adequate for heavy UserManager database transactions
                 socket = sock
                 inStream = sock.getInputStream()
                 outStream = sock.getOutputStream()
@@ -307,10 +309,38 @@ class RouterOsApiClient {
                     }
                 } catch (_: Exception) {}
 
-                // 2. Fetch User-Manager Profiles if available (/user-manager/profile)
+                // 2. Fetch User-Manager Profiles & Linked Limitations (/user-manager/profile & /user-manager/limitation)
                 try {
-                    writeSentence(listOf("/user-manager/profile/print"))
-                    val umSentences = readAllSentencesUntilDone()
+                    // Pre-fetch limitations in v7 if available
+                    val v7Limitations = mutableMapOf<String, Map<String, String>>()
+                    try {
+                        val limitSentences = executeSentence(listOf("/user-manager/limitation/print"))
+                        for (ls in limitSentences) {
+                            if (ls.firstOrNull() == "!re") {
+                                val lMap = parseSentenceToMap(ls)
+                                val lName = lMap["name"] ?: continue
+                                v7Limitations[lName] = lMap
+                                val lId = lMap[".id"]
+                                if (lId != null) v7Limitations[lId] = lMap
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    // Pre-fetch profile-limitation bindings in v7 (mapping profile -> limitation)
+                    val v7ProfileToLimit = mutableMapOf<String, MutableList<String>>()
+                    try {
+                        val plSentences = executeSentence(listOf("/user-manager/profile-limitation/print"))
+                        for (pls in plSentences) {
+                            if (pls.firstOrNull() == "!re") {
+                                val plMap = parseSentenceToMap(pls)
+                                val pName = plMap["profile"] ?: continue
+                                val lName = plMap["limitation"] ?: continue
+                                v7ProfileToLimit.getOrPut(pName) { mutableListOf() }.add(lName)
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    val umSentences = executeSentence(listOf("/user-manager/profile/print"))
                     for (s in umSentences) {
                         if (s.firstOrNull() == "!re") {
                             val map = parseSentenceToMap(s)
@@ -322,19 +352,53 @@ class RouterOsApiClient {
                             val priceNum = rawPrice?.toDoubleOrNull() ?: (Regex("""\d+""").find(priceStr)?.value?.toDoubleOrNull() ?: 0.0)
                             val validity = map["validity"] ?: map["session-timeout"] ?: "1d"
 
+                            // Resolve exact data limit from linked limitation
+                            var resolvedDataLimit = ""
+                            var resolvedRateLimit = map["rate-limit"] ?: ""
+
+                            val boundLimits = v7ProfileToLimit[name] ?: emptyList()
+                            for (bLimitName in boundLimits) {
+                                val lData = v7Limitations[bLimitName] ?: continue
+                                val downLimit = lData["download-limit"]?.toLongOrNull() ?: 0L
+                                val upLimit = lData["upload-limit"]?.toLongOrNull() ?: 0L
+                                val totalLimit = lData["transfer-limit"]?.toLongOrNull()
+                                    ?: lData["total-limit"]?.toLongOrNull()
+                                    ?: (if (downLimit > 0L || upLimit > 0L) downLimit + upLimit else 0L)
+
+                                if (totalLimit > 0L) {
+                                    resolvedDataLimit = formatBytes(totalLimit)
+                                    break
+                                } else if (downLimit > 0L) {
+                                    resolvedDataLimit = formatBytes(downLimit)
+                                    break
+                                }
+
+                                val limitRate = lData["rate-limit"] ?: ""
+                                if (limitRate.isNotBlank() && resolvedRateLimit.isBlank()) {
+                                    resolvedRateLimit = limitRate
+                                }
+                            }
+
+                            // Fallback to text extraction from name or comment if limitation wasn't bound
+                            if (resolvedDataLimit.isBlank()) {
+                                resolvedDataLimit = extractDataLimitFromText(name, map["comment"].orEmpty())
+                            }
+
+                            val (upSpeed, downSpeed) = parseRateLimitSpeeds(resolvedRateLimit)
+
                             list.add(
                                 HotspotProfile(
                                     id = map[".id"] ?: "um_${list.size}",
                                     name = name,
-                                    rateLimit = map["rate-limit"] ?: "مفتوح",
+                                    rateLimit = if (resolvedRateLimit.isNotBlank()) resolvedRateLimit else "مفتوح",
                                     sharedUsers = 1,
                                     sessionTimeout = validity,
                                     keepaliveTimeout = "5m",
                                     price = priceStr,
-                                    uploadLimit = "",
-                                    downloadLimit = "",
+                                    uploadLimit = upSpeed,
+                                    downloadLimit = downSpeed,
                                     validity = validity,
-                                    dataLimit = "",
+                                    dataLimit = resolvedDataLimit,
                                     source = "usermanager_v7",
                                     comment = map["comment"].orEmpty(),
                                     priceNumber = priceNum
@@ -344,10 +408,36 @@ class RouterOsApiClient {
                     }
                 } catch (_: Exception) {}
 
-                // 3. Fetch Tool User-Manager Profiles if available (/tool/user-manager/profile)
+                // 3. Fetch Tool User-Manager Profiles & Limitations for RouterOS v6
                 try {
-                    writeSentence(listOf("/tool/user-manager/profile/print"))
-                    val tumSentences = readAllSentencesUntilDone()
+                    val v6Limitations = mutableMapOf<String, Map<String, String>>()
+                    try {
+                        val limitSentences = executeSentence(listOf("/tool/user-manager/limitation/print"))
+                        for (ls in limitSentences) {
+                            if (ls.firstOrNull() == "!re") {
+                                val lMap = parseSentenceToMap(ls)
+                                val lName = lMap["name"] ?: continue
+                                v6Limitations[lName] = lMap
+                                val lId = lMap[".id"]
+                                if (lId != null) v6Limitations[lId] = lMap
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    val v6ProfileToLimit = mutableMapOf<String, MutableList<String>>()
+                    try {
+                        val plSentences = executeSentence(listOf("/tool/user-manager/profile-limitation/print"))
+                        for (pls in plSentences) {
+                            if (pls.firstOrNull() == "!re") {
+                                val plMap = parseSentenceToMap(pls)
+                                val pName = plMap["profile"] ?: continue
+                                val lName = plMap["limitation"] ?: continue
+                                v6ProfileToLimit.getOrPut(pName) { mutableListOf() }.add(lName)
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    val tumSentences = executeSentence(listOf("/tool/user-manager/profile/print"))
                     for (s in tumSentences) {
                         if (s.firstOrNull() == "!re") {
                             val map = parseSentenceToMap(s)
@@ -356,14 +446,45 @@ class RouterOsApiClient {
                             val rawPrice = map["price"]?.takeIf { it.isNotBlank() && it != "0" }
                             val priceStr = if (rawPrice != null) "$rawPrice ر.ي" else extractPriceFromText(map["comment"].orEmpty(), name, "")
                             val customer = map["customer"]?.takeIf { it.isNotBlank() } ?: "admin"
+
+                            var v6DataLimit = ""
+                            var v6Rate = map["rate-limit"] ?: ""
+
+                            val boundLimits = v6ProfileToLimit[name] ?: emptyList()
+                            for (bLimitName in boundLimits) {
+                                val lData = v6Limitations[bLimitName] ?: continue
+                                val downLimit = lData["download-limit"]?.toLongOrNull() ?: 0L
+                                val upLimit = lData["upload-limit"]?.toLongOrNull() ?: 0L
+                                val transferLimit = lData["transfer-limit"]?.toLongOrNull() ?: 0L
+                                val total = if (transferLimit > 0L) transferLimit else (downLimit + upLimit)
+                                if (total > 0L) {
+                                    v6DataLimit = formatBytes(total)
+                                    break
+                                }
+                                val limitRate = lData["rate-limit"] ?: ""
+                                if (limitRate.isNotBlank() && v6Rate.isBlank()) {
+                                    v6Rate = limitRate
+                                }
+                            }
+
+                            if (v6DataLimit.isBlank()) {
+                                v6DataLimit = extractDataLimitFromText(name, map["comment"].orEmpty())
+                            }
+
+                            val (upSpeed, downSpeed) = parseRateLimitSpeeds(v6Rate)
+
                             list.add(
                                 HotspotProfile(
                                     id = map[".id"] ?: "tum_${list.size}",
                                     name = name,
-                                    rateLimit = map["rate-limit"] ?: "مفتوح",
+                                    rateLimit = if (v6Rate.isNotBlank()) v6Rate else "مفتوح",
                                     sharedUsers = 1,
                                     sessionTimeout = map["validity"] ?: "1d",
                                     price = priceStr,
+                                    uploadLimit = upSpeed,
+                                    downloadLimit = downSpeed,
+                                    validity = map["validity"] ?: "1d",
+                                    dataLimit = v6DataLimit,
                                     source = "usermanager_v6",
                                     comment = customer
                                 )
@@ -581,6 +702,17 @@ class RouterOsApiClient {
         }
 
         return "غير محدد"
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes <= 0L) return ""
+        val gb = bytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+        return if (gb >= 1.0) {
+            String.format(java.util.Locale.US, "%.1f GB", gb).replace(".0 GB", " GB")
+        } else {
+            val mb = bytes.toDouble() / (1024.0 * 1024.0)
+            String.format(java.util.Locale.US, "%.0f MB", mb)
+        }
     }
 
     private fun extractDataLimitFromText(name: String, comment: String): String {
@@ -1038,28 +1170,24 @@ class RouterOsApiClient {
     private fun ensureUserManagerProfileExists(profileName: String, targetProfile: HotspotProfile?) {
         try {
             // Check v7
-            writeSentence(listOf("/user-manager/profile/print", "?name=$profileName"))
-            val v7Sentences = readAllSentencesUntilDone()
+            val v7Sentences = executeSentence(listOf("/user-manager/profile/print", "?name=$profileName"))
             if (v7Sentences.none { it.firstOrNull() == "!re" }) {
                 val v7Words = mutableListOf("/user-manager/profile/add", "=name=$profileName")
                 val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
                 v7Words.add("=validity=$valTime")
                 val priceNum = targetProfile?.priceNumber?.takeIf { it > 0 } ?: 0.0
                 if (priceNum > 0) v7Words.add("=price=${priceNum.toInt()}")
-                writeSentence(v7Words)
-                readAllSentencesUntilDone()
+                executeSentence(v7Words)
             }
         } catch (_: Exception) {}
         try {
             // Check v6
-            writeSentence(listOf("/tool/user-manager/profile/print", "?name=$profileName"))
-            val v6Sentences = readAllSentencesUntilDone()
+            val v6Sentences = executeSentence(listOf("/tool/user-manager/profile/print", "?name=$profileName"))
             if (v6Sentences.none { it.firstOrNull() == "!re" }) {
                 val v6Words = mutableListOf("/tool/user-manager/profile/add", "=name=$profileName", "=customer=admin")
                 val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
                 v6Words.add("=validity=$valTime")
-                writeSentence(v6Words)
-                readAllSentencesUntilDone()
+                executeSentence(v6Words)
             }
         } catch (_: Exception) {}
     }
@@ -1157,81 +1285,113 @@ class RouterOsApiClient {
     private fun addUserManagerV7User(card: HotspotCard): Result<Boolean> {
         val cardName = card.name.trim()
         val cleanProfile = card.profile.trim()
+        val startTime = System.currentTimeMillis()
+
         try {
-            // Phase 1: Create user in User Manager v7
-            val words = mutableListOf(
-                "/user-manager/user/add",
-                "=name=$cardName",
-                "=disabled=no"
-            )
-            if (card.password.isNotBlank()) {
-                words.add("=password=${card.password.trim()}")
-            }
-            if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
-            writeSentence(words)
-            val sentences = readAllSentencesUntilDone()
-            val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
-            if (trap != null) {
-                val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إضافة مستخدم يوزرمانجر"
-                if (msg.contains("no such command", ignoreCase = true) || msg.contains("no such", ignoreCase = true)) {
-                    return addUserManagerV6User(card, "admin")
-                }
-                if (!msg.contains("already exists", ignoreCase = true)) {
-                    return Result.failure(Exception(msg))
-                }
-            }
+            // Stage 1: Pre-check if user already exists on UM v7
+            var userExists = false
+            try {
+                val printExisting = executeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
+                userExists = printExisting.any { it.firstOrNull() == "!re" }
+            } catch (_: Exception) {}
 
-            // Phase 2: Bind profile transactionally
-            if (cleanProfile.isNotBlank()) {
-                val profWords = listOf(
-                    "/user-manager/user-profile/add",
-                    "=user=$cardName",
-                    "=profile=$cleanProfile"
+            // Stage 2: Create user if not already present
+            if (!userExists) {
+                val words = mutableListOf(
+                    "/user-manager/user/add",
+                    "=name=$cardName",
+                    "=disabled=no"
                 )
-                writeSentence(profWords)
-                val profSentences = readAllSentencesUntilDone()
-                val profTrap = profSentences.firstOrNull { it.firstOrNull() == "!trap" }
-                if (profTrap != null) {
-                    val profMsg = profTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
-                        ?: "فشل ربط المستخدم بالباقة في يوزرمانجر"
-                    
-                    // Transactional Rollback: Remove the user if profile assignment failed
-                    try {
-                        writeSentence(listOf("/user-manager/user/remove", "=numbers=$cardName"))
-                        readAllSentencesUntilDone()
-                    } catch (_: Exception) {}
-
-                    return Result.failure(Exception("فشل تفعيل باقة اليوزرمانجر ($cleanProfile) للمستخدم $cardName: $profMsg (تم التراجع عن إنشاء الكرت)"))
+                if (card.password.isNotBlank()) {
+                    words.add("=password=${card.password.trim()}")
                 }
-            }
-
-            // Phase 3: Ensure enabled in UM v7
-            writeSentence(listOf("/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
-            readAllSentencesUntilDone()
-
-            // Phase 4: Post-creation verification
-            if (cleanProfile.isNotBlank()) {
-                writeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
-                val verifySentences = readAllSentencesUntilDone()
-                val isProfileAssigned = verifySentences.any { it.firstOrNull() == "!re" }
-                if (!isProfileAssigned) {
-                    // Check if user itself exists
-                    writeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
-                    val userCheck = readAllSentencesUntilDone()
-                    if (userCheck.none { it.firstOrNull() == "!re" }) {
-                        return Result.failure(Exception("لم يؤكد الراوتر حفظ الكرت $cardName في يوزرمانجر"))
+                if (card.comment.isNotBlank()) {
+                    words.add("=comment=${card.comment}")
+                }
+                val addSentences = executeSentence(words)
+                val trap = addSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (trap != null) {
+                    val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إضافة مستخدم يوزرمانجر"
+                    if (msg.contains("no such command", ignoreCase = true) || msg.contains("no such", ignoreCase = true)) {
+                        return addUserManagerV6User(card, "admin")
+                    }
+                    if (!msg.contains("already exists", ignoreCase = true) && !msg.contains("already have", ignoreCase = true)) {
+                        return Result.failure(Exception("خطأ الراوتر في إنشاء المستخدم: $msg"))
                     }
                 }
             }
 
+            // Stage 3: Bind and verify User-Profile in UM v7
+            if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
+                // Check if profile is already assigned
+                var profileAlreadyBound = false
+                try {
+                    val existingProfSentences = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
+                    profileAlreadyBound = existingProfSentences.any { s ->
+                        s.firstOrNull() == "!re" && s.any { it.startsWith("=profile=") && it.removePrefix("=profile=").trim().equals(cleanProfile, ignoreCase = true) }
+                    }
+                } catch (_: Exception) {}
+
+                if (!profileAlreadyBound) {
+                    val profWords = listOf(
+                        "/user-manager/user-profile/add",
+                        "=user=$cardName",
+                        "=profile=$cleanProfile"
+                    )
+                    val profSentences = executeSentence(profWords)
+                    val profTrap = profSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                    if (profTrap != null) {
+                        val profMsg = profTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                            ?: "فشل ربط المستخدم بالباقة في يوزرمانجر"
+                        
+                        // Check if it failed because already bound
+                        if (!profMsg.contains("already", ignoreCase = true)) {
+                            // Recovery check: did the user-profile actually get added before timeout/trap?
+                            val recheck = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
+                            val verified = recheck.any { it.firstOrNull() == "!re" }
+                            if (!verified) {
+                                return Result.failure(Exception("تم إنشاء المستخدم $cardName ولكن تعذر ربط الباقة ($cleanProfile): $profMsg. يرجى إعادة محاولة تعيين الباقة."))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Stage 4: Ensure User is active & enabled
+            executeSentence(listOf("/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
+
+            // Stage 5: Final Verification in Router
+            val finalCheck = executeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
+            val isConfirmed = finalCheck.any { it.firstOrNull() == "!re" }
+            if (!isConfirmed) {
+                return Result.failure(Exception("لم يؤكد الراوتر حفظ الكرت $cardName في يوزرمانجر"))
+            }
+
             return Result.success(true)
         } catch (e: Exception) {
-            // Rollback on unexpected exception
+            val duration = System.currentTimeMillis() - startTime
+            val rawMsg = e.message ?: e.localizedMessage ?: "Timeout"
+            
+            // Intelligent Reconciliation after Timeout/Socket error:
+            // Check if the user was actually created on the router despite the read timeout!
             try {
-                writeSentence(listOf("/user-manager/user/remove", "=numbers=$cardName"))
-                readAllSentencesUntilDone()
+                if (ensureConnectedInternal()) {
+                    val checkUser = executeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
+                    if (checkUser.any { it.firstOrNull() == "!re" }) {
+                        // User exists! Now verify or repair profile binding
+                        if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
+                            val checkProf = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
+                            if (checkProf.none { it.firstOrNull() == "!re" }) {
+                                executeSentence(listOf("/user-manager/user-profile/add", "=user=$cardName", "=profile=$cleanProfile"))
+                            }
+                        }
+                        executeSentence(listOf("/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
+                        return Result.success(true)
+                    }
+                }
             } catch (_: Exception) {}
-            return Result.failure(e)
+
+            return Result.failure(Exception("استغرقت العملية ($duration ms) مع الراوتر: $rawMsg. تم فحص السيرفر لمنع تكرار الكرت."))
         }
     }
 
@@ -1239,50 +1399,60 @@ class RouterOsApiClient {
         val cardName = card.name.trim()
         val cleanProfile = card.profile.trim()
         val cust = if (customer.isBlank()) "admin" else customer
+        val startTime = System.currentTimeMillis()
+
         try {
-            // Phase 1: Add user in User Manager v6
-            val words = mutableListOf(
-                "/tool/user-manager/user/add",
-                "=username=$cardName",
-                "=customer=$cust",
-                "=disabled=no"
-            )
-            if (card.password.isNotBlank()) {
-                words.add("=password=${card.password.trim()}")
-            }
-            if (card.comment.isNotBlank()) words.add("=comment=${card.comment}")
-            writeSentence(words)
-            val sentences = readAllSentencesUntilDone()
-            val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
-            if (trap != null) {
-                val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إضافة كرت يوزرمانجر"
-                if (!msg.contains("already exists", ignoreCase = true)) {
-                    return Result.failure(Exception(msg))
+            // Stage 1: Pre-check if user already exists on UM v6
+            var userExists = false
+            try {
+                val checkV6 = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
+                userExists = checkV6.any { it.firstOrNull() == "!re" }
+            } catch (_: Exception) {}
+
+            // Stage 2: Add user in User Manager v6
+            if (!userExists) {
+                val words = mutableListOf(
+                    "/tool/user-manager/user/add",
+                    "=username=$cardName",
+                    "=customer=$cust",
+                    "=disabled=no"
+                )
+                if (card.password.isNotBlank()) {
+                    words.add("=password=${card.password.trim()}")
+                }
+                if (card.comment.isNotBlank()) {
+                    words.add("=comment=${card.comment}")
+                }
+                val addSentences = executeSentence(words)
+                val trap = addSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (trap != null) {
+                    val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إضافة كرت يوزرمانجر v6"
+                    if (!msg.contains("already exists", ignoreCase = true)) {
+                        return Result.failure(Exception("خطأ الراوتر في إنشاء المستخدم: $msg"))
+                    }
                 }
             }
 
-            // Phase 2: Assign & activate profile
-            if (cleanProfile.isNotBlank()) {
+            // Stage 3: Assign & activate profile in UM v6
+            if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
                 val actWords = listOf(
                     "/tool/user-manager/user/create-and-activate-profile",
                     "=numbers=$cardName",
                     "=profile=$cleanProfile",
                     "=customer=$cust"
                 )
-                writeSentence(actWords)
-                val actSentences = readAllSentencesUntilDone()
+                val actSentences = executeSentence(actWords)
                 val actTrap = actSentences.firstOrNull { it.firstOrNull() == "!trap" }
                 val actDone = actSentences.any { it.firstOrNull() == "!done" }
                 var profileAssigned = (actTrap == null && actDone)
 
                 if (!profileAssigned) {
-                    writeSentence(listOf(
+                    val setSentences = executeSentence(listOf(
                         "/tool/user-manager/user/set",
                         "=numbers=$cardName",
                         "=actual-profile=$cleanProfile",
                         "=disabled=no"
                     ))
-                    val setSentences = readAllSentencesUntilDone()
                     val setTrap = setSentences.firstOrNull { it.firstOrNull() == "!trap" }
                     val setDone = setSentences.any { it.firstOrNull() == "!done" }
                     profileAssigned = (setTrap == null && setDone)
@@ -1292,23 +1462,42 @@ class RouterOsApiClient {
                     val errMsg = actTrap?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                         ?: "فشل تعيين وتفعيل الباقة في User Manager v6"
                     
-                    // Transactional Rollback: Remove the user if profile assignment failed
-                    try {
-                        writeSentence(listOf("/tool/user-manager/user/remove", "=numbers=$cardName"))
-                        readAllSentencesUntilDone()
-                    } catch (_: Exception) {}
-
-                    return Result.failure(Exception("فشل تفعيل باقة User Manager v6 ($cleanProfile): $errMsg (تم التراجع عن إنشاء الكرت)"))
+                    // Recheck if profile is set despite the trap/warning
+                    val v6Check = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
+                    val hasProfile = v6Check.any { s -> s.firstOrNull() == "!re" && s.any { it.contains(cleanProfile, ignoreCase = true) } }
+                    if (!hasProfile) {
+                        return Result.failure(Exception("تم إنشاء المستخدم $cardName ولكن تعذر تفعيل باقة v6 ($cleanProfile): $errMsg"))
+                    }
                 }
             }
+
+            // Stage 4: Ensure active and enabled
+            executeSentence(listOf("/tool/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
             return Result.success(true)
         } catch (e: Exception) {
-            // Rollback on unexpected exception
+            val duration = System.currentTimeMillis() - startTime
+            val rawMsg = e.message ?: e.localizedMessage ?: "Timeout"
+
+            // Intelligent Reconciliation after Timeout/Socket error on v6
             try {
-                writeSentence(listOf("/tool/user-manager/user/remove", "=numbers=$cardName"))
-                readAllSentencesUntilDone()
+                if (ensureConnectedInternal()) {
+                    val checkV6 = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
+                    if (checkV6.any { it.firstOrNull() == "!re" }) {
+                        if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
+                            executeSentence(listOf(
+                                "/tool/user-manager/user/create-and-activate-profile",
+                                "=numbers=$cardName",
+                                "=profile=$cleanProfile",
+                                "=customer=$cust"
+                            ))
+                        }
+                        executeSentence(listOf("/tool/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
+                        return Result.success(true)
+                    }
+                }
             } catch (_: Exception) {}
-            return Result.failure(e)
+
+            return Result.failure(Exception("استغرقت العملية ($duration ms) مع راوتر v6: $rawMsg."))
         }
     }
 
@@ -1843,6 +2032,24 @@ class RouterOsApiClient {
         }
     }
 
+    suspend fun getVlanInterfaces(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/interface/vlan/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
     suspend fun getRouterBoardInfo(): Result<RouterBoardInfo> {
         return withContext(Dispatchers.IO) {
             try {
@@ -2041,6 +2248,52 @@ class RouterOsApiClient {
         }
     }
 
+    suspend fun getRouterAddresses(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/ip/address/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getRomonNeighbors(): Result<List<Map<String, String>>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                writeSentence(listOf("/tool/romon/neighbor/print"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<Map<String, String>>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        list.add(parseSentenceToMap(s))
+                    }
+                }
+                if (list.isEmpty()) {
+                    // Try alternative path for RouterOS v7 romon
+                    writeSentence(listOf("/romon/neighbor/print"))
+                    val altSentences = readAllSentencesUntilDone()
+                    for (s in altSentences) {
+                        if (s.firstOrNull() == "!re") {
+                            list.add(parseSentenceToMap(s))
+                        }
+                    }
+                }
+                Result.success(list)
+            } catch (_: Exception) {
+                Result.success(emptyList())
+            }
+        }
+    }
+
     private fun parseSentenceToMap(sentence: List<String>): Map<String, String> {
         val map = mutableMapOf<String, String>()
         for (word in sentence) {
@@ -2067,8 +2320,8 @@ class RouterOsApiClient {
             val sock = Socket()
             sock.tcpNoDelay = true
             sock.keepAlive = true
-            sock.connect(InetSocketAddress(cleanHost, lastPort), 5000)
-            sock.soTimeout = 12000
+            sock.connect(InetSocketAddress(cleanHost, lastPort), 8000)
+            sock.soTimeout = 25000
             socket = sock
             inStream = sock.getInputStream()
             outStream = sock.getOutputStream()

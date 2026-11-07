@@ -956,7 +956,7 @@ fun NetworkNodeItem(
                             }
                         }
 
-                        // IP and Parent Tower if applicable
+                        // IP and Parent Tower / Port if applicable
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -966,7 +966,22 @@ fun NetworkNodeItem(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            if (node.nodeType == NetworkNodeType.HOME_NODE && (!node.parentTowerName.isNullOrBlank() || !node.parentTowerId.isNullOrBlank())) {
+                            if (node.vlanId != null && node.vlanId > 0) {
+                                Text(
+                                    text = "• VLAN ${node.vlanId}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = RouterBlue,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            if (!node.parentInterface.isNullOrBlank()) {
+                                Text(
+                                    text = "• عبر: ${node.parentInterface}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF00897B),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            } else if (node.nodeType == NetworkNodeType.HOME_NODE && (!node.parentTowerName.isNullOrBlank() || !node.parentTowerId.isNullOrBlank())) {
                                 Text(
                                     text = "• تابعة لـ: ${node.parentTowerName ?: node.parentTowerId}",
                                     style = MaterialTheme.typography.labelSmall,
@@ -1544,12 +1559,31 @@ fun HierarchicalNetworkTreeView(
     // 1. Build the tree structure from the flat list
     val treeNodes = remember(nodes) {
         val nodeMap = nodes.associateBy { it.id }
-        // Roots are nodes with no parent OR parent not in the current list
-        val roots = nodes.filter { it.parentTowerId.isNullOrBlank() || !nodeMap.containsKey(it.parentTowerId) }
-        val childrenMap = nodes.filter { !it.parentTowerId.isNullOrBlank() && nodeMap.containsKey(it.parentTowerId) }
-            .groupBy { it.parentTowerId!! }
+        // Create secondary lookup by interfaceName for matching parentInterface
+        val ifaceToNodeMap = nodes.associateBy { it.interfaceName.lowercase() }
+
+        // Find children grouped by resolved parent node ID
+        val childrenMap = mutableMapOf<String, MutableList<NetworkNode>>()
+        val rootNodes = mutableListOf<NetworkNode>()
+
+        nodes.forEach { node ->
+            // Try resolving parent ID via parentTowerId, then via parentInterface
+            val directParentId = node.parentTowerId?.takeIf { nodeMap.containsKey(it) }
+            val interfaceParentId = if (directParentId == null && !node.parentInterface.isNullOrBlank()) {
+                val cleanParentIf = node.parentInterface!!.lowercase()
+                nodeMap["node_if_$cleanParentIf"]?.id ?: ifaceToNodeMap[cleanParentIf]?.id
+            } else null
+
+            val effectiveParentId = directParentId ?: interfaceParentId
+
+            if (effectiveParentId != null && effectiveParentId != node.id) {
+                childrenMap.getOrPut(effectiveParentId) { mutableListOf() }.add(node)
+            } else {
+                rootNodes.add(node)
+            }
+        }
         
-        roots.map { root -> buildTreeNode(root, childrenMap) }
+        rootNodes.map { root -> buildTreeNode(root, childrenMap) }
     }
 
     LazyColumn(
@@ -1699,9 +1733,24 @@ fun RecursiveNodeTreeItem(
                     if (isOffline) {
                         Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(Color.Red))
                     }
+                    if (node.vlanId != null && node.vlanId > 0) {
+                        Surface(
+                            color = RouterBlue.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "VLAN ${node.vlanId}",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = RouterBlue,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
                 }
+                val parentPortInfo = if (!node.parentInterface.isNullOrBlank()) " • عبر: ${node.parentInterface}" else ""
                 Text(
-                    text = "${node.ipAddress} • ${node.connectedUsers} مشترك",
+                    text = "${node.ipAddress} • ${node.connectedUsers} مشترك$parentPortInfo",
                     fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

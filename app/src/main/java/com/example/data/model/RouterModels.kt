@@ -339,7 +339,9 @@ data class NetworkNode(
     val frequency: String = "5 GHz (5200 MHz)",
     val channelWidth: String = "20/40/80 MHz",
     val ssid: String = "YemenNet_Tower_1",
-    val firmwareVersion: String = "RouterOS v7.14.3",
+    val firmwareVersion: String = "",
+    val vlanId: Int? = null,
+    val parentInterface: String? = null,
     val lastSeenTime: Long = System.currentTimeMillis(),
     val lastCheckTime: Long = System.currentTimeMillis(),
     val connectedClients: List<NodeConnectedClient> = emptyList()

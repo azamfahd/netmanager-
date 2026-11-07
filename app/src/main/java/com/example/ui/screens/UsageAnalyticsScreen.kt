@@ -40,14 +40,14 @@ fun UsageAnalyticsScreen(
     viewModel: MainViewModel,
     onBackClick: () -> Unit
 ) {
-    val appUsageItems by viewModel.getSmartAppUsage(username, type).collectAsStateWithLifecycle(emptyList())
+    val appUsageItems by viewModel.getUsageBreakdown(username, type).collectAsStateWithLifecycle(emptyList())
     val subscriberProfile by viewModel.getSubscriberProfileFlow(username).collectAsStateWithLifecycle(null)
 
     val title = when (type.lowercase()) {
-        "download" -> "تحليل حجم التحميل"
-        "upload" -> "تحليل حجم الرفع"
-        "time" -> "تحليل وقت التشغيل"
-        else -> "تحليل الاستهلاك الكلي"
+        "download" -> "تحليل حجم التحميل للجلسات"
+        "upload" -> "تحليل حجم الرفع للجلسات"
+        "time" -> "تحليل زمن التشغيل للجلسات"
+        else -> "تحليل الاستهلاك التراكمي"
     }
 
     val themeColor = when (type.lowercase()) {
@@ -105,7 +105,7 @@ fun UsageAnalyticsScreen(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "القيمة المسجلة حالياً",
+                            text = "إجمالي الاستهلاك المسجل",
                             style = MaterialTheme.typography.labelMedium,
                             color = themeColor
                         )
@@ -123,7 +123,7 @@ fun UsageAnalyticsScreen(
                             color = themeColor.copy(alpha = 0.15f)
                         ) {
                             Text(
-                                text = "بناءً على تحليل ذكي للجلسات",
+                                text = "مبني على سجل الجلسات الفعلي من الراوتر",
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = themeColor,
@@ -134,10 +134,10 @@ fun UsageAnalyticsScreen(
                 }
             }
 
-            // 2. Smart Visual Chart (Custom Doughnut)
+            // 2. Visual Chart (Doughnut)
             item {
                 Text(
-                    text = "توزيع التطبيقات والفئات",
+                    text = "توزيع الاستهلاك حسب الجلسات والأجهزة",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 4.dp)
@@ -163,21 +163,25 @@ fun UsageAnalyticsScreen(
                         ) {
                             Canvas(modifier = Modifier.size(120.dp)) {
                                 var startAngle = -90f
-                                appUsageItems.forEach { item ->
-                                    val sweepAngle = (item.percentage / 100f) * 360f
-                                    drawArc(
-                                        color = Color(item.color),
-                                        startAngle = startAngle,
-                                        sweepAngle = sweepAngle,
-                                        useCenter = false,
-                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 25f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                                    )
-                                    startAngle += sweepAngle
+                                if (appUsageItems.isEmpty()) {
+                                    drawCircle(color = Color.LightGray.copy(alpha = 0.3f), style = androidx.compose.ui.graphics.drawscope.Stroke(width = 25f))
+                                } else {
+                                    appUsageItems.forEach { item ->
+                                        val sweepAngle = (item.percentage / 100f) * 360f
+                                        drawArc(
+                                            color = Color(item.color),
+                                            startAngle = startAngle,
+                                            sweepAngle = sweepAngle,
+                                            useCenter = false,
+                                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 25f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                                        )
+                                        startAngle += sweepAngle
+                                    }
                                 }
                             }
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("التحليل", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("الذكي", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                Text("توزيع", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("الجلسات", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                             }
                         }
 
@@ -198,6 +202,9 @@ fun UsageAnalyticsScreen(
                                     Text(text = "${item.percentage.toInt()}%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                                 }
                             }
+                            if (appUsageItems.size > 4) {
+                                Text(text = "+ ${appUsageItems.size - 4} أخرى", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                     }
                 }
@@ -206,7 +213,7 @@ fun UsageAnalyticsScreen(
             // 3. Detailed Usage List
             item {
                 Text(
-                    text = "تفاصيل الحركات الفردية",
+                    text = "سجل الجلسات التفصيلي للاستهلاك",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 4.dp)
@@ -214,7 +221,7 @@ fun UsageAnalyticsScreen(
             }
 
             items(appUsageItems) { item ->
-                AppUsageListItem(item = item)
+                AppUsageListItem(item = item, type = type)
             }
             
             item {
@@ -225,7 +232,7 @@ fun UsageAnalyticsScreen(
 }
 
 @Composable
-fun AppUsageListItem(item: AppUsageItem) {
+fun AppUsageListItem(item: AppUsageItem, type: String) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -244,25 +251,29 @@ fun AppUsageListItem(item: AppUsageItem) {
                     .background(Color(item.color).copy(alpha = 0.12f)),
                 contentAlignment = Alignment.Center
             ) {
-                val icon = when(item.category) {
-                    "فيديو" -> Icons.Default.PlayCircle
-                    "وسائط" -> Icons.Default.SmartDisplay
-                    "تواصل" -> Icons.Default.Public
-                    "مراسلة" -> Icons.Default.Chat
-                    "ترفيه" -> Icons.Default.SportsEsports
-                    else -> Icons.Default.Layers
+                val icon = when {
+                    item.appName == "الجلسة الحالية" -> Icons.Default.SignalCellularAlt
+                    item.category.contains("iPhone", ignoreCase = true) -> Icons.Default.PhoneIphone
+                    item.category.contains("Android", ignoreCase = true) -> Icons.Default.PhoneAndroid
+                    item.category.contains("PC", ignoreCase = true) || item.category.contains("Laptop", ignoreCase = true) -> Icons.Default.Laptop
+                    item.appName == "جلسات أخرى" -> Icons.Default.History
+                    else -> Icons.Default.Devices
                 }
                 Icon(imageVector = icon, contentDescription = null, tint = Color(item.color), modifier = Modifier.size(20.dp))
             }
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = item.appName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                Text(text = "التصنيف: ${item.category}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(text = "الجهاز: ${item.category}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    text = if (item.bytesUsed > 0) NetworkUtils.formatBytes(item.bytesUsed) else "تحليل دقيق",
+                    text = if (type.lowercase() == "time") {
+                        NetworkUtils.formatSecondsToHumanReadable(item.bytesUsed)
+                    } else {
+                        NetworkUtils.formatBytes(item.bytesUsed)
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.ExtraBold,
                     fontFamily = FontFamily.Monospace,
@@ -270,7 +281,7 @@ fun AppUsageListItem(item: AppUsageItem) {
                 )
                 
                 LinearProgressIndicator(
-                    progress = item.percentage / 100f,
+                    progress = { item.percentage / 100f },
                     modifier = Modifier
                         .width(60.dp)
                         .height(4.dp)

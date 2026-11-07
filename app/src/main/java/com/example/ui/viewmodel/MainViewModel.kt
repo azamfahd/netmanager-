@@ -369,7 +369,7 @@ class MainViewModel(
         }
     }
 
-    fun getSmartAppUsage(username: String, type: String): kotlinx.coroutines.flow.Flow<List<com.example.data.model.AppUsageItem>> {
+    fun getUsageBreakdown(username: String, type: String): kotlinx.coroutines.flow.Flow<List<com.example.data.model.AppUsageItem>> {
         return getSubscriberProfileFlow(username).map { profile ->
             val total = when(type.lowercase()) {
                 "download" -> profile.lifetimeBytesOut
@@ -378,21 +378,71 @@ class MainViewModel(
                 else -> profile.lifetimeTotalBytes
             }
             
-            if (total <= 0L) {
+            if (total <= 0L || profile.sessionHistory.isEmpty()) {
                 return@map listOf(
-                    com.example.data.model.AppUsageItem("لا توجد بيانات", "نظام", 0L, 0f, 0xFF9E9E9E)
+                    com.example.data.model.AppUsageItem("لا توجد بيانات جلسات", "نظام", 0L, 0f, 0xFF9E9E9E)
                 )
             }
 
-            // Heuristic categorization based on typical MikroTik user behavior
-            listOf(
-                com.example.data.model.AppUsageItem("يوتيوب وسناب", "فيديو", (total * 0.42).toLong(), 42f, 0xFFFF0000),
-                com.example.data.model.AppUsageItem("تيك توك", "وسائط", (total * 0.18).toLong(), 18f, 0xFF252525),
-                com.example.data.model.AppUsageItem("فيسبوك وماسنجر", "تواصل", (total * 0.15).toLong(), 15f, 0xFF1877F2),
-                com.example.data.model.AppUsageItem("واتساب وتليجرام", "مراسلة", (total * 0.12).toLong(), 12f, 0xFF25D366),
-                com.example.data.model.AppUsageItem("ألعاب أونلاين", "ترفيه", (total * 0.08).toLong(), 8f, 0xFF673AB7),
-                com.example.data.model.AppUsageItem("تصفح وخدمات", "أخرى", (total * 0.05).toLong(), 5f, 0xFF607D8B)
-            )
+            // Real Session-based breakdown
+            val sessions = profile.sessionHistory.sortedByDescending { 
+                when(type.lowercase()) {
+                    "download" -> it.bytesOut
+                    "upload" -> it.bytesIn
+                    "time" -> NetworkUtils.parseUptimeToSeconds(it.duration)
+                    else -> it.totalBytes
+                }
+            }.take(10) // Show top 10 sessions
+
+            val sessionItems = sessions.map { session ->
+                val sessionVal = when(type.lowercase()) {
+                    "download" -> session.bytesOut
+                    "upload" -> session.bytesIn
+                    "time" -> NetworkUtils.parseUptimeToSeconds(session.duration) * 1024 * 1024L
+                    else -> session.totalBytes
+                }
+                
+                val pct = if (total > 0) (sessionVal.toFloat() / total.toFloat() * 100f).coerceIn(0f, 100f) else 0f
+                val color = when {
+                    session.isOnline -> 0xFF4CAF50 // Green for current session
+                    else -> 0xFF2196F3 // Blue for past sessions
+                }
+
+                val label = if (session.isOnline) "الجلسة الحالية" else "جلسة ${session.loginTime}"
+                val category = "${session.deviceInfo.brand} ${session.deviceInfo.modelName}"
+
+                com.example.data.model.AppUsageItem(
+                    appName = label,
+                    category = category,
+                    bytesUsed = if (type.lowercase() == "time") NetworkUtils.parseUptimeToSeconds(session.duration) else sessionVal,
+                    percentage = pct,
+                    color = color
+                )
+            }
+
+            // Add "Other sessions" if there are more
+            val displayedTotal = sessionItems.sumOf { 
+                if (type.lowercase() == "time") {
+                    val session = sessions.find { s -> "جلسة ${s.loginTime}" == it.appName || (it.appName == "الجلسة الحالية" && s.isOnline) }
+                    NetworkUtils.parseUptimeToSeconds(session?.duration ?: "0s") * 1024 * 1024L
+                } else {
+                    it.bytesUsed 
+                }
+            }
+            
+            if (displayedTotal < total && profile.sessionHistory.size > 10) {
+                val otherVal = total - displayedTotal
+                val otherPct = (otherVal.toFloat() / total.toFloat() * 100f).coerceIn(0f, 100f)
+                sessionItems + com.example.data.model.AppUsageItem(
+                    appName = "جلسات أخرى",
+                    category = "سجل تراكمي",
+                    bytesUsed = if (type.lowercase() == "time") otherVal / (1024 * 1024) else otherVal,
+                    percentage = otherPct,
+                    color = 0xFF9E9E9E
+                )
+            } else {
+                sessionItems
+            }
         }
     }
 
@@ -2102,9 +2152,17 @@ class MainViewModel(
 
     fun addSingleCard(card: HotspotCard, posAgentId: Long = 0L, posAgentName: String = "", discountPercent: Double = 0.0) {
         viewModelScope.launch {
+            _toastEvent.emit("جاري الاتصال بالراوتر والتحقق من باقة User Manager...")
             val result = repository.addSingleCard(card)
             if (result.isSuccess) {
-                recordSystemEvent("إضافة", "كرت", card.name, "تمت إضافة الكرت (${card.name}) للباقة (${card.profile}) في الراوتر بنجاح", "SUCCESS", "الباقة: ${card.profile}, كلمة المرور: ${card.password}, السعر: ${card.price}")
+                recordSystemEvent(
+                    "إضافة وتفعيل",
+                    "كرت",
+                    card.name,
+                    "تم إنشاء المستخدم وربط الباقة (${card.profile}) وتفعيل الكرت بنجاح في راوتر ميكروتك",
+                    "SUCCESS",
+                    "الباقة: ${card.profile}, كلمة المرور: ${card.password}, النظام: ${card.systemLabelAr}"
+                )
                 if (posAgentId > 0L && posAgentName.isNotBlank()) {
                     val priceNum = card.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
                     val assignment = PosCardAssignmentEntity(
@@ -2119,13 +2177,29 @@ class MainViewModel(
                         isSold = false
                     )
                     database.appDao().insertCardAssignments(listOf(assignment))
-                    _toastEvent.emit("تمت إضافة الكرت (${card.name}) وتخصيصه لنقطة ($posAgentName) في الراوتر وقاعدة البيانات!")
+                    _toastEvent.emit("✅ تم إنشاء وتفعيل الكرت (${card.name}) وتخصيصه لنقطة ($posAgentName) بنجاح!")
                 } else {
-                    _toastEvent.emit("تمت إضافة وتفعيل الكرت (${card.name}) في الراوتر بنجاح!")
+                    _toastEvent.emit("✅ تم إنشاء الكرت (${card.name}) وربط باقة (${card.profile}) وتفعيله بنجاح!")
                 }
             } else {
-                recordSystemEvent("إضافة", "كرت", card.name, "فشل إضافة الكرت (${card.name}) إلى الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
-                _toastEvent.emit("فشل إضافة الكرت: ${result.exceptionOrNull()?.message}")
+                val err = result.exceptionOrNull()?.message.orEmpty()
+                val friendlyMessage = when {
+                    err.contains("Read timed out", ignoreCase = true) || err.contains("Timeout", ignoreCase = true) -> {
+                        "⚠️ تأخر رد الراوتر أثناء تفعيل الباقة. قام النظام بالتحقق التلقائي لمنع التكرار، يرجى تحديث قائمة الكروت للتحقق."
+                    }
+                    err.contains("already exists", ignoreCase = true) -> {
+                        "⚠️ الكرت (${card.name}) موجود مسبقاً في السيرفر. تم تحديث حالته."
+                    }
+                    err.contains("الباقة المحددة", ignoreCase = true) -> {
+                        "❌ فشل العملية: $err"
+                    }
+                    err.contains("الاتصال", ignoreCase = true) -> {
+                        "❌ تعذر الوصول للراوتر: يرجى فحص الاتصال بالشبكة وإعدادات المنفذ."
+                    }
+                    else -> "❌ فشل إضافة الكرت: $err"
+                }
+                recordSystemEvent("إضافة", "كرت", card.name, friendlyMessage, "FAILED", err)
+                _toastEvent.emit(friendlyMessage)
             }
         }
     }
