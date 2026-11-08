@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CellTower
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Home
@@ -126,6 +128,7 @@ fun NetworkNodesScreen(
     var showFullScreenTopology by remember { mutableStateOf(false) }
     var selectedNodeForDetail by remember { mutableStateOf<NetworkNode?>(null) }
     var nodeToDelete by remember { mutableStateOf<NetworkNode?>(null) }
+    var nodeToEdit by remember { mutableStateOf<NetworkNode?>(null) }
     var selectedDisplayTab by remember { mutableStateOf(0) }
 
     val activeCount = allNodes.count { it.effectiveStatus == NodeStatus.ACTIVE }
@@ -655,6 +658,7 @@ fun NetworkNodesScreen(
                                     node = node,
                                     onDetailClick = { selectedNodeForDetail = node },
                                     onPing = { viewModel.pingNetworkNode(node.id) },
+                                    onEdit = { nodeToEdit = node },
                                     onDelete = { nodeToDelete = node }
                                 )
                             }
@@ -829,6 +833,18 @@ fun NetworkNodesScreen(
         )
     }
 
+    // Edit Node Dialog
+    nodeToEdit?.let { targetNode ->
+        EditNodeDialog(
+            node = targetNode,
+            onDismiss = { nodeToEdit = null },
+            onConfirm = { updatedNode ->
+                viewModel.updateNetworkNode(updatedNode)
+                nodeToEdit = null
+            }
+        )
+    }
+
     // Node Detail & Connected Devices Dialog
     selectedNodeForDetail?.let { targetNode ->
         NodeDetailDialog(
@@ -859,6 +875,7 @@ fun NetworkNodeItem(
     node: NetworkNode,
     onDetailClick: () -> Unit,
     onPing: () -> Unit,
+    onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
     val semanticIcon = when (node.nodeType) {
@@ -1031,6 +1048,18 @@ fun NetworkNodeItem(
                                 fontWeight = FontWeight.Bold
                             )
                         }
+                    }
+
+                    IconButton(
+                        onClick = onEdit,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "تعديل بيانات النقطة",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
 
                     IconButton(
@@ -1534,6 +1563,172 @@ fun AddNodeDialog(
                 shape = RoundedCornerShape(10.dp)
             ) {
                 Text("إضافة النقطة وتفعيل المراقبة")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("إلغاء")
+            }
+        }
+    )
+}
+
+@Composable
+fun EditNodeDialog(
+    node: NetworkNode,
+    onDismiss: () -> Unit,
+    onConfirm: (NetworkNode) -> Unit
+) {
+    var name by remember { mutableStateOf(node.name) }
+    var ipAddress by remember { mutableStateOf(node.ipAddress) }
+    var model by remember { mutableStateOf(node.model) }
+    var role by remember { mutableStateOf(node.role) }
+    var location by remember { mutableStateOf(node.location) }
+    var interfaceName by remember { mutableStateOf(node.interfaceName) }
+    var selectedNodeType by remember { mutableStateOf(node.nodeType) }
+    var parentTowerName by remember { mutableStateOf(node.parentTowerName ?: "") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(18.dp),
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Default.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Text("تعديل بيانات نقطة الشبكة", fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Node Type Selection
+                Text("نوع النقطة الدلالي:", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    NetworkNodeType.entries.forEach { type ->
+                        val isSelected = selectedNodeType == type
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { selectedNodeType = type },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                            border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                        ) {
+                            Text(
+                                text = type.titleAr,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(vertical = 6.dp, horizontal = 2.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("اسم النقطة / البرج") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                OutlinedTextField(
+                    value = ipAddress,
+                    onValueChange = { ipAddress = it },
+                    label = { Text("عنوان IP النقطة") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                OutlinedTextField(
+                    value = parentTowerName,
+                    onValueChange = { parentTowerName = it },
+                    label = { Text("اسم البرج التابعة له") },
+                    placeholder = { Text("البرج الرئيسي") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = model,
+                        onValueChange = { model = it },
+                        label = { Text("نوع الجهاز") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    OutlinedTextField(
+                        value = interfaceName,
+                        onValueChange = { interfaceName = it },
+                        label = { Text("المنفذ") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                }
+
+                OutlinedTextField(
+                    value = role,
+                    onValueChange = { role = it },
+                    label = { Text("الدور / الوظيفة") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                OutlinedTextField(
+                    value = location,
+                    onValueChange = { location = it },
+                    label = { Text("الموقع الجغرافي / المربع") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (name.isNotBlank() && ipAddress.isNotBlank()) {
+                        val updated = node.copy(
+                            name = name.trim(),
+                            ipAddress = ipAddress.trim(),
+                            model = model.trim(),
+                            role = role.trim(),
+                            location = location.trim(),
+                            interfaceName = interfaceName.trim().ifBlank { node.interfaceName },
+                            nodeType = selectedNodeType,
+                            parentTowerName = parentTowerName.trim().ifBlank { null }
+                        )
+                        onConfirm(updated)
+                    }
+                },
+                enabled = name.isNotBlank() && ipAddress.isNotBlank(),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("حفظ التعديلات")
             }
         },
         dismissButton = {

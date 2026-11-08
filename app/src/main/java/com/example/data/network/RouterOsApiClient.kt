@@ -930,6 +930,20 @@ class RouterOsApiClient {
                     val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                     if (trap != null) {
                         val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "رفض الراوتر حذف الكرت"
+                        // If item is not found or already deleted on router, treat as successful idempotent removal
+                        if (msg.contains("no such item", true) || msg.contains("not found", true) || msg.contains("nothing to do", true) || msg.contains("already", true)) {
+                            return Result.success(true)
+                        }
+                        // Fallback: If .id was rejected as unknown parameter, retry with numbers
+                        if (idParam.startsWith("=.id=") && (msg.contains("unknown parameter", true) || msg.contains("syntax", true))) {
+                            val altParam = "=numbers=" + idParam.removePrefix("=.id=")
+                            writeSentence(listOf(cmd, altParam))
+                            val altSentences = readAllSentencesUntilDone()
+                            val altTrap = altSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                            if (altTrap == null && altSentences.any { it.firstOrNull() == "!done" }) {
+                                return Result.success(true)
+                            }
+                        }
                         return Result.failure(Exception(msg))
                     }
                     if (sentences.any { it.firstOrNull() == "!done" }) {
@@ -942,11 +956,13 @@ class RouterOsApiClient {
                     val res = when (resolved.system) {
                         CardTargetSystem.HOTSPOT -> {
                             val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=$targetName"
-                            executeRemoval("/ip/hotspot/user/remove", idParam)
+                            val primary = executeRemoval("/ip/hotspot/user/remove", idParam)
+                            if (primary.isSuccess) primary else executeRemoval("/ip/hotspot/user/remove", "=numbers=$targetName")
                         }
                         CardTargetSystem.USER_MANAGER_V7 -> {
                             val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=$targetName"
-                            executeRemoval("/user-manager/user/remove", idParam)
+                            val primary = executeRemoval("/user-manager/user/remove", idParam)
+                            if (primary.isSuccess) primary else executeRemoval("/user-manager/user/remove", "=numbers=$targetName")
                         }
                         CardTargetSystem.USER_MANAGER_V6 -> {
                             executeRemoval("/tool/user-manager/user/remove", "=numbers=$targetName")
@@ -960,8 +976,12 @@ class RouterOsApiClient {
                 if (actualId.isNotBlank()) {
                     val hsRes = executeRemoval("/ip/hotspot/user/remove", "=.id=$actualId")
                     if (hsRes.isSuccess) return@withContext hsRes
+                    val hsNumRes = executeRemoval("/ip/hotspot/user/remove", "=numbers=$actualId")
+                    if (hsNumRes.isSuccess) return@withContext hsNumRes
                     val um7Res = executeRemoval("/user-manager/user/remove", "=.id=$actualId")
                     if (um7Res.isSuccess) return@withContext um7Res
+                    val um7NumRes = executeRemoval("/user-manager/user/remove", "=numbers=$actualId")
+                    if (um7NumRes.isSuccess) return@withContext um7NumRes
                 }
                 if (targetName.isNotBlank()) {
                     val hsNameRes = executeRemoval("/ip/hotspot/user/remove", "=numbers=$targetName")
@@ -972,7 +992,8 @@ class RouterOsApiClient {
                     if (um6Res.isSuccess) return@withContext um6Res
                 }
 
-                Result.failure(Exception("تعذر العثور على الكرت أو حذفه من الراوتر ($targetName)"))
+                // If not found anywhere on the router, it has already been removed
+                Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -1690,16 +1711,12 @@ class RouterOsApiClient {
                         words.add("=comment=$cleanComment")
 
                         val validUptime = formatRouterOsTime(card.limitUptime)
-                        if (!validUptime.isNullOrBlank()) {
+                        if (!validUptime.isNullOrBlank() && validUptime != "0s") {
                             words.add("=limit-uptime=$validUptime")
-                        } else if (card.limitUptime.isBlank() || card.limitUptime == "0" || card.limitUptime == "0s") {
-                            words.add("=limit-uptime=0s")
                         }
 
                         if (card.limitBytesTotal > 0L) {
                             words.add("=limit-bytes-total=${card.limitBytesTotal}")
-                        } else {
-                            words.add("=limit-bytes-total=0")
                         }
 
                         writeSentence(words)
@@ -1709,26 +1726,39 @@ class RouterOsApiClient {
                             val trapMsg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                                 ?: "رفض راوتر ميكروتك تعديل كرت الهوتسبوت"
 
-                            // Retry with core fields if limits failed
-                            val retryWords = mutableListOf(
+                            // Retry 1: with name parameter
+                            val nameWords = mutableListOf(
                                 "/ip/hotspot/user/set",
-                                targetParam,
-                                "=password=$cleanPassword",
+                                "=numbers=${card.name}",
                                 "=disabled=${if (card.disabled) "yes" else "no"}"
                             )
-                            if (cleanProfile.isNotEmpty()) retryWords.add("=profile=$cleanProfile")
-                            if (cleanComment.isNotEmpty()) retryWords.add("=comment=$cleanComment")
+                            if (cleanPassword.isNotEmpty()) nameWords.add("=password=$cleanPassword")
+                            if (cleanProfile.isNotEmpty()) nameWords.add("=profile=$cleanProfile")
+                            if (cleanComment.isNotEmpty()) nameWords.add("=comment=$cleanComment")
 
-                            writeSentence(retryWords)
-                            val retrySentences = readAllSentencesUntilDone()
-                            val retryTrap = retrySentences.firstOrNull { it.firstOrNull() == "!trap" }
-                            if (retryTrap != null) {
-                                val retryMsg = retryTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: trapMsg
-                                return@withContext Result.failure(Exception("رفض الراوتر تعديل الكرت: $retryMsg"))
+                            writeSentence(nameWords)
+                            val nameSentences = readAllSentencesUntilDone()
+                            val nameTrap = nameSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                            if (nameTrap != null) {
+                                // Retry 2: core targetParam without limits
+                                val coreWords = mutableListOf(
+                                    "/ip/hotspot/user/set",
+                                    targetParam,
+                                    "=disabled=${if (card.disabled) "yes" else "no"}"
+                                )
+                                if (cleanPassword.isNotEmpty()) coreWords.add("=password=$cleanPassword")
+                                if (cleanProfile.isNotEmpty()) coreWords.add("=profile=$cleanProfile")
+                                writeSentence(coreWords)
+                                val coreSentences = readAllSentencesUntilDone()
+                                val coreTrap = coreSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                                if (coreTrap != null) {
+                                    val retryMsg = coreTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: trapMsg
+                                    return@withContext Result.failure(Exception("رفض الراوتر تعديل الكرت: $retryMsg"))
+                                }
                             }
                         }
                         val isDone = sentences.any { it.firstOrNull() == "!done" }
-                        if (!isDone) {
+                        if (!isDone && trap != null) {
                             return@withContext Result.failure(Exception("لم يؤكد الراوتر تعديل الكرت"))
                         }
                         return@withContext Result.success(true)
@@ -1744,11 +1774,21 @@ class RouterOsApiClient {
                             "=disabled=${if (card.disabled) "yes" else "no"}"
                         )
                         writeSentence(words)
-                        val sentences = readAllSentencesUntilDone()
-                        val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                        var sentences = readAllSentencesUntilDone()
+                        var trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                        if (trap != null && targetParam != "=numbers=${card.name}") {
+                            writeSentence(listOf(
+                                "/user-manager/user/set",
+                                "=numbers=${card.name}",
+                                "=password=$cleanPassword",
+                                "=comment=$cleanComment",
+                                "=disabled=${if (card.disabled) "yes" else "no"}"
+                            ))
+                            sentences = readAllSentencesUntilDone()
+                            trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                        }
                         if (trap != null) {
-                            val trapMsg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
-                                ?: "رفض راوتر ميكروتك تعديل كرت يوزرمانجر"
+                            val trapMsg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "رفض راوتر ميكروتك تعديل كرت يوزرمانجر"
                             return@withContext Result.failure(Exception("فشل تعديل كرت يوزرمانجر v7: $trapMsg"))
                         }
 

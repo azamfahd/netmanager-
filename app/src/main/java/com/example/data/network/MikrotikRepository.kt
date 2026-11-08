@@ -172,6 +172,8 @@ class MikrotikRepository(
 
     private var activeConfig: RouterConnectionConfig? = null
     private val customAddedNodes = mutableListOf<com.example.data.model.NetworkNode>()
+    private val deletedNodeIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val deletedNodeKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     var onDataRefreshedListener: ((com.example.data.local.RouterSnapshot) -> Unit)? = null
 
@@ -242,6 +244,14 @@ class MikrotikRepository(
     fun updateLocalCard(updatedCard: HotspotCard) {
         _cards.value = _cards.value.map {
             if (it.id == updatedCard.id || it.name == updatedCard.name) updatedCard else it
+        }
+    }
+
+    fun deleteLocalCard(cardId: String, cardName: String = "") {
+        val targetName = cardName.trim().ifBlank { _cards.value.find { it.id == cardId }?.name.orEmpty() }
+        _cards.value = _cards.value.filter { it.id != cardId && (targetName.isBlank() || it.name != targetName) }
+        if (targetName.isNotBlank()) {
+            cardTimestampCache.remove(targetName)
         }
     }
 
@@ -1999,7 +2009,16 @@ class MikrotikRepository(
         val candidateSubNodes = mutableListOf<com.example.data.model.NetworkNode>()
         val handledNeighborKeys = mutableSetOf<String>()
 
-        // 3. Process ALL Interfaces from _interfaceStats (Contains all 65+ items: VLANs, Bridges, Ethers, Wireless)
+        fun isNodeBlacklisted(id: String, ip: String, ifName: String, mac: String, vlanId: Int?): Boolean {
+            if (deletedNodeIds.contains(id)) return true
+            if (ip.isNotBlank() && deletedNodeKeys.contains(ip)) return true
+            if (ifName.isNotBlank() && deletedNodeKeys.contains(ifName)) return true
+            if (mac.isNotBlank() && (deletedNodeKeys.contains(mac.uppercase()) || deletedNodeKeys.contains(mac))) return true
+            if (vlanId != null && deletedNodeKeys.contains("vlan_$vlanId")) return true
+            return false
+        }
+
+        // 3. Process ALL Interfaces from _interfaceStats
         val allRouterInterfaces = _interfaceStats.value
         
         // Find default bridge for VLANs (like 'LAN' or 'VLAN' from the user's WebFig)
@@ -2019,36 +2038,39 @@ class MikrotikRepository(
             val isWireless = ifType == "wlan" || ifType == "wifi" || ifName.startsWith("wlan", true)
 
             if (isVlan) {
-                // Extract VLAN ID
                 val vlanObj = vlans.firstOrNull { it["name"].equals(ifName, true) }
                 val vlanId = vlanObj?.get("vlan-id")?.toIntOrNull()
                     ?: Regex("""(?:ESLAN_NET_|VLAN_|VLAN|NET|V)?_?0*(\d+)""", RegexOption.IGNORE_CASE).find(ifName)?.groupValues?.get(1)?.toIntOrNull()
 
                 val parentIf = vlanObj?.get("interface")?.takeIf { it.isNotBlank() } ?: defaultBridgeName
 
-                // Determine IP address for this VLAN
                 val assignedIp = interfaceIpMap[ifName]
                     ?: if (vlanId != null && vlanId > 0) "172.16.1.$vlanId"
                     else "$subnetPrefix.254"
+
+                if (isNodeBlacklisted("node_vlan_$ifName", assignedIp, ifName, iface.macAddress, vlanId)) {
+                    return@forEach
+                }
 
                 // Check if a neighbor in /ip/neighbor matches this VLAN interface
                 val matchedNeighbor = neighbors.firstOrNull { n ->
                     val nIf = n["interface"] ?: ""
                     val nAddr = n["address"] ?: ""
                     val nId = n["identity"] ?: ""
+                    val nMac = n["mac-address"] ?: ""
 
-                    // Direct interface name match
                     nIf.equals(ifName, true) ||
-                    // Direct IP match
                     (nAddr.isNotBlank() && nAddr == assignedIp) ||
-                    // VLAN ID match in identity or IP (e.g. Identity "29" or IP "172.16.1.29" matches VLAN ID 29)
                     (vlanId != null && (nId == "$vlanId" || nId.contains("($vlanId)", true) || nId.contains("(${vlanId.toString().padStart(2, '0')})", true) || nAddr.endsWith(".$vlanId")))
                 }
 
                 if (matchedNeighbor != null) {
                     val nMac = matchedNeighbor["mac-address"] ?: ""
                     val nAddr = matchedNeighbor["address"] ?: ""
-                    handledNeighborKeys.add(nMac.ifBlank { nAddr })
+                    if (nMac.isNotBlank()) handledNeighborKeys.add(nMac.uppercase())
+                    if (nAddr.isNotBlank()) handledNeighborKeys.add(nAddr)
+                    val nId = matchedNeighbor["identity"] ?: ""
+                    if (nId.isNotBlank()) handledNeighborKeys.add(nId)
 
                     val nIdentity = matchedNeighbor["identity"] ?: matchedNeighbor["board"] ?: "نقطة $vlanId"
                     val nPlatform = matchedNeighbor["platform"] ?: matchedNeighbor["board"] ?: "MikroTik AP"
@@ -2083,8 +2105,6 @@ class MikrotikRepository(
                         )
                     )
                 } else {
-                    // VLAN point without an MNDP neighbor (e.g. Ubiquiti AP, offline antenna, or no MNDP)
-                    // MUST STILL BE DISPLAYED!
                     val effectiveStatus = when {
                         isDisabled -> com.example.data.model.NodeStatus.DISABLED
                         isRunning -> com.example.data.model.NodeStatus.ACTIVE
@@ -2120,95 +2140,210 @@ class MikrotikRepository(
                         )
                     )
                 }
-            } else if (isBridge || isEther) {
-                // Main Bridge or Physical Port
+            } else if (isBridge) {
                 val assignedIp = interfaceIpMap[ifName] ?: routerIpBase
-                val roleName = if (isBridge) "جسر التوزيع الرئيسي (Bridge)" else "منفذ فيزيائي رئيسي"
-                val displayName = "منفذ $ifName (${ifType.uppercase()})"
-
-                candidateSubNodes.add(
-                    com.example.data.model.NetworkNode(
-                        id = "node_if_$ifName",
-                        name = displayName,
-                        ipAddress = assignedIp,
-                        macAddress = iface.macAddress,
-                        interfaceName = ifName,
-                        model = if (isBridge) "Bridge Switch" else "Physical Port",
-                        role = roleName,
-                        isOnline = isRunning && !isDisabled,
-                        status = if (isDisabled) com.example.data.model.NodeStatus.DISABLED else if (isRunning) com.example.data.model.NodeStatus.ACTIVE else com.example.data.model.NodeStatus.OFFLINE,
-                        nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
-                        parentTowerId = "node_main_router",
-                        rxSpeedKbps = iface.rxSpeedKbps,
-                        txSpeedKbps = iface.txSpeedKbps,
-                        totalBytesConsumed = iface.rxBytes + iface.txBytes
+                if (!isNodeBlacklisted("node_if_$ifName", assignedIp, ifName, iface.macAddress, null)) {
+                    candidateSubNodes.add(
+                        com.example.data.model.NetworkNode(
+                            id = "node_if_$ifName",
+                            name = "جسر التوزيع الرئيسي ($ifName)",
+                            ipAddress = assignedIp,
+                            macAddress = iface.macAddress,
+                            interfaceName = ifName,
+                            model = "Bridge Switch",
+                            role = "جسر التوزيع الرئيسي (Bridge)",
+                            isOnline = isRunning && !isDisabled,
+                            status = if (isDisabled) com.example.data.model.NodeStatus.DISABLED else if (isRunning) com.example.data.model.NodeStatus.ACTIVE else com.example.data.model.NodeStatus.OFFLINE,
+                            nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
+                            parentTowerId = "node_main_router",
+                            rxSpeedKbps = iface.rxSpeedKbps,
+                            txSpeedKbps = iface.txSpeedKbps,
+                            totalBytesConsumed = iface.rxBytes + iface.txBytes
+                        )
                     )
-                )
+                }
+            } else if (isEther) {
+                // Physical port: do NOT create duplicate node if neighbor AP is connected, or if port is empty/slave
+                val hasNeighborOnPort = neighbors.any { (it["interface"] ?: "").equals(ifName, true) }
+                val assignedIp = interfaceIpMap[ifName]
+                val hasDistinctIpOrTraffic = (assignedIp != null && assignedIp != routerIpBase) || (iface.rxBytes + iface.txBytes > 10_000_000L)
+
+                if (!hasNeighborOnPort && hasDistinctIpOrTraffic && isRunning && !isDisabled) {
+                    val portIp = assignedIp ?: routerIpBase
+                    if (!isNodeBlacklisted("node_if_$ifName", portIp, ifName, iface.macAddress, null)) {
+                        candidateSubNodes.add(
+                            com.example.data.model.NetworkNode(
+                                id = "node_if_$ifName",
+                                name = "منفذ $ifName (Ethernet)",
+                                ipAddress = portIp,
+                                macAddress = iface.macAddress,
+                                interfaceName = ifName,
+                                model = "Physical Port",
+                                role = "منفذ فيزيائي رئيسي",
+                                isOnline = true,
+                                status = com.example.data.model.NodeStatus.ACTIVE,
+                                nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
+                                parentTowerId = "node_main_router",
+                                rxSpeedKbps = iface.rxSpeedKbps,
+                                txSpeedKbps = iface.txSpeedKbps,
+                                totalBytesConsumed = iface.rxBytes + iface.txBytes
+                            )
+                        )
+                    }
+                }
             } else if (isWireless) {
                 val wObj = wirelessInterfaces.firstOrNull { it["name"].equals(ifName, true) }
                 val ssid = wObj?.get("ssid") ?: ifName
                 val band = wObj?.get("band") ?: "5GHz"
+                val assignedIp = interfaceIpMap[ifName] ?: routerIpBase
 
-                candidateSubNodes.add(
-                    com.example.data.model.NetworkNode(
-                        id = "node_wlan_$ifName",
-                        name = "نقطة بث لاسلكي ($ssid)",
-                        ipAddress = interfaceIpMap[ifName] ?: routerIpBase,
-                        macAddress = iface.macAddress,
-                        interfaceName = ifName,
-                        model = "MikroTik Wireless ($band)",
-                        role = "أكسس بوينت لاسلكي",
-                        isOnline = isRunning && !isDisabled,
-                        status = if (isDisabled) com.example.data.model.NodeStatus.DISABLED else if (isRunning) com.example.data.model.NodeStatus.ACTIVE else com.example.data.model.NodeStatus.OFFLINE,
-                        nodeType = com.example.data.model.NetworkNodeType.DISTRIBUTION,
-                        parentTowerId = "node_main_router",
-                        ssid = ssid
+                if (!isNodeBlacklisted("node_wlan_$ifName", assignedIp, ifName, iface.macAddress, null)) {
+                    candidateSubNodes.add(
+                        com.example.data.model.NetworkNode(
+                            id = "node_wlan_$ifName",
+                            name = "نقطة بث لاسلكي ($ssid)",
+                            ipAddress = assignedIp,
+                            macAddress = iface.macAddress,
+                            interfaceName = ifName,
+                            model = "MikroTik Wireless ($band)",
+                            role = "أكسس بوينت لاسلكي",
+                            isOnline = isRunning && !isDisabled,
+                            status = if (isDisabled) com.example.data.model.NodeStatus.DISABLED else if (isRunning) com.example.data.model.NodeStatus.ACTIVE else com.example.data.model.NodeStatus.OFFLINE,
+                            nodeType = com.example.data.model.NetworkNodeType.DISTRIBUTION,
+                            parentTowerId = "node_main_router",
+                            ssid = ssid
+                        )
                     )
-                )
+                }
             }
         }
 
         // 4. Any remaining neighbors that didn't match any interface
-        neighbors.forEachIndexed { idx, n ->
+        neighbors.forEach { n ->
             val nIdentity = n["identity"] ?: n["board"] ?: "برج متصل"
             val nAddress = n["address"] ?: ""
             val nMac = n["mac-address"] ?: ""
             val nInterface = n["interface"] ?: "ether1"
-            val key = nMac.ifBlank { nAddress }
+            val keyMac = nMac.uppercase()
+            val keyAddr = nAddress
 
-            if (!handledNeighborKeys.contains(key) && (nAddress.isNotBlank() || nMac.isNotBlank())) {
-                val isMikrotik = (n["platform"] ?: "").contains("MikroTik", true)
-                candidateSubNodes.add(
-                    com.example.data.model.NetworkNode(
-                        id = "node_neighbor_${key.replace(':', '_')}",
-                        name = nIdentity,
-                        ipAddress = nAddress,
-                        macAddress = nMac,
-                        interfaceName = nInterface,
-                        model = n["platform"] ?: "RouterOS Device",
-                        role = if (isMikrotik) "برج إرسال MikroTik" else "جهاز شبكة متصل",
-                        isOnline = true,
-                        status = com.example.data.model.NodeStatus.ACTIVE,
-                        nodeType = if (isMikrotik) com.example.data.model.NetworkNodeType.MAIN_TOWER else com.example.data.model.NetworkNodeType.DISTRIBUTION,
-                        ssid = nIdentity,
-                        parentTowerId = "node_if_$nInterface"
+            val alreadyHandled = (keyMac.isNotBlank() && handledNeighborKeys.contains(keyMac)) ||
+                    (keyAddr.isNotBlank() && handledNeighborKeys.contains(keyAddr)) ||
+                    handledNeighborKeys.contains(nIdentity)
+
+            if (!alreadyHandled && (nAddress.isNotBlank() || nMac.isNotBlank())) {
+                val candidateId = "node_neighbor_${(nMac.ifBlank { nAddress }).replace(':', '_')}"
+                if (!isNodeBlacklisted(candidateId, nAddress, nInterface, nMac, null)) {
+                    // Check if already represented by an existing candidate node by IP or MAC
+                    val existingCandidate = candidateSubNodes.firstOrNull { c ->
+                        (nAddress.isNotBlank() && c.ipAddress == nAddress) ||
+                        (nMac.isNotBlank() && c.macAddress.equals(nMac, true))
+                    }
+                    if (existingCandidate != null) {
+                        val idx = candidateSubNodes.indexOf(existingCandidate)
+                        candidateSubNodes[idx] = existingCandidate.copy(
+                            name = if (existingCandidate.name.startsWith("منفذ") || existingCandidate.name.startsWith("نقطة")) "$nIdentity (${existingCandidate.interfaceName})" else existingCandidate.name,
+                            model = n["platform"] ?: existingCandidate.model,
+                            ssid = nIdentity
+                        )
+                    } else {
+                        val isMikrotik = (n["platform"] ?: "").contains("MikroTik", true)
+                        candidateSubNodes.add(
+                            com.example.data.model.NetworkNode(
+                                id = candidateId,
+                                name = nIdentity,
+                                ipAddress = nAddress,
+                                macAddress = nMac,
+                                interfaceName = nInterface,
+                                model = n["platform"] ?: "RouterOS Device",
+                                role = if (isMikrotik) "برج إرسال MikroTik" else "جهاز شبكة متصل",
+                                isOnline = true,
+                                status = com.example.data.model.NodeStatus.ACTIVE,
+                                nodeType = if (isMikrotik) com.example.data.model.NetworkNodeType.MAIN_TOWER else com.example.data.model.NetworkNodeType.DISTRIBUTION,
+                                ssid = nIdentity,
+                                parentTowerId = "node_if_$nInterface"
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // 5. Integrate custom manually added nodes
+        customAddedNodes.forEach { customNode ->
+            if (!isNodeBlacklisted(customNode.id, customNode.ipAddress, customNode.interfaceName, customNode.macAddress, customNode.vlanId)) {
+                val matchIdx = candidateSubNodes.indexOfFirst {
+                    it.id == customNode.id ||
+                    (customNode.ipAddress.isNotBlank() && it.ipAddress == customNode.ipAddress)
+                }
+                if (matchIdx >= 0) {
+                    candidateSubNodes[matchIdx] = candidateSubNodes[matchIdx].copy(
+                        name = customNode.name,
+                        location = customNode.location,
+                        role = customNode.role,
+                        nodeType = customNode.nodeType,
+                        parentTowerId = customNode.parentTowerId,
+                        parentTowerName = customNode.parentTowerName
                     )
-                )
+                } else {
+                    candidateSubNodes.add(customNode)
+                }
             }
         }
 
-        // 5. Sync with DB: Include even closed/missing ones from historical DB
+        // 6. Sync with DB: Deduplicate and preserve custom settings, do not resurrect deleted nodes
         dbNodes?.forEach { dbNode ->
-            if (candidateSubNodes.none { it.id == dbNode.id || (it.interfaceName.isNotBlank() && it.interfaceName == dbNode.interfaceName) || (it.macAddress.isNotBlank() && it.macAddress == dbNode.macAddress) }) {
-                candidateSubNodes.add(dbNode)
+            if (!isNodeBlacklisted(dbNode.id, dbNode.ipAddress, dbNode.interfaceName, dbNode.macAddress, dbNode.vlanId)) {
+                val matchIdx = candidateSubNodes.indexOfFirst { c ->
+                    c.id == dbNode.id ||
+                    (dbNode.ipAddress.isNotBlank() && c.ipAddress == dbNode.ipAddress) ||
+                    (dbNode.macAddress.isNotBlank() && c.macAddress.equals(dbNode.macAddress, true)) ||
+                    (dbNode.vlanId != null && c.vlanId == dbNode.vlanId) ||
+                    (dbNode.interfaceName.isNotBlank() && c.interfaceName.equals(dbNode.interfaceName, true))
+                }
+                if (matchIdx >= 0) {
+                    val live = candidateSubNodes[matchIdx]
+                    candidateSubNodes[matchIdx] = live.copy(
+                        name = if (dbNode.name.isNotBlank() && !dbNode.name.startsWith("نقطة بث ESLAN") && !dbNode.name.startsWith("منفذ ")) dbNode.name else live.name,
+                        location = if (dbNode.location.isNotBlank()) dbNode.location else live.location,
+                        parentTowerId = dbNode.parentTowerId ?: live.parentTowerId,
+                        parentTowerName = dbNode.parentTowerName ?: live.parentTowerName,
+                        role = if (dbNode.role.isNotBlank()) dbNode.role else live.role
+                    )
+                } else {
+                    candidateSubNodes.add(dbNode.copy(isOnline = false, status = com.example.data.model.NodeStatus.OFFLINE, connectedUsers = 0))
+                }
             }
         }
 
-        // 2. Intelligent Client Matching Engine
+        // 7. Strict Final Deduplication of Sub-Nodes by IP, then MAC, then ID
+        val deduplicatedSubNodes = mutableListOf<com.example.data.model.NetworkNode>()
+        val seenIps = mutableSetOf<String>()
+        val seenMacs = mutableSetOf<String>()
+        val seenIds = mutableSetOf<String>()
+
+        candidateSubNodes.forEach { node ->
+            val cleanIp = node.ipAddress.trim()
+            val cleanMac = node.macAddress.trim().uppercase()
+            val cleanId = node.id.trim()
+
+            val ipClash = cleanIp.isNotBlank() && cleanIp != routerIpBase && cleanIp != "$subnetPrefix.254" && seenIps.contains(cleanIp)
+            val macClash = cleanMac.isNotBlank() && !cleanMac.startsWith("48:A9:8A:76:FB") && seenMacs.contains(cleanMac)
+            val idClash = seenIds.contains(cleanId)
+
+            if (!ipClash && !macClash && !idClash) {
+                if (cleanIp.isNotBlank() && cleanIp != routerIpBase && cleanIp != "$subnetPrefix.254") seenIps.add(cleanIp)
+                if (cleanMac.isNotBlank() && !cleanMac.startsWith("48:A9:8A:76:FB")) seenMacs.add(cleanMac)
+                seenIds.add(cleanId)
+                deduplicatedSubNodes.add(node)
+            }
+        }
+
+        // 8. Intelligent Client Matching Engine
         val assignedUserIds = mutableSetOf<String>()
         val userToNodeMap = mutableMapOf<String, String>()
 
-        val processedSubNodes = candidateSubNodes.map { node ->
+        val processedSubNodes = deduplicatedSubNodes.map { node ->
             val matchingClients = activeList.filter { u ->
                 if (assignedUserIds.contains(u.id)) return@filter false
                 val cleanMac = u.macAddress.uppercase()
@@ -2778,9 +2913,11 @@ class MikrotikRepository(
                     }
 
                     // 2. Try User Manager v7 removal
+                    var um7Code = 0
                     if (targetName.isNotBlank()) {
                         val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/$targetName").delete().header("Authorization", credential).build()
                         val um7Resp = httpClient.newCall(um7Req).execute()
+                        um7Code = um7Resp.code
                         if (um7Resp.isSuccessful) {
                             _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
                             cardTimestampCache.remove(targetName)
@@ -2790,15 +2927,27 @@ class MikrotikRepository(
                     }
 
                     // 3. Try User Manager v6 removal
+                    var um6Code = 0
                     if (targetName.isNotBlank()) {
                         val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/$targetName").delete().header("Authorization", credential).build()
                         val um6Resp = httpClient.newCall(um6Req).execute()
+                        um6Code = um6Resp.code
                         if (um6Resp.isSuccessful) {
                             _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
                             return@withContext Result.success(true)
                         }
+                    }
+
+                    // If all systems returned 404 (Not Found), the card is already deleted on the router
+                    if (hsResp.code == 404 && (um7Code == 404 || um7Code == 0) && (um6Code == 404 || um6Code == 0)) {
+                        _cards.value = _cards.value.filter { it.id != cardId && (targetName.isBlank() || it.name != targetName) }
+                        if (targetName.isNotBlank()) {
+                            cardTimestampCache.remove(targetName)
+                            try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
+                        }
+                        return@withContext Result.success(true)
                     }
 
                     return@withContext Result.failure(Exception("تعذر حذف الكرت من الراوتر عبر واجهة REST (رمز الخطأ: ${hsResp.code}). تأكد من وجود الكرت وصلاحيات المستخدم."))
@@ -4109,22 +4258,85 @@ class MikrotikRepository(
 
     suspend fun addNetworkNode(node: com.example.data.model.NetworkNode): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            if (customAddedNodes.none { it.id == node.id || it.ipAddress == node.ipAddress }) {
+            deletedNodeIds.remove(node.id)
+            if (node.ipAddress.isNotBlank()) deletedNodeKeys.remove(node.ipAddress)
+            if (node.interfaceName.isNotBlank()) deletedNodeKeys.remove(node.interfaceName)
+            if (node.macAddress.isNotBlank()) deletedNodeKeys.remove(node.macAddress.uppercase())
+            if (node.vlanId != null) deletedNodeKeys.remove("vlan_${node.vlanId}")
+
+            if (customAddedNodes.none { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }) {
                 customAddedNodes.add(0, node)
             }
             val list = _networkNodes.value.toMutableList()
-            if (list.none { it.id == node.id || it.ipAddress == node.ipAddress }) {
+            if (list.none { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }) {
                 list.add(0, node)
             }
             _networkNodes.value = list.distinctBy { it.id.ifBlank { it.ipAddress } }
+
+            try {
+                appDao?.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
+            } catch (_: Exception) {}
+
+            Result.success(true)
+        }
+    }
+
+    suspend fun updateNetworkNode(node: com.example.data.model.NetworkNode): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            deletedNodeIds.remove(node.id)
+            if (node.ipAddress.isNotBlank()) deletedNodeKeys.remove(node.ipAddress)
+            if (node.interfaceName.isNotBlank()) deletedNodeKeys.remove(node.interfaceName)
+            if (node.macAddress.isNotBlank()) deletedNodeKeys.remove(node.macAddress.uppercase())
+            if (node.vlanId != null) deletedNodeKeys.remove("vlan_${node.vlanId}")
+
+            val customIdx = customAddedNodes.indexOfFirst { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }
+            if (customIdx >= 0) {
+                customAddedNodes[customIdx] = node
+            } else {
+                customAddedNodes.add(node)
+            }
+
+            val currentList = _networkNodes.value.toMutableList()
+            val listIdx = currentList.indexOfFirst { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }
+            if (listIdx >= 0) {
+                currentList[listIdx] = node
+            } else {
+                currentList.add(node)
+            }
+            _networkNodes.value = currentList
+
+            try {
+                appDao?.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
+            } catch (_: Exception) {}
+
             Result.success(true)
         }
     }
 
     suspend fun deleteNetworkNode(nodeId: String): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            customAddedNodes.removeAll { it.id == nodeId }
-            _networkNodes.value = _networkNodes.value.filter { it.id != nodeId }
+            val existing = _networkNodes.value.firstOrNull { it.id == nodeId }
+                ?: customAddedNodes.firstOrNull { it.id == nodeId }
+            deletedNodeIds.add(nodeId)
+            existing?.let {
+                if (it.ipAddress.isNotBlank()) deletedNodeKeys.add(it.ipAddress)
+                if (it.interfaceName.isNotBlank()) deletedNodeKeys.add(it.interfaceName)
+                if (it.macAddress.isNotBlank()) deletedNodeKeys.add(it.macAddress.uppercase())
+                if (it.vlanId != null) deletedNodeKeys.add("vlan_${it.vlanId}")
+            }
+
+            customAddedNodes.removeAll {
+                it.id == nodeId || (existing != null && it.ipAddress.isNotBlank() && it.ipAddress == existing.ipAddress)
+            }
+            _networkNodes.value = _networkNodes.value.filter {
+                it.id != nodeId && (existing == null || it.ipAddress.isBlank() || it.ipAddress != existing.ipAddress)
+            }
+
+            try {
+                appDao?.deleteNetworkNodesFlexible(nodeId, existing?.ipAddress.orEmpty(), existing?.interfaceName.orEmpty())
+            } catch (_: Exception) {
+                try { appDao?.deleteNetworkNodeEntity(nodeId) } catch (_: Exception) {}
+            }
             Result.success(true)
         }
     }

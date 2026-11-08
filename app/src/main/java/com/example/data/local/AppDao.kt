@@ -179,6 +179,9 @@ interface AppDao {
     @Query("DELETE FROM network_nodes WHERE id = :nodeId")
     suspend fun deleteNetworkNodeEntity(nodeId: String)
 
+    @Query("DELETE FROM network_nodes WHERE id = :nodeId OR (ipAddress != '' AND ipAddress = :ipAddress) OR (interfaceName != '' AND interfaceName = :interfaceName)")
+    suspend fun deleteNetworkNodesFlexible(nodeId: String, ipAddress: String, interfaceName: String)
+
     // ==========================================
     // System Event Logs (Add, Edit, Delete Operations)
     // ==========================================

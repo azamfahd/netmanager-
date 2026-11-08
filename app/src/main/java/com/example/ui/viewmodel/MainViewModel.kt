@@ -1957,6 +1957,8 @@ class MainViewModel(
             val targetName = cardName.trim().ifBlank { 
                 cards.value.find { it.id == cardId }?.name.orEmpty() 
             }
+            // Instant optimistic deletion from UI
+            repository.deleteLocalCard(cardId, targetName)
             val result = repository.deleteCard(cardId, targetName)
             if (result.isSuccess) {
                 recordSystemEvent("حذف", "كرت", targetName.ifBlank { cardId }, "تم حذف الكرت (${targetName.ifBlank { cardId }}) من الراوتر وقاعدة البيانات بنجاح", "SUCCESS")
@@ -2413,6 +2415,13 @@ class MainViewModel(
         viewModelScope.launch {
             repository.addNetworkNode(node)
             _toastEvent.emit("تمت إضافة نقطة الشبكة (${node.name}) بنجاح!")
+        }
+    }
+
+    fun updateNetworkNode(node: com.example.data.model.NetworkNode) {
+        viewModelScope.launch {
+            repository.updateNetworkNode(node)
+            _toastEvent.emit("تم حفظ تعديلات النقطة (${node.name}) بنجاح")
         }
     }
 
