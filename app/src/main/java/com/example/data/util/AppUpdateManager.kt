@@ -10,6 +10,7 @@ import com.example.data.model.GitHubReleaseAsset
 import com.example.data.model.GitHubReleaseInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -18,7 +19,20 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import com.example.data.model.UpdateDownloadState
+
 object AppUpdateManager {
+
+    private val _downloadState = MutableStateFlow<UpdateDownloadState>(UpdateDownloadState.Idle)
+    val downloadState: StateFlow<UpdateDownloadState> = _downloadState.asStateFlow()
+
+    fun updateState(state: UpdateDownloadState) {
+        _downloadState.value = state
+    }
+
 
     private const val GITHUB_OWNER = "azamfahd"
     private const val GITHUB_REPO = "netmanager-"
@@ -232,12 +246,15 @@ object AppUpdateManager {
             inputStream = responseBody.byteStream()
             outputStream = FileOutputStream(apkFile)
 
-            val buffer = ByteArray(8192)
-            var bytesRead: Int
+            val buffer = ByteArray(16384) // Larger buffer for faster IO
+            var bytesRead = 0
             var totalRead: Long = 0
             var lastReportedPercent = -1
 
-            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+            // Initial report to show user it started
+            onProgress(0, 0, totalBytes)
+            
+            while (kotlinx.coroutines.currentCoroutineContext().isActive && inputStream.read(buffer).also { bytesRead = it } != -1) {
                 outputStream.write(buffer, 0, bytesRead)
                 totalRead += bytesRead
 
@@ -253,8 +270,16 @@ object AppUpdateManager {
             }
 
             outputStream.flush()
+            
+            if (!kotlinx.coroutines.currentCoroutineContext().isActive) {
+                if (apkFile.exists()) apkFile.delete()
+                return@withContext Result.failure(kotlinx.coroutines.CancellationException("Download cancelled"))
+            }
+
             onProgress(100, totalRead, totalRead)
-            Result.success(apkFile)
+            val finalFile = apkFile
+            updateState(UpdateDownloadState.Completed(finalFile))
+            Result.success(finalFile)
         } catch (e: Exception) {
             Result.failure(Exception("حدث خطأ أثناء تنزيل التحديث: ${e.localizedMessage ?: e.message}"))
         } finally {

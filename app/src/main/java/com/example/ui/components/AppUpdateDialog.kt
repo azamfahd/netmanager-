@@ -3,6 +3,7 @@ package com.example.ui.components
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,7 +64,8 @@ fun AppUpdateDialog(
     onInstallDownloaded: (java.io.File) -> Unit,
     onDismiss: () -> Unit,
     autoUpdateMinorReleases: Boolean = true,
-    onToggleAutoUpdateMinor: ((Boolean) -> Unit)? = null
+    onToggleAutoUpdateMinor: ((Boolean) -> Unit)? = null,
+    onPauseDownload: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val isDownloading = downloadState is UpdateDownloadState.Downloading
@@ -107,11 +109,30 @@ fun AppUpdateDialog(
                             )
                         }
                         Column {
-                            Text(
-                                text = "تحديث جديد للبرنامج",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "تحديث جديد للبرنامج",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                // Minimize Button
+                                Surface(
+                                    modifier = Modifier.clickable { onDismiss() },
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = "تصغير 🗕",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
                             Text(
                                 text = "الإصدار الجديد: ${release.tagName}",
                                 style = MaterialTheme.typography.labelMedium,
@@ -121,9 +142,29 @@ fun AppUpdateDialog(
                         }
                     }
 
-                    if (!isDownloading) {
-                        IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Default.Close, contentDescription = "إغلاق")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (isDownloading && onPauseDownload != null) {
+                            Surface(
+                                modifier = Modifier.clickable { onPauseDownload() },
+                                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "إيقاف مؤقت ⏸",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                        if (!isDownloading) {
+                            IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "إغلاق")
+                            }
                         }
                     }
                 }

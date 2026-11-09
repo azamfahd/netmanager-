@@ -6,10 +6,12 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
+import com.example.data.model.UpdateDownloadState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -57,27 +59,37 @@ class AppUpdateService : Service() {
             .setOngoing(true)
             .build()
 
-        startForeground(NOTIFICATION_ID, initialNotification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, initialNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(NOTIFICATION_ID, initialNotification)
+        }
 
         serviceScope.launch {
             try {
-                val result = AppUpdateManager.downloadApk(applicationContext, downloadUrl) { percent, _, _ ->
+                AppUpdateManager.updateState(UpdateDownloadState.Downloading(0, 0, 0))
+                val result = AppUpdateManager.downloadApk(applicationContext, downloadUrl) { percent, downloaded, total ->
                     updateNotificationProgress(percent)
+                    AppUpdateManager.updateState(UpdateDownloadState.Downloading(percent, downloaded, total))
                 }
-
+                
                 if (result.isSuccess) {
                     val apkFile = result.getOrThrow()
+                    AppUpdateManager.updateState(UpdateDownloadState.Completed(apkFile))
                     showCompletionNotification()
                     
-                    // Automatically trigger installation even if app UI is closed
                     withContext(Dispatchers.Main) {
                         AppUpdateManager.installApk(applicationContext, apkFile)
                     }
                 } else {
-                    showErrorNotification(result.exceptionOrNull()?.message ?: "حدث خطأ غير معروف أثناء التنزيل")
+                    val error = result.exceptionOrNull()?.message ?: "فشل التنزيل"
+                    AppUpdateManager.updateState(UpdateDownloadState.Error(error))
+                    showErrorNotification(error)
                 }
             } catch (e: Exception) {
-                showErrorNotification(e.localizedMessage ?: "فشل تنزيل التحديث")
+                val error = e.localizedMessage ?: "فشل تنزيل التحديث"
+                AppUpdateManager.updateState(UpdateDownloadState.Error(error))
+                showErrorNotification(error)
             } finally {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()

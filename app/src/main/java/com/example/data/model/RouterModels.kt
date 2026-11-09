@@ -628,6 +628,22 @@ enum class TimeFilterRange(val title: String) {
     MONTH("هذا الشهر")
 }
 
+data class PackageMonthlyStat(
+    val monthKey: String, // e.g. "2026-11"
+    val monthName: String, // e.g. "نوفمبر 2026"
+    val isCurrentMonth: Boolean = false,
+    val cardsGenerated: Int = 0,
+    val cardsSold: Int = 0,
+    val cardsUnsold: Int = 0,
+    val salePrice: Double = 0.0,
+    val costPrice: Double = 0.0,
+    val totalRevenue: Double = 0.0,
+    val totalCost: Double = 0.0,
+    val netProfit: Double = 0.0,
+    val profitMarginPercent: Double = 0.0,
+    val salesPercentage: Float = 0f
+)
+
 data class DetailedPackageProfitStat(
     val profileName: String,
     val costPrice: Double = 0.0,
@@ -643,7 +659,9 @@ data class DetailedPackageProfitStat(
     val totalCost: Double = 0.0, // soldCardsCount * costPrice
     val netProfit: Double = 0.0, // totalRevenue - totalCost
     val profitSharePercent: Float = 0f, // percentage of total network profit
-    val salesSharePercent: Float = 0f // percentage of total cards sold
+    val salesSharePercent: Float = 0f, // percentage of total cards sold
+    val currentMonthSales: PackageMonthlyStat? = null,
+    val monthlyHistory: List<PackageMonthlyStat> = emptyList()
 )
 
 data class RevenueAnalyticsSummary(
@@ -668,8 +686,14 @@ data class RevenueAnalyticsSummary(
 data class MonthlyPackageSales(
     val packageName: String,
     val cardsSold: Int = 0,
+    val cardsGenerated: Int = 0,
+    val cardsUnsold: Int = 0,
+    val salePrice: Double = 0.0,
+    val costPrice: Double = 0.0,
     val totalRevenue: Double = 0.0,
+    val totalCost: Double = 0.0,
     val netProfit: Double = 0.0,
+    val profitMarginPercent: Double = 0.0,
     val sharePercentage: Float = 0f
 )
 

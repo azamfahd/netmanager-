@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -54,6 +55,7 @@ import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Close
 import com.example.data.model.UpdateCheckState
 import com.example.ui.components.AppUpdateDialog
+import com.example.ui.components.UpdateBanner
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -267,79 +269,14 @@ fun ConnectRouterScreen(
             if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
                 val updateState = updateCheckState as UpdateCheckState.UpdateAvailable
                 item {
-                    Surface(
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showUpdateDialog = true }
-                            .testTag("connect_screen_update_banner")
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.SystemUpdate,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                                Column {
-                                    Text(
-                                        text = "يوجد إصدار جديد للتطبيق (${updateState.release.tagName})",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                    Text(
-                                        text = "اضغط لتحديث البرنامج مباشرة وحفظ كل بياناتك",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
-                                    )
-                                }
-                            }
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Button(
-                                    onClick = { showUpdateDialog = true },
-                                    shape = RoundedCornerShape(8.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                    modifier = Modifier.height(34.dp)
-                                ) {
-                                    Text("تحديث الآن", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                }
-                                IconButton(
-                                    onClick = { viewModel.dismissUpdateBanner() },
-                                    modifier = Modifier.size(34.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "إغلاق التنبيه",
-                                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    UpdateBanner(
+                        tagName = updateState.release.tagName,
+                        isMinorUpdate = updateState.release.isMinorUpdate,
+                        downloadState = updateDownloadState,
+                        onUpdateClick = { showUpdateDialog = true },
+                        onDismiss = { viewModel.dismissUpdateBanner() },
+                        onStopDownload = { viewModel.cancelDownloadUpdate() }
+                    )
                 }
             }
 
@@ -806,11 +743,17 @@ fun ConnectRouterScreen(
                                             .clickable {
                                                 username = router.username
                                                 if (router.password.isNotBlank()) password = router.password
-                                                manualIp = router.ipAddress
-                                                manualPort = router.port
-                                                manualUseHttps = router.useHttps
-                                                useManualNetworkSettings = true
-                                                Toast.makeText(context, "تم تحديد بيانات راوتر ${router.name}", Toast.LENGTH_SHORT).show()
+                                                val config = RouterConnectionConfig(
+                                                    id = router.id,
+                                                    name = router.name,
+                                                    ipAddress = router.ipAddress,
+                                                    port = router.port,
+                                                    username = router.username,
+                                                    password = router.password,
+                                                    useHttps = router.useHttps,
+                                                    isDemoMode = false
+                                                )
+                                                viewModel.connectToRouter(config, saveToFavorites = true, context = context)
                                             }
                                             .padding(12.dp),
                                         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -891,6 +834,26 @@ fun ConnectRouterScreen(
                                                         text = if (cacheSummary != null) "⚡ دخول فوري" else "دخول سريع",
                                                         fontSize = 11.sp,
                                                         fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+
+                                                IconButton(
+                                                    onClick = {
+                                                        username = router.username
+                                                        if (router.password.isNotBlank()) password = router.password
+                                                        manualIp = router.ipAddress
+                                                        manualPort = router.port
+                                                        manualUseHttps = router.useHttps
+                                                        useManualNetworkSettings = true
+                                                        Toast.makeText(context, "تم تحديد بيانات راوتر ${router.name} للتعديل", Toast.LENGTH_SHORT).show()
+                                                    },
+                                                    modifier = Modifier.size(32.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Edit,
+                                                        contentDescription = "تعديل الإعدادات",
+                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        modifier = Modifier.size(16.dp)
                                                     )
                                                 }
 
@@ -1453,11 +1416,13 @@ fun ConnectRouterScreen(
                 onToggleAutoUpdateMinor = { viewModel.setAutoUpdateMinorReleases(it) },
                 onDownloadAndInstall = { url ->
                     viewModel.downloadAndInstallUpdate(context, url)
+                    showUpdateDialog = false
                 },
                 onInstallDownloaded = { file ->
                     viewModel.installDownloadedApk(context, file)
                 },
-                onDismiss = { showUpdateDialog = false }
+                onDismiss = { showUpdateDialog = false },
+                onPauseDownload = { viewModel.cancelDownloadUpdate() }
             )
         }
     }
@@ -1476,7 +1441,9 @@ fun SavedRouterItem(
     }
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onConnect),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface

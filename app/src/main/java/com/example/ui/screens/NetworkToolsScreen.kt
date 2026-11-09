@@ -1085,11 +1085,13 @@ fun NetworkToolsScreen(
                 onToggleAutoUpdateMinor = { viewModel.setAutoUpdateMinorReleases(it) },
                 onDownloadAndInstall = { url ->
                     viewModel.downloadAndInstallUpdate(context, url)
+                    showUpdateDialog = false
                 },
                 onInstallDownloaded = { file ->
                     viewModel.installDownloadedApk(context, file)
                 },
-                onDismiss = { showUpdateDialog = false }
+                onDismiss = { showUpdateDialog = false },
+                onPauseDownload = { viewModel.cancelDownloadUpdate() }
             )
         }
     }

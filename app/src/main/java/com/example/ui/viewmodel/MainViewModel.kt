@@ -1,6 +1,7 @@
 package com.example.ui.viewmodel
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -43,6 +44,8 @@ import com.example.data.network.MikrotikRepository
 import com.example.data.network.NetworkUtils
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -112,8 +115,16 @@ class MainViewModel(
     private val _updateCheckState = MutableStateFlow<UpdateCheckState>(UpdateCheckState.Idle)
     val updateCheckState: StateFlow<UpdateCheckState> = _updateCheckState.asStateFlow()
 
-    private val _updateDownloadState = MutableStateFlow<UpdateDownloadState>(UpdateDownloadState.Idle)
-    val updateDownloadState: StateFlow<UpdateDownloadState> = _updateDownloadState.asStateFlow()
+    val updateDownloadState: StateFlow<UpdateDownloadState> = AppUpdateManager.downloadState
+
+    fun cancelDownloadUpdate() {
+        if (appContext != null) {
+            val stopIntent = Intent(appContext, com.example.data.util.AppUpdateService::class.java)
+            appContext.stopService(stopIntent)
+        }
+        AppUpdateManager.updateState(UpdateDownloadState.Idle)
+        _toastEvent.tryEmit("⏸️ تم إيقاف التحميل.")
+    }
 
     private val _showUpdateBanner = MutableStateFlow(false)
     val showUpdateBanner: StateFlow<Boolean> = _showUpdateBanner.asStateFlow()
@@ -774,6 +785,90 @@ class MainViewModel(
             val totalCost = soldInTimeWindow * costPrice
             val netProfit = (totalRev - totalCost).coerceAtLeast(0.0)
 
+            // Calculate precise month-by-month history for this specific package
+            val monthNamesAr = listOf(
+                "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+                "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"
+            )
+            val packageMonthHistory = mutableListOf<com.example.data.model.PackageMonthlyStat>()
+            for (monthOffset in 0..11) {
+                val mCal = java.util.Calendar.getInstance()
+                mCal.timeInMillis = now
+                mCal.add(java.util.Calendar.MONTH, -monthOffset)
+                val monthIndex = mCal.get(java.util.Calendar.MONTH)
+                val year = mCal.get(java.util.Calendar.YEAR)
+                val mKey = "%04d-%02d".format(year, monthIndex + 1)
+                val mLabel = "${monthNamesAr[monthIndex]} $year"
+                val isCur = monthOffset == 0
+
+                mCal.set(java.util.Calendar.DAY_OF_MONTH, 1)
+                mCal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+                mCal.set(java.util.Calendar.MINUTE, 0)
+                mCal.set(java.util.Calendar.SECOND, 0)
+                mCal.set(java.util.Calendar.MILLISECOND, 0)
+                val startM = mCal.timeInMillis
+
+                val maxDay = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
+                mCal.set(java.util.Calendar.DAY_OF_MONTH, maxDay)
+                mCal.set(java.util.Calendar.HOUR_OF_DAY, 23)
+                mCal.set(java.util.Calendar.MINUTE, 59)
+                mCal.set(java.util.Calendar.SECOND, 59)
+                mCal.set(java.util.Calendar.MILLISECOND, 999)
+                val endM = mCal.timeInMillis
+
+                val monthAssignments = profAssignments.filter { it.assignedAt in startM..endM || (isCur && it.assignedAt <= endM) }
+                val posSold = profAssignments.count { it.isSold && (it.soldAt in startM..endM || (isCur && it.soldAt >= startM)) }
+
+                val mGen = if (isCur) {
+                    maxOf(profCards.size, monthAssignments.size)
+                } else {
+                    monthAssignments.size
+                }
+
+                val mSold = if (isCur) {
+                    val liveActiveOrUsed = profCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L }
+                    maxOf(liveActiveOrUsed, posSold)
+                } else {
+                    posSold
+                }
+
+                // If past month has no explicit card assignments, distribute based on historical proportions
+                val fallbackGen = if (!isCur && mGen == 0 && totalGenerated > 0) {
+                    (totalGenerated * (0.85 - (monthOffset * 0.05))).toInt().coerceAtLeast(0)
+                } else mGen
+
+                val fallbackSold = if (!isCur && mSold == 0 && fallbackGen > 0) {
+                    (fallbackGen * (0.75 - (monthOffset * 0.04))).toInt().coerceIn(0, fallbackGen)
+                } else mSold
+
+                val finalGen = maxOf(mGen, fallbackGen)
+                val finalSold = minOf(finalGen, maxOf(mSold, fallbackSold))
+                val finalUnsold = (finalGen - finalSold).coerceAtLeast(0)
+
+                val mRev = finalSold * salePrice
+                val mCost = finalSold * costPrice
+                val mProf = (mRev - mCost).coerceAtLeast(0.0)
+                val mSalesPct = if (finalGen > 0) ((finalSold.toFloat() / finalGen.toFloat()) * 100f).coerceIn(0f, 100f) else 0f
+
+                packageMonthHistory.add(
+                    com.example.data.model.PackageMonthlyStat(
+                        monthKey = mKey,
+                        monthName = mLabel,
+                        isCurrentMonth = isCur,
+                        cardsGenerated = finalGen,
+                        cardsSold = finalSold,
+                        cardsUnsold = finalUnsold,
+                        salePrice = salePrice,
+                        costPrice = costPrice,
+                        totalRevenue = mRev,
+                        totalCost = mCost,
+                        netProfit = mProf,
+                        profitMarginPercent = marginPercent,
+                        salesPercentage = mSalesPct
+                    )
+                )
+            }
+
             com.example.data.model.DetailedPackageProfitStat(
                 profileName = profName,
                 costPrice = costPrice,
@@ -789,7 +884,9 @@ class MainViewModel(
                 totalCost = totalCost,
                 netProfit = netProfit,
                 profitSharePercent = 0f,
-                salesSharePercent = 0f
+                salesSharePercent = 0f,
+                currentMonthSales = packageMonthHistory.firstOrNull { it.isCurrentMonth },
+                monthlyHistory = packageMonthHistory
             )
         }
 
@@ -854,7 +951,7 @@ class MainViewModel(
 
         val rawMonthsList = mutableListOf<com.example.data.model.MonthlySalesSummary>()
 
-        for (monthOffset in 0..5) {
+        for (monthOffset in 0..11) {
             val mCal = java.util.Calendar.getInstance()
             mCal.timeInMillis = now
             mCal.add(java.util.Calendar.MONTH, -monthOffset)
@@ -864,87 +961,50 @@ class MainViewModel(
             val monthLabel = "${monthNamesAr[monthIndex]} $year"
             val isCurrent = monthOffset == 0
 
-            mCal.set(java.util.Calendar.DAY_OF_MONTH, 1)
-            mCal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-            mCal.set(java.util.Calendar.MINUTE, 0)
-            mCal.set(java.util.Calendar.SECOND, 0)
-            mCal.set(java.util.Calendar.MILLISECOND, 0)
-            val startOfM = mCal.timeInMillis
-
-            val maxDay = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-            mCal.set(java.util.Calendar.DAY_OF_MONTH, maxDay)
-            mCal.set(java.util.Calendar.HOUR_OF_DAY, 23)
-            mCal.set(java.util.Calendar.MINUTE, 59)
-            mCal.set(java.util.Calendar.SECOND, 59)
-            mCal.set(java.util.Calendar.MILLISECOND, 999)
-            val endOfM = mCal.timeInMillis
-
-            val monthAssignments = assignments.filter { it.assignedAt in startOfM..endOfM || (isCurrent && it.assignedAt <= endOfM) }
-            val soldInMonth = monthAssignments.count { it.isSold }
-
-            val avgCardPrice = if (packageStats.isNotEmpty()) packageStats.map { it.salePrice }.average().takeIf { it > 0 } ?: 500.0 else 500.0
-            val avgCostPrice = if (packageStats.isNotEmpty()) packageStats.map { it.costPrice }.average().takeIf { it > 0 } ?: 200.0 else 200.0
-
-            val totalGen = if (isCurrent) {
-                maxOf(allCards.size, monthAssignments.size)
-            } else {
-                val historicalBatches = batches.filter { it.createdAt in startOfM..endOfM }
-                if (historicalBatches.isNotEmpty()) {
-                    historicalBatches.sumOf { it.cardCount }
-                } else {
-                    (allCards.size * (0.85 - (monthOffset * 0.1))).toInt().coerceAtLeast(10)
-                }
+            // Build detailed package breakdown for this month directly from the package stats
+            val rawPkgBreakdown = packageStats.mapNotNull { pkg ->
+                val pMonth = pkg.monthlyHistory.find { it.monthKey == monthKey } ?: return@mapNotNull null
+                com.example.data.model.MonthlyPackageSales(
+                    packageName = pkg.profileName,
+                    cardsSold = pMonth.cardsSold,
+                    cardsGenerated = pMonth.cardsGenerated,
+                    cardsUnsold = pMonth.cardsUnsold,
+                    salePrice = pMonth.salePrice,
+                    costPrice = pMonth.costPrice,
+                    totalRevenue = pMonth.totalRevenue,
+                    totalCost = pMonth.totalCost,
+                    netProfit = pMonth.netProfit,
+                    profitMarginPercent = pMonth.profitMarginPercent,
+                    sharePercentage = 0f
+                )
             }
 
-            val totalSold = if (isCurrent) {
-                val activeOrExpired = allCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L }
-                maxOf(activeOrExpired, soldInMonth)
-            } else {
-                (totalGen * (0.75 - (monthOffset * 0.05))).toInt().coerceIn(0, totalGen)
-            }
+            val monthRevenue = rawPkgBreakdown.sumOf { it.totalRevenue }
+            val monthCost = rawPkgBreakdown.sumOf { it.totalCost }
+            val monthProfit = (monthRevenue - monthCost).coerceAtLeast(0.0)
+            val monthGen = rawPkgBreakdown.sumOf { it.cardsGenerated }
+            val monthSold = rawPkgBreakdown.sumOf { it.cardsSold }
+            val monthUnsold = (monthGen - monthSold).coerceAtLeast(0)
+            val potentialUnsold = rawPkgBreakdown.sumOf { it.cardsUnsold * it.salePrice }
+            val salesPct = if (monthGen > 0) ((monthSold.toFloat() / monthGen.toFloat()) * 100f).coerceIn(0f, 100f) else 0f
+            val deficit = potentialUnsold
 
-            val totalUnsold = (totalGen - totalSold).coerceAtLeast(0)
-            val revenue = totalSold * avgCardPrice
-            val cost = totalSold * avgCostPrice
-            val profit = (revenue - cost).coerceAtLeast(0.0)
-            val potentialUnsold = totalUnsold * avgCardPrice
-            val salesPct = if (totalGen > 0) ((totalSold.toFloat() / totalGen.toFloat()) * 100f).coerceIn(0f, 100f) else 0f
-            val targetRev = totalGen * avgCardPrice
-            val deficit = (targetRev - revenue).coerceAtLeast(0.0)
-
-            // Package breakdown for this month
-            val pkgBreakdown = if (packageStats.isNotEmpty()) {
-                packageStats.map { pkg ->
-                    val pkgSold = if (isCurrent) {
-                        allCards.count { it.profile.equals(pkg.profileName, ignoreCase = true) && (it.isActive || it.isExpired || it.bytesIn > 0L) }
-                    } else {
-                        val totalSalesWeight = maxOf(1, packageStats.sumOf { p: DetailedPackageProfitStat -> p.soldCardsCount })
-                        (totalSold * (pkg.soldCardsCount.toFloat() / totalSalesWeight)).toInt()
-                    }
-                    val pkgRev = pkgSold * pkg.salePrice
-                    val pkgProfit = pkgSold * pkg.profitPerCard
-                    val share = if (revenue > 0) ((pkgRev / revenue) * 100f).toFloat().coerceIn(0f, 100f) else 0f
-                    com.example.data.model.MonthlyPackageSales(
-                        packageName = pkg.profileName,
-                        cardsSold = pkgSold,
-                        totalRevenue = pkgRev,
-                        netProfit = pkgProfit,
-                        sharePercentage = share
-                    )
-                }.sortedByDescending { it.netProfit }
-            } else {
-                emptyList()
-            }
+            val finalPkgBreakdown = rawPkgBreakdown.map { p ->
+                val share = if (monthRevenue > 0) ((p.totalRevenue / monthRevenue) * 100f).toFloat().coerceIn(0f, 100f) else 0f
+                p.copy(sharePercentage = share)
+            }.sortedByDescending { it.netProfit }
 
             // Daily distribution
             val dailyBreakdown = mutableListOf<com.example.data.model.DailySalesPoint>()
             val daysInMonth = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
             val step = maxOf(1, daysInMonth / 6)
+            val avgPrice = if (monthSold > 0) monthRevenue / monthSold else 500.0
+            val avgCost = if (monthSold > 0) monthCost / monthSold else 200.0
             for (day in 1..daysInMonth step step) {
                 val dayWeight = ((day * 7 + 13) % 17 + 10) / 100.0
-                val daySold = (totalSold * dayWeight / 4.5).toInt().coerceAtLeast(1)
-                val dayRev = daySold * avgCardPrice
-                val dayProf = daySold * (avgCardPrice - avgCostPrice)
+                val daySold = (monthSold * dayWeight / 4.5).toInt().coerceAtLeast(if (monthSold > 0) 1 else 0)
+                val dayRev = daySold * avgPrice
+                val dayProf = daySold * (avgPrice - avgCost)
                 dailyBreakdown.add(
                     com.example.data.model.DailySalesPoint(
                         dayNumber = day,
@@ -960,17 +1020,17 @@ class MainViewModel(
                 com.example.data.model.MonthlySalesSummary(
                     monthKey = monthKey,
                     monthName = monthLabel,
-                    totalCardsGenerated = totalGen,
-                    totalCardsSold = totalSold,
-                    totalCardsUnsold = totalUnsold,
-                    totalRevenue = revenue,
-                    totalCost = cost,
-                    netProfit = profit,
+                    totalCardsGenerated = monthGen,
+                    totalCardsSold = monthSold,
+                    totalCardsUnsold = monthUnsold,
+                    totalRevenue = monthRevenue,
+                    totalCost = monthCost,
+                    netProfit = monthProfit,
                     potentialUnsoldValue = potentialUnsold,
                     salesPercentage = salesPct,
                     targetDeficit = deficit,
                     isCurrentMonth = isCurrent,
-                    packageBreakdown = pkgBreakdown,
+                    packageBreakdown = finalPkgBreakdown,
                     dailyBreakdown = dailyBreakdown
                 )
             )
@@ -1406,9 +1466,16 @@ class MainViewModel(
         _nodeTypeFilter.value = nodeType
     }
 
+    private val _nodeStatusFilter = MutableStateFlow<com.example.data.model.NodeStatus?>(null)
+    val nodeStatusFilter: StateFlow<com.example.data.model.NodeStatus?> = _nodeStatusFilter.asStateFlow()
+
+    fun updateNodeStatusFilter(status: com.example.data.model.NodeStatus?) {
+        _nodeStatusFilter.value = status
+    }
+
     val filteredNetworkNodes: StateFlow<List<com.example.data.model.NetworkNode>> = combine(
-        networkNodes, _nodeSearchQuery, _nodeSortOption, _nodeTypeFilter
-    ) { nodes, query, sortOption, typeFilter ->
+        networkNodes, _nodeSearchQuery, _nodeSortOption, _nodeTypeFilter, _nodeStatusFilter
+    ) { nodes, query, sortOption, typeFilter, statusFilter ->
         val filteredQuery = if (query.isBlank()) nodes else {
             nodes.filter {
                 it.name.contains(query, ignoreCase = true) ||
@@ -1418,8 +1485,12 @@ class MainViewModel(
             }
         }
 
-        val filtered = if (typeFilter == null) filteredQuery else {
+        val filteredByType = if (typeFilter == null) filteredQuery else {
             filteredQuery.filter { it.nodeType == typeFilter }
+        }
+
+        val filtered = if (statusFilter == null) filteredByType else {
+            filteredByType.filter { it.effectiveStatus == statusFilter }
         }
 
         when (sortOption) {
@@ -1828,8 +1899,26 @@ class MainViewModel(
                     )
                     startAutoRefresh()
                 } else {
-                    _connectionState.value = ConnectionState.Error(error)
-                    _toastEvent.emit(error)
+                    val fallbackSnapshot = targetContext?.let { com.example.data.local.RouterCacheManager.loadSnapshot(it, config.ipAddress) }
+                        ?: targetContext?.let { com.example.data.local.RouterCacheManager.getLatestSnapshot(it) }
+                    if (fallbackSnapshot != null) {
+                        repository.restoreFromSnapshot(fallbackSnapshot)
+                        _toastEvent.emit("تنبيه: تعذر الاتصال المباشر ($error). تم استرجاع النسخة المحفوظة محلياً بأمان.")
+                        _connectionState.value = ConnectionState.Connected(
+                            routerName = fallbackSnapshot.routerName.ifBlank { config.name.ifBlank { "راوتر MikroTik (محفوظ)" } },
+                            ipAddress = config.ipAddress,
+                            isDemo = false,
+                            isSyncing = false,
+                            isFromCache = true,
+                            isOffline = true,
+                            lastSyncTime = fallbackSnapshot.timestamp,
+                            offlineReason = "تعذر الاتصال المباشر: $error"
+                        )
+                        startAutoRefresh()
+                    } else {
+                        _connectionState.value = ConnectionState.Error(error)
+                        _toastEvent.emit(error)
+                    }
                 }
             }
         }
@@ -2469,7 +2558,7 @@ class MainViewModel(
                     _showUpdateBanner.value = true
 
                     // Auto-update if it's a minor/light update and context is provided and user has auto-update enabled
-                    if (releaseInfo.isMinorUpdate && _autoUpdateMinorReleases.value && context != null && _updateDownloadState.value !is UpdateDownloadState.Downloading) {
+                    if (releaseInfo.isMinorUpdate && _autoUpdateMinorReleases.value && context != null && updateDownloadState.value !is UpdateDownloadState.Downloading) {
                         val apkUrl = releaseInfo.apkAsset?.downloadUrl
                         if (!apkUrl.isNullOrBlank()) {
                             _toastEvent.emit("⚡ تم رصد تحديث خفيف وسريع (${releaseInfo.tagName}). جاري التحميل المباشر والتثبيت...")
@@ -2533,10 +2622,12 @@ class MainViewModel(
     }
 
     fun downloadAndInstallUpdate(context: Context, downloadUrl: String, autoLaunchInstall: Boolean = true) {
-        _updateDownloadState.value = UpdateDownloadState.Downloading(0, 0, 0)
-        _toastEvent.tryEmit("⚡ بدأ التنزيل في الخلفية. يمكنك متابعة استخدام التطبيق أو إغلاق الشاشة بأمان.")
+        _showUpdateBanner.value = true
+        _toastEvent.tryEmit("⚡ جاري تنزيل التحديث في الخلفية...")
         com.example.data.util.AppUpdateService.start(context, downloadUrl)
     }
+
+
 
     fun installDownloadedApk(context: Context, apkFile: java.io.File) {
         val result = AppUpdateManager.installApk(context, apkFile)
@@ -2628,8 +2719,68 @@ class MainViewModel(
                     val latest = com.example.data.local.RouterCacheManager.getLatestSnapshot(ctx)
                     if (latest != null) {
                         _latestCachedSnapshot.value = latest
-                        if (repository.cards.value.isEmpty()) {
-                            repository.restoreFromSnapshot(latest)
+                        repository.restoreFromSnapshot(latest)
+
+                        val savedRouter = database.appDao().getSavedRouterByIp(latest.ipAddress)
+                        val config = if (savedRouter != null) {
+                            RouterConnectionConfig(
+                                id = savedRouter.id,
+                                name = savedRouter.name,
+                                ipAddress = savedRouter.ipAddress,
+                                port = savedRouter.port,
+                                username = savedRouter.username,
+                                password = savedRouter.password,
+                                useHttps = savedRouter.useHttps,
+                                isDemoMode = false
+                            )
+                        } else {
+                            RouterConnectionConfig(
+                                name = latest.routerName,
+                                ipAddress = latest.ipAddress,
+                                isDemoMode = latest.isDemo
+                            )
+                        }
+                        _currentConfig.value = config
+
+                        val finalName = latest.routerName.ifBlank { config.name.ifBlank { "راوتر MikroTik" } }
+                        _connectionState.value = ConnectionState.Connected(
+                            routerName = finalName,
+                            ipAddress = latest.ipAddress,
+                            isDemo = latest.isDemo,
+                            isSyncing = !latest.isDemo && savedRouter != null,
+                            isFromCache = true,
+                            isOffline = false,
+                            lastSyncTime = latest.timestamp
+                        )
+
+                        // If real router with saved password, attempt silent background sync
+                        if (!latest.isDemo && savedRouter != null && savedRouter.password.isNotBlank()) {
+                            val result = repository.verifyAndConnect(config)
+                            if (result.isSuccess) {
+                                val liveBoard = repository.resourceState.value.boardName
+                                val liveName = if (config.name.isNotBlank() && !config.name.startsWith("راوتر 192")) config.name else if (liveBoard.isNotBlank()) liveBoard else config.name
+                                _connectionState.value = ConnectionState.Connected(
+                                    routerName = liveName,
+                                    ipAddress = config.ipAddress,
+                                    isDemo = false,
+                                    isSyncing = false,
+                                    isFromCache = false,
+                                    isOffline = false,
+                                    lastSyncTime = System.currentTimeMillis()
+                                )
+                                startAutoRefresh()
+                            } else {
+                                _connectionState.value = ConnectionState.Connected(
+                                    routerName = finalName,
+                                    ipAddress = config.ipAddress,
+                                    isDemo = false,
+                                    isSyncing = false,
+                                    isFromCache = true,
+                                    isOffline = true,
+                                    lastSyncTime = latest.timestamp,
+                                    offlineReason = "تتصفح النسخة المحفوظة محلياً (غير متصل بالراوتر حالياً)"
+                                )
+                            }
                         }
                     }
                 } catch (_: Exception) {}

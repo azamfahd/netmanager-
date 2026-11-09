@@ -39,6 +39,7 @@ import com.example.data.model.ConnectionState
 import com.example.data.model.NodeStatus
 import com.example.data.model.UpdateCheckState
 import com.example.ui.components.AppUpdateDialog
+import com.example.ui.components.UpdateBanner
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StatusType
 import com.example.ui.navigation.Screen
@@ -48,6 +49,7 @@ import com.example.ui.theme.StatusErrorRed
 import com.example.ui.viewmodel.MainViewModel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import androidx.activity.result.contract.ActivityResultContracts
 
 enum class MainTab(val title: String, val icon: ImageVector) {
     DASHBOARD("الرئيسية", Icons.Default.Dashboard),
@@ -169,6 +171,23 @@ fun MainScreen(
             )
         }
     ) { innerPadding ->
+        val context = LocalContext.current
+        val notificationPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { isGranted ->
+            if (!isGranted) {
+                viewModel.logApplicationError("PERMISSION", "تم رفض إذن التنبيهات، لن يظهر شريط تقدم التحديث في التنبيهات.")
+            }
+        }
+
+        LaunchedEffect(updateCheckState) {
+            if (updateCheckState is UpdateCheckState.UpdateAvailable && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                val permission = android.Manifest.permission.POST_NOTIFICATIONS
+                if (androidx.core.content.ContextCompat.checkSelfPermission(context, permission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    notificationPermissionLauncher.launch(permission)
+                }
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -180,8 +199,10 @@ fun MainScreen(
                 UpdateBanner(
                     tagName = availableRelease.tagName,
                     isMinorUpdate = availableRelease.isMinorUpdate,
+                    downloadState = updateDownloadState,
                     onUpdateClick = { showUpdateDialog = true },
-                    onDismiss = { viewModel.dismissUpdateBanner() }
+                    onDismiss = { viewModel.dismissUpdateBanner() },
+                    onStopDownload = { viewModel.cancelDownloadUpdate() }
                 )
             }
 
@@ -360,11 +381,13 @@ fun MainScreen(
                 onToggleAutoUpdateMinor = { viewModel.setAutoUpdateMinorReleases(it) },
                 onDownloadAndInstall = { url ->
                     viewModel.downloadAndInstallUpdate(context, url)
+                    showUpdateDialog = false
                 },
                 onInstallDownloaded = { file ->
                     viewModel.installDownloadedApk(context, file)
                 },
-                onDismiss = { showUpdateDialog = false }
+                onDismiss = { showUpdateDialog = false },
+                onPauseDownload = { viewModel.cancelDownloadUpdate() }
             )
         }
     }
@@ -648,52 +671,6 @@ fun FloatingBottomNavigationDock(
                             maxLines = 1
                         )
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun UpdateBanner(
-    tagName: String,
-    isMinorUpdate: Boolean = false,
-    onUpdateClick: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    Surface(
-        color = if (isMinorUpdate) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.primaryContainer,
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = if (isMinorUpdate) "⚡ تحديث خفيف متاح ($tagName)" else "يوجد تحديث جديد ($tagName)",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = if (isMinorUpdate) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onPrimaryContainer
-                )
-                Text(
-                    text = if (isMinorUpdate) "تحسينات سريعة - اضغط للتحديث المباشر والتثبيت" else "اضغط للتنزيل والتثبيت مباشرة",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isMinorUpdate) MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
-                )
-            }
-            Row {
-                TextButton(onClick = onUpdateClick) {
-                    Text(if (isMinorUpdate) "تحديث فوري ⚡" else "تحديث")
-                }
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Default.Close, null, modifier = Modifier.size(16.dp))
                 }
             }
         }

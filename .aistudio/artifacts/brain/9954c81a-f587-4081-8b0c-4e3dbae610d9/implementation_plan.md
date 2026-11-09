@@ -1,22 +1,79 @@
-# Implementation Plan - On-Demand Deep App Traffic Inspection
+# خطة التطوير والتحسين الشامل: الحفظ المحلي الفوري وقسم نقاط البث والأبراج الاحترافي
 
-## Overview
-Add an on-demand "فحص وتحليل التطبيقات الذكي" (Deep App Inspection) button on subscriber usage analytics cards (`UsageAnalyticsScreen`) that fetches and analyzes live connection and DNS cache records from the MikroTik router (`/ip/dns/cache` and `/ip/firewall/connection`), dynamically identifying real applications (YouTube, Instagram, Facebook, TikTok, PUBG, WhatsApp, Telegram, Netflix, Zoom, etc.) used by that specific subscriber without being restricted to a hardcoded list.
+## 1. ملخص متطلبات المستخدم وتفضيلاته
+1. **قسم نقاط البث والأبراج (Network Nodes & Towers):**
+   - تنظيم وتقسيم احترافي لجميع نقاط البث والأبراج.
+   - تصنيف دقيق وواضح للحالات: نقاط تعمل بشكل طبيعي (Online)، نقاط مغلقة/مفصولة (Offline)، ونقاط بها خلل أو انقطاع إنترنت/بطء شديد (Faulty/Warning).
+   - عرض هيكلي وطوبولوجي واضح يربط الأجهزة التابعة بالأبراج الرئيسية مع إظهار عدد المتصلين، قوة الإشارة، وسرعة الاستجابة (Ping).
+2. **نظام الحفظ والتخزين المحلي الفوري (Local-First Persistence & Zero Data Loss):**
+   - فتح البيانات المحفوظة فوراً وبدون أي انتظار بمجرد تشغيل التطبيق أو النقر على الراوتر المحفوظ.
+   - تحديث ومزامنة البيانات في الخلفية بهدوء وبدون تصفير أو فقدان البيانات في حال بطء الشبكة أو انقطاعها.
+   - ضمان عدم طلب كلمة المرور مجدداً أو إعادة تحميل البيانات من الصفر عند كل فتح للتطبيق.
+3. **تدقيق شامل واستقرار التطبيق (Comprehensive System Audit):**
+   - معالجة أي تعليق أو أخطاء تشغيلية والتأكد من خلو التطبيق من العيوب البرمجية.
 
-## Proposed Changes
+---
 
-### 1. Repository & API Client (`RouterOsApiClient.kt`, `MikrotikRepository.kt`)
-- Add methods to query router DNS cache (`/ip/dns/cache/print`) and active firewall connections (`/ip/firewall/connection/print`) filtered by the subscriber's IP address.
-- Implement domain-to-app pattern matching that resolves domains (e.g. `*.googlevideo.com` -> YouTube, `*.instagram.com` -> Instagram, `*.tiktokcdn.com` -> TikTok, `*.igdb.com` / `*.pubgmobile.com` -> PUBG, `*.whatsapp.net` -> WhatsApp) dynamically.
+## 2. تحليل الأسباب الجذرية للمشاكل الحالية (Root Cause Analysis)
 
-### 2. ViewModel (`MainViewModel.kt`)
-- Add `inspectSubscriberApps(username: String, subscriberIp: String)` method to trigger live deep inspection of subscriber traffic.
-- Expose `_inspectedAppUsage: StateFlow<List<AppUsageItem>>` to display real-time detected applications and byte counts.
+### أ. مشكلة فقدان البيانات وإعادة التحميل عند كل فتح للراوتر:
+- **في شاشة الاتصال (`ConnectRouterScreen.kt`):** النقر على بطاقة الراوتر المحفوظ كان يكتفي بملء حقول الإدخال النصية (IP، اسم المستخدم) بدلاً من الدخول الفوري وعرض البيانات المحفوظة مباشرة.
+- **تصفير الذاكرة عند قطع الاتصال (`MainViewModel.kt` و `MikrotikRepository.kt`):** استدعاء `disconnect()` يقوم بمسح القوائم الحية (`_cards.value = emptyList()`, `_nodes.value = emptyList()`)، مما يؤدي إلى ظهور الشاشات فارغة ما لم يتم الاتصال بالشبكة بنجاح كامل.
+- **الاعتماد على الشبكة أولاً بدلاً من الذاكرة المحلية:** محاولة الاتصال الحي قبل تحميل البيانات المخزنة، وفي حال تأخر الرد من المايكروتك (Timeout) يظهر خطأ للمستخدم ويفقد إمكانية استعراض الكروت أو الأبراج بدون إنترنت.
 
-### 3. UI Layer (`UsageAnalyticsScreen.kt`, `UserDetailDialog.kt`)
-- Add a prominent "بدء الفحص العميقة للتطبيقات ⚡" (Start Deep App Inspection) button on usage breakdown cards.
-- Display real-time progress, detected application breakdown, domain lists, and traffic volume per application.
+### ب. مشاكل قسم نقاط البث والأبراج:
+- **تكرار الواجهات والواجهات الوهمية:** كود الاكتشاف الحالي كان ينشئ نقاطاً لجميع الواجهات بما فيها الواجهات الافتراضية والداخلية (`node_if_...`)، مما يسبب ازدحاماً وتكراراً غير مفهوم للمستخدم.
+- **عدم دقة فحص الحالة (Heartbeat Status):** الاعتماد الحصري على فحص ICMP Ping المباشر، في حين أن العديد من أجهزة البث (Ubiquiti / MikroTik APs) تعمل في وضع Bridge أو تعطل الرد على Ping، فيتم اعتبارها خطأً كأنها متوقفة (Offline) رغم أنها تبث وتخدم عملاء نشطين.
+- **ضعف التقسيم البصري:** غياب تبويبات أو أقسام صريحة تفرز النقاط حسب حالتها وحسب البرج الرئيسي التابعة له.
 
-## Verification Plan
-- Compile applet with `compile_applet`.
-- Verify the deep inspection button triggers live traffic analysis and displays discovered applications accurately.
+---
+
+## 3. خطة المعمارية والحلول المقترحة (Proposed Architecture)
+
+### أولاً: نظام التخزين المحلي الفوري (Local-First Architecture)
+1. **الفتح التلقائي والفوري (Instant Offline-Ready Launch):**
+   - عند فتح التطبيق، إذا وجد راوتر تم الاتصال به مسبقاً، يتم استرجاع snapshot فوراً من Room / JSON Cache وعرض لوحة التحكم والكروت والأبراج في غضون أجزاء من الثانية.
+   - النقر على أي راوتر محفوظ في قائمة الراوترات ينقل المستخدم فوراً إلى بيانات الراوتر المحفوظة مع إطلاق عملية التحديث الحي في الخلفية (Background Sync).
+2. **عزل حالة عدم الاتصال (Resilient Offline Mode):**
+   - في حال فشل الاتصال المباشر بالراوتر أو انقطاع الواي فاي، يظل التطبيق محتفظاً بكامل البيانات مع إظهار شارة أنيقة تفيد بأن "البيانات معروضة من النسخة المحلية المحفوظة" مع خيار إعادة المحاولة يدوياً أو تلقائياً.
+3. **تزامن قاعدة بيانات Room:**
+   - تخزين تفاصيل الكروت (`local_cards`)، نقاط البث (`network_nodes`)، سجلات العمليات، وأسعار الباقات في SQLite محلياً لضمان سرعة البحث والفلترة حتى بدون راوتر متصل.
+
+### ثانياً: إعادة هيكلة وتطوير قسم نقاط البث والأبراج (Professional Nodes & Towers)
+1. **فلترة واكتشاف ذكي للنقاط الحقيقية:**
+   - قصر الاكتشاف التلقائي على أجهزة البث الحقيقية (Wireless Interfaces, Registrations, MikroTik Neighbors / CDP / LLDP, DHCP Leases النشطة للأجهزة الثابتة).
+   - استبعاد المنافذ الافتراضية غير النشطة لمنع التشويش.
+2. **محرك فحص الحالة الدقيق (Multi-Signal Heartbeat Engine):**
+   - تصنيف الحالة وفق 3 مؤشرات مجتمعة:
+     - **🟢 تعمل بشكل ممتاز (Online):** تستجيب للـ Ping ولديها تبادل بيانات أو عملاء متصلين.
+     - **🟡 تنبيه / خلل (Warning / Faulty):** تستجيب ببطء شديد (>120ms)، أو لا يوجد تبادل بيانات، أو مفصولة عن الإنترنت، أو عدم وجود عملاء مع انخفاض الإشارة.
+     - **🔴 متوقفة / مغلقة (Offline):** لا تستجيب نهائياً ولا توجد بيانات لها في جدول الجيران أو الـ ARP.
+3. **تقسيم وعرض بصري منظم واحترافي:**
+   - شريط ملخص علوي تفاعلي يعرض عدادات فورية: (الكل، تعمل، بها خلل، متوقفة).
+   - تقسيم القائمة إلى أقسام واضحة:
+     - قسم الأبراج والمحطات الرئيسية (Main Towers & Base Stations).
+     - قسم نقاط البث التوزيعية (Access Points).
+     - قسم أجهزة الربط وجسور الشبكة (Bridges & PtP Links).
+   - بطاقة متكاملة لكل نقطة توضح: الاسم، الـ IP، اسم المنفذ/البرج، عدد المشتركين النشطين عليها، استهلاك البيانات، وزمن الاستجابة، مع أزرار سريعة للفحص المباشر وإعادة التشغيل وإدارة المشتركين.
+   - تحسين العرض الشجري ومخطط شبكة العنكبوت الطوبولوجي ليعكس التبعية الحقيقية بين الأبراج ونقاط التوزيع.
+
+### ثالثاً: التدقيق الشامل للأخطاء البرمجية والأداء (System Audit & Polish)
+1. معالجة تسريب المهام الخلفية ومزامنة طابور العمليات دون توقف واجهة المستخدم.
+2. فحص استهلاك الذاكرة وتخفيف عمليات إعادة البناء المتكررة (Recompositions) في Jetpack Compose.
+3. التأكد من حفظ وتطبيق إعدادات التطبيق وتشفير كلمات مرور الراوترات المخزنة بأمان.
+
+---
+
+## 4. خطوات التنفيذ ومراحل العمل (Implementation Milestones)
+
+- **المرحلة 1: تحديث طبقة التخزين المحلي والاتصال الفوري (Local Persistence & Instant Open):**
+  - تعديل `MainViewModel.kt` لدعم التشغيل الفوري من الكاش بدون شاشات حجب، وتحويل فشل الاتصال إلى وضع تصفح محلي آمن بدلاً من تصفير الشاشة.
+  - تحديث `ConnectRouterScreen.kt` ليكون النقر على بطاقة الراوتر المحفوظ عملية دخول فوري مباشرة مع المزامنة في الخلفية.
+- **المرحلة 2: محرك اكتشاف نقاط البث وفحص الحالة (`MikrotikRepository.kt`):**
+  - تنقيح خوارزمية اكتشاف النقاط لتمييز نقاط البث الحقيقية عن الواجهات الافتراضية.
+  - دمج فحص نبضات القلب الذكي مع جداول الجيران ومعدل الترافيك.
+- **المرحلة 3: تجديد واجهة نقاط البث والأبراج (`NetworkNodesScreen.kt`):**
+  - بناء تصميم منظم ومقسم حسب الحالات والأبراج مع شارات واضحة وتفاعلية سريعة.
+  - تعزيز العرض الشجري ومخطط الطوبولوجيا ليعكس الشبكة الحقيقية بدقة متناهية.
+- **المرحلة 4: فحص وتجميع التطبيق (Build & Quality Verification):**
+  - تنفيذ `compile_applet` والتحقق من سلامة البناء وخلو الكود من أي أخطاء ترجمة أو استثناءات تشغيلية.

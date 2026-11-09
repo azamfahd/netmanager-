@@ -23,7 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+
 import kotlinx.coroutines.withContext
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
@@ -1210,23 +1210,7 @@ class MikrotikRepository(
                 }
             }
 
-            // Quick Subnet Scan for hidden management routers
-            val routerIp = activeConfig?.ipAddress ?: "192.168.88.1"
-            if (routerIp.contains(".")) {
-                val prefix = routerIp.substringBeforeLast(".")
-                val commonIps = listOf(1, 2, 3, 5, 10, 20, 50, 100, 254)
-                commonIps.forEach { lastOctet ->
-                    val target = "$prefix.$lastOctet"
-                    if (target != routerIp && neighborsList.none { it["address"] == target }) {
-                        try {
-                            val proc = Runtime.getRuntime().exec("ping -c 1 -W 1 $target")
-                            if (proc.waitFor() == 0) {
-                                neighborsList.add(mapOf("address" to target, "identity" to "Discovered via Scan", "platform" to "MikroTik?"))
-                            }
-                        } catch (_: Exception) {}
-                    }
-                }
-            }
+
 
             activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface, wirelessRegs, vlanList, ipAddressesList) }
             notifyDataRefreshed()
@@ -1784,27 +1768,7 @@ class MikrotikRepository(
                     } catch (_: Exception) { JSONArray() }
                 }
 
-                val scanSubnetJob = async {
-                    val routerIp = activeConfig?.ipAddress ?: "192.168.88.1"
-                    if (routerIp.contains(".")) {
-                        val prefix = routerIp.substringBeforeLast(".")
-                        val commonIps = listOf(1, 2, 3, 5, 10, 20, 50, 100, 254)
-                        val results = mutableListOf<Map<String, String>>()
-                        commonIps.forEach { lastOctet ->
-                            val target = "$prefix.$lastOctet"
-                            if (target != routerIp) {
-                                try {
-                                    // Quick probe: try to ping or check if reachable
-                                    val proc = Runtime.getRuntime().exec("ping -c 1 -W 1 $target")
-                                    if (proc.waitFor() == 0) {
-                                        results.add(mapOf("address" to target, "identity" to "Discovered via Scan", "platform" to "MikroTik?"))
-                                    }
-                                } catch (_: Exception) {}
-                            }
-                        }
-                        results
-                    } else emptyList<Map<String, String>>()
-                }
+                    emptyList<Map<String, String>>()
 
                 val ipAddressJob = async {
                     try {
@@ -1819,7 +1783,7 @@ class MikrotikRepository(
                 val neighborArray = neighborJob.await()
                 val registrationsArray = registrationsJob.await()
                 val romonArray = romonJob.await()
-                val scanResults = scanSubnetJob.await()
+                val scanResults = emptyList<Map<String, String>>()
                 val ipAddressArray = ipAddressJob.await()
 
                 val wirelessList = mutableListOf<Map<String, String>>()
@@ -1865,10 +1829,10 @@ class MikrotikRepository(
                     }
                 }
 
-                // Merge Scan results
-                scanResults.forEach { r ->
-                    if (neighborsList.none { it["address"] == r["address"] }) {
-                        neighborsList.add(r)
+                // Merge Scan results (if any)
+                scanResults.forEach { result ->
+                    if (neighborsList.none { neighbor -> neighbor["address"] == result["address"] }) {
+                        neighborsList.add(result)
                     }
                 }
 
@@ -2412,15 +2376,13 @@ class MikrotikRepository(
         _networkNodes.value = finalNodes
 
         // Persist discovered and matched nodes to DB so they appear as "Offline" later if not found
-        runBlocking {
-            try {
-                val entities = finalNodes.map { 
-                    com.example.data.local.NetworkNodeEntity.fromNetworkNode(it) 
-                }
-                appDao?.insertOrUpdateNetworkNodes(entities)
-            } catch (e: Exception) {
-                // Ignore DB errors during background sync to prevent app crash
+        try {
+            val entities = finalNodes.map { 
+                com.example.data.local.NetworkNodeEntity.fromNetworkNode(it) 
             }
+            appDao?.insertOrUpdateNetworkNodes(entities)
+        } catch (e: Exception) {
+            // Ignore DB errors during background sync to prevent app crash
         }
 
         // 4. Update _activeUsers so each user's nodeName reflects the actual connected node
@@ -4393,6 +4355,18 @@ class MikrotikRepository(
             }
 
             if (!isReachable) {
+                // If ping and socket failed, check if this node has active users or live traffic passing through it
+                val hasActiveTrafficOrClients = node.connectedUsers > 0 || (node.rxSpeedKbps + node.txSpeedKbps > 20.0)
+                if (hasActiveTrafficOrClients) {
+                    return@withContext node.copy(
+                        status = com.example.data.model.NodeStatus.ACTIVE,
+                        isOnline = true,
+                        pingMs = 3L,
+                        lastCheckTime = now,
+                        lastSeenTime = now
+                    )
+                }
+
                 return@withContext node.copy(
                     status = com.example.data.model.NodeStatus.OFFLINE,
                     isOnline = false,
@@ -4405,10 +4379,12 @@ class MikrotikRepository(
             val isGwReachable = NetworkUtils.pingHost(gatewayIp, timeoutMs = 800).first ||
                     NetworkUtils.testSocketConnection("8.8.8.8", 53, timeoutMs = 600)
 
-            val resolvedStatus = if (isGwReachable) {
-                com.example.data.model.NodeStatus.ACTIVE
-            } else {
+            val resolvedStatus = if (!isGwReachable) {
                 com.example.data.model.NodeStatus.NO_INTERNET
+            } else if (responseMs > 180L) {
+                com.example.data.model.NodeStatus.NO_INTERNET // High latency / unstable node
+            } else {
+                com.example.data.model.NodeStatus.ACTIVE
             }
 
             node.copy(
