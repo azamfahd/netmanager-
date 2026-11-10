@@ -34,7 +34,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -280,7 +279,73 @@ fun ConnectRouterScreen(
                 }
             }
 
+            // Persistent Offline Cache Access Banner (تصفح البيانات المحفوظة محلياً)
+            if (latestSnapshot != null) {
+                item {
+                    val snapshot = latestSnapshot!!
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = StatusActiveGreen.copy(alpha = 0.12f),
+                        border = BorderStroke(1.2.dp, StatusActiveGreen.copy(alpha = 0.45f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .clip(CircleShape)
+                                            .background(StatusActiveGreen),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Bolt,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    Column {
+                                        Text(
+                                            text = "بيانات الشبكة والكروت محفوظة محلياً",
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = StatusActiveGreen
+                                        )
+                                        Text(
+                                            text = "${snapshot.routerName.ifBlank { "راوتر MikroTik" }} (${snapshot.ipAddress}) • ${snapshot.cards.size} كرت • ${snapshot.profiles.size} باقات",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
 
+                                Button(
+                                    onClick = {
+                                        viewModel.enterOfflineMode(snapshot.ipAddress, context)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = StatusActiveGreen),
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("فتح البيانات الآن", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // 1. Hero Router & Network Detection Card (Compact & Elegant)
             item {
@@ -680,6 +745,22 @@ fun ConnectRouterScreen(
                                     Text("الدخول التجريبي", fontSize = 12.sp)
                                 }
                             }
+
+                            if (latestSnapshot != null) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Button(
+                                    onClick = {
+                                        viewModel.enterOfflineMode(latestSnapshot?.ipAddress, context)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = StatusActiveGreen),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("فتح البيانات المحفوظة محلياً (وضع الأوفلاين)", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                }
+                            }
                         }
                     }
                 }
@@ -743,17 +824,11 @@ fun ConnectRouterScreen(
                                             .clickable {
                                                 username = router.username
                                                 if (router.password.isNotBlank()) password = router.password
-                                                val config = RouterConnectionConfig(
-                                                    id = router.id,
-                                                    name = router.name,
-                                                    ipAddress = router.ipAddress,
-                                                    port = router.port,
-                                                    username = router.username,
-                                                    password = router.password,
-                                                    useHttps = router.useHttps,
-                                                    isDemoMode = false
-                                                )
-                                                viewModel.connectToRouter(config, saveToFavorites = true, context = context)
+                                                manualIp = router.ipAddress
+                                                manualPort = router.port
+                                                manualUseHttps = router.useHttps
+                                                useManualNetworkSettings = true
+                                                Toast.makeText(context, "تم تحديد بيانات راوتر ${router.name}", Toast.LENGTH_SHORT).show()
                                             }
                                             .padding(12.dp),
                                         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -834,26 +909,6 @@ fun ConnectRouterScreen(
                                                         text = if (cacheSummary != null) "⚡ دخول فوري" else "دخول سريع",
                                                         fontSize = 11.sp,
                                                         fontWeight = FontWeight.Bold
-                                                    )
-                                                }
-
-                                                IconButton(
-                                                    onClick = {
-                                                        username = router.username
-                                                        if (router.password.isNotBlank()) password = router.password
-                                                        manualIp = router.ipAddress
-                                                        manualPort = router.port
-                                                        manualUseHttps = router.useHttps
-                                                        useManualNetworkSettings = true
-                                                        Toast.makeText(context, "تم تحديد بيانات راوتر ${router.name} للتعديل", Toast.LENGTH_SHORT).show()
-                                                    },
-                                                    modifier = Modifier.size(32.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Edit,
-                                                        contentDescription = "تعديل الإعدادات",
-                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                        modifier = Modifier.size(16.dp)
                                                     )
                                                 }
 
@@ -1441,9 +1496,7 @@ fun SavedRouterItem(
     }
 
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onConnect),
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface

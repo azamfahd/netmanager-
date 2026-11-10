@@ -4355,18 +4355,6 @@ class MikrotikRepository(
             }
 
             if (!isReachable) {
-                // If ping and socket failed, check if this node has active users or live traffic passing through it
-                val hasActiveTrafficOrClients = node.connectedUsers > 0 || (node.rxSpeedKbps + node.txSpeedKbps > 20.0)
-                if (hasActiveTrafficOrClients) {
-                    return@withContext node.copy(
-                        status = com.example.data.model.NodeStatus.ACTIVE,
-                        isOnline = true,
-                        pingMs = 3L,
-                        lastCheckTime = now,
-                        lastSeenTime = now
-                    )
-                }
-
                 return@withContext node.copy(
                     status = com.example.data.model.NodeStatus.OFFLINE,
                     isOnline = false,
@@ -4379,12 +4367,10 @@ class MikrotikRepository(
             val isGwReachable = NetworkUtils.pingHost(gatewayIp, timeoutMs = 800).first ||
                     NetworkUtils.testSocketConnection("8.8.8.8", 53, timeoutMs = 600)
 
-            val resolvedStatus = if (!isGwReachable) {
-                com.example.data.model.NodeStatus.NO_INTERNET
-            } else if (responseMs > 180L) {
-                com.example.data.model.NodeStatus.NO_INTERNET // High latency / unstable node
-            } else {
+            val resolvedStatus = if (isGwReachable) {
                 com.example.data.model.NodeStatus.ACTIVE
+            } else {
+                com.example.data.model.NodeStatus.NO_INTERNET
             }
 
             node.copy(

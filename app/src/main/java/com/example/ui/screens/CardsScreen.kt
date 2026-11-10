@@ -400,18 +400,28 @@ fun CardsScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = if (searchQuery.isNotBlank()) "لا توجد كروت تطابق البحث" else "لا توجد كروت، اضغط على زر توليد كروت لإضافة كروت جديدة للشبكة",
+                            text = if (searchQuery.isNotBlank()) "لا توجد كروت تطابق البحث" else if (currentFilter != CardFilter.ALL) "لا توجد كروت في هذا القسم" else "لا توجد كروت، اضغط على زر توليد كروت لإضافة كروت جديدة للشبكة",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(16.dp))
-                        Button(
-                            onClick = onOpenBatchGenerator,
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = null)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("توليد كروت جديدة الآن")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (currentFilter != CardFilter.ALL) {
+                                OutlinedButton(
+                                    onClick = { viewModel.updateCardFilter(CardFilter.ALL) },
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text("عرض كل الكروت (${distinctCards.size})")
+                                }
+                            }
+                            Button(
+                                onClick = onOpenBatchGenerator,
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("توليد كروت جديدة الآن")
+                            }
                         }
                     }
                 }
