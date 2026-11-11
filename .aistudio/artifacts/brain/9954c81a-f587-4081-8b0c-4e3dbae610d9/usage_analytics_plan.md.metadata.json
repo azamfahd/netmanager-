@@ -1,6 +1,0 @@
-{
-  "summary": "Redesign usage metrics into 4 interactive cards (Total, Download, Upload, Time) and implement dedicated detailed analytics screens with smart app-usage categorization and interactive charts.",
-  "updatedAt": "2026-11-05T15:49:02.437708678Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

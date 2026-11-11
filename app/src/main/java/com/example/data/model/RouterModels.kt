@@ -1,5 +1,16 @@
 package com.example.data.model
 
+data class CardBatchGroup(
+    val batchKey: String,
+    val title: String,
+    val profile: String,
+    val price: String,
+    val timestamp: Long,
+    val formattedDate: String,
+    val totalValue: Double,
+    val cards: List<HotspotCard>
+)
+
 data class RouterConnectionConfig(
     val id: Long = 0,
     val name: String = "راوتر الشبكة",

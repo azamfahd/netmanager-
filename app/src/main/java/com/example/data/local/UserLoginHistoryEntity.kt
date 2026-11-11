@@ -23,6 +23,7 @@ data class UserLoginHistoryEntity(
     val profile: String = "",
     val price: String = "",
     val terminateReason: String = "جلسة نشطة",
+    val packageLimitBytes: Long = 0L,
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -53,8 +54,8 @@ fun UserLoginHistoryEntity.toUserSessionRecord(): com.example.data.model.UserSes
             category = category
         ),
         nodeName = nodeName,
-        packageLimitBytes = 0L,
-        isQuotaExhausted = terminateReason.contains("الرصيد") || terminateReason.contains("البيانات")
+        packageLimitBytes = packageLimitBytes,
+        isQuotaExhausted = (packageLimitBytes > 0L && totalBytes >= packageLimitBytes) || terminateReason.contains("الرصيد") || terminateReason.contains("البيانات")
     )
 }
 

@@ -239,8 +239,8 @@ object NetworkUtils {
         val mb = kb / 1024.0
         val gb = mb / 1024.0
         return when {
-            gb >= 1.0 -> String.format(Locale.US, "%.2f GB", gb)
-            mb >= 1.0 -> String.format(Locale.US, "%.1f MB", mb)
+            gb >= 2.0 -> String.format(Locale.US, "%.2f GB", gb)
+            mb >= 1.0 -> String.format(Locale.US, "%.0f MB", mb)
             kb >= 1.0 -> String.format(Locale.US, "%.0f KB", kb)
             else -> "$bytes B"
         }
@@ -424,18 +424,18 @@ object NetworkUtils {
         return items
     }
     fun parseSizeToBytes(sizeStr: String): Long {
-        if (sizeStr.isBlank()) return 0L
+        if (sizeStr.isBlank() || sizeStr == "غير محدد" || sizeStr == "مفتوح") return 0L
         val clean = sizeStr.trim().uppercase()
         // If it's a plain number (bytes)
         val plainLong = clean.toLongOrNull()
         if (plainLong != null) return plainLong
 
         return try {
-            val numericPart = clean.filter { it.isDigit() || it == '.' }.toDoubleOrNull() ?: 0.0
+            val numericPart = Regex("""(\d+(?:\.\d+)?)""").find(clean)?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
             val multiplier = when {
-                clean.endsWith("G") || clean.contains("GB") -> 1024L * 1024L * 1024L
-                clean.endsWith("M") || clean.contains("MB") -> 1024L * 1024L
-                clean.endsWith("K") || clean.contains("KB") -> 1024L
+                clean.contains("GB") || clean.endsWith("G") || clean.contains("GI") || clean.contains("جيجا") -> 1024L * 1024L * 1024L
+                clean.contains("MB") || clean.endsWith("M") || clean.contains("MI") || clean.contains("ميجا") -> 1024L * 1024L
+                clean.contains("KB") || clean.endsWith("K") || clean.contains("KI") || clean.contains("كيلو") -> 1024L
                 else -> 1L
             }
             (numericPart * multiplier).toLong()

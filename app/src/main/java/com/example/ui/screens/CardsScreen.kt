@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import com.example.data.model.CardBatchGroup
 import com.example.ui.components.EmptyStateComponent
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -122,7 +123,9 @@ fun CardsScreen(
     onOpenAnalytics: ((String, String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val filteredCards by viewModel.filteredCards.collectAsStateWithLifecycle()
+    val pagedFilteredCards by viewModel.pagedFilteredCards.collectAsStateWithLifecycle()
+    val readyCardGroups by viewModel.readyCardGroups.collectAsStateWithLifecycle()
+    val readyIndividualCards by viewModel.readyIndividualCards.collectAsStateWithLifecycle()
     val allCards by viewModel.cards.collectAsStateWithLifecycle()
     val activeUsers by viewModel.activeUsers.collectAsStateWithLifecycle()
     val userSessions by viewModel.userSessions.collectAsStateWithLifecycle()
@@ -145,26 +148,16 @@ fun CardsScreen(
     var readySortOrder by remember { mutableStateOf(ReadyCardsSortOrder.NEWEST_FIRST) }
     var collapsedBatchKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
 
-    val activeUsernames = remember(activeUsers) { activeUsers.map { it.user }.toSet() }
+    val cardStats by viewModel.cardStats.collectAsStateWithLifecycle()
+    val countActive = cardStats.active
+    val countUnused = cardStats.unused
+    val countExpired = cardStats.expired
+    val countExpiredQuota = cardStats.expiredQuota
+    val countExpiredValidity = cardStats.expiredValidity
+
     val activeUsersMap = remember(activeUsers) { activeUsers.associateBy { it.user.lowercase() } }
     val userSessionsMap = remember(userSessions) { userSessions.associateBy { it.username.lowercase() } }
-    val distinctCards = remember(allCards) { allCards.distinctBy { it.name } }
 
-    val countActive = remember(distinctCards, activeUsernames) {
-        distinctCards.count { activeUsernames.contains(it.name) && !it.isExpired }
-    }
-    val countUnused = remember(distinctCards, activeUsernames) {
-        distinctCards.count { !activeUsernames.contains(it.name) && (it.uptime.isBlank() || it.uptime == "0s") && it.bytesIn == 0L && it.bytesOut == 0L && !it.isExpired }
-    }
-    val countExpired = remember(distinctCards) {
-        distinctCards.count { it.isExpired }
-    }
-    val countExpiredQuota = remember(distinctCards) {
-        distinctCards.count { it.isExpiredQuota }
-    }
-    val countExpiredValidity = remember(distinctCards) {
-        distinctCards.count { it.isExpiredValidity }
-    }
 
     val onCardDetailClick: (HotspotCard) -> Unit = { card ->
         val cardKey = card.name.lowercase()
@@ -340,7 +333,7 @@ fun CardsScreen(
                 FilterChip(
                     selected = currentFilter == CardFilter.ALL,
                     onClick = { viewModel.updateCardFilter(CardFilter.ALL) },
-                    label = { Text("الكل (${distinctCards.size})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    label = { Text("الكل (${cardStats.total})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.height(36.dp)
                 )
@@ -384,7 +377,7 @@ fun CardsScreen(
             Spacer(modifier = Modifier.height(10.dp))
 
             // Cards List
-            if (filteredCards.isEmpty()) {
+            if (pagedFilteredCards.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -408,10 +401,10 @@ fun CardsScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (currentFilter != CardFilter.ALL) {
                                 OutlinedButton(
-                                    onClick = { viewModel.updateCardFilter(CardFilter.ALL) },
+                                onClick = { viewModel.updateCardFilter(CardFilter.ALL) },
                                     shape = RoundedCornerShape(12.dp)
                                 ) {
-                                    Text("عرض كل الكروت (${distinctCards.size})")
+                                    Text("عرض كل الكروت (${cardStats.total})")
                                 }
                             }
                             Button(
@@ -427,90 +420,31 @@ fun CardsScreen(
                 }
             } else if (currentFilter == CardFilter.UNUSED) {
                 // Specialized Ready-to-Sell View: Frame-based organization with Batch & Individual grouping and full tracking
-                val readyCards = remember(distinctCards, activeUsernames, searchQuery) {
-                    distinctCards.filter { card ->
-                        val isUnused = !activeUsernames.contains(card.name) &&
-                                (card.uptime.isBlank() || card.uptime == "0s") &&
-                                card.bytesIn == 0L && card.bytesOut == 0L &&
-                                !card.isExpired
-                        if (!isUnused) return@filter false
-                        if (searchQuery.isBlank()) true
-                        else {
-                            val q = searchQuery.trim().lowercase()
-                            card.name.lowercase().contains(q) ||
-                                    card.profile.lowercase().contains(q) ||
-                                    card.price.lowercase().contains(q) ||
-                                    card.comment.lowercase().contains(q)
-                        }
-                    }
-                }
-
-                val (rawBatchCards, rawIndividualCards) = remember(readyCards) {
-                    readyCards.partition { card ->
-                        val c = card.comment.lowercase()
-                        when {
-                            c.contains("فردي") -> false
-                            c.contains("دفعة") || c.contains("batch") -> true
-                            card.id.startsWith("gen_") -> true
-                            card.comment.isNotBlank() && readyCards.count { it.comment == card.comment } > 1 -> true
-                            else -> false
-                        }
-                    }
-                }
-
-                val batchGroups = remember(rawBatchCards) {
-                    rawBatchCards.groupBy { card ->
-                        when {
-                            card.comment.contains("دفعة") || card.comment.contains("batch") -> card.comment
-                            card.id.startsWith("gen_") -> {
-                                val parts = card.id.split("_")
-                                if (parts.size >= 2) "batch_${parts[1]}_${card.profile}" else card.comment.ifBlank { "دفعة_${card.profile}" }
-                            }
-                            card.comment.isNotBlank() -> card.comment
-                            else -> "batch_${card.profile}_${card.price}"
-                        }
-                    }.map { (key, cardsInBatch) ->
-                        val first = cardsInBatch.first()
-                        val ts = cardsInBatch.maxOfOrNull { extractCardTimestamp(it) } ?: 0L
-                        val formattedDate = if (ts > 0L) NetworkUtils.formatArabicFullDateTime(ts) else "تاريخ محفوظ في الراوتر"
-                        val title = when {
-                            first.comment.isNotBlank() && first.comment != "دفعة كروت" -> first.comment
-                            first.price.isNotBlank() -> "دفعة كروت (${first.profile}) - ${first.price}"
-                            else -> "دفعة كروت (${first.profile})"
-                        }
-                        val totalVal = cardsInBatch.sumOf { parsePriceNumber(it.price) }
-                        CardBatchGroup(
-                            batchKey = key,
-                            title = title,
-                            profile = first.profile,
-                            price = first.price,
-                            timestamp = ts,
-                            formattedDate = formattedDate,
-                            totalValue = totalVal,
-                            cards = cardsInBatch
-                        )
-                    }
-                }
-
-                val sortedBatches = remember(batchGroups, readySortOrder) {
+                // Specialized Ready-to-Sell View: Optimized background grouping and partitioning
+                val sortedBatches: List<CardBatchGroup> = remember(readyCardGroups, readySortOrder) {
                     when (readySortOrder) {
-                        ReadyCardsSortOrder.NEWEST_FIRST -> batchGroups.sortedByDescending { it.timestamp }
-                        ReadyCardsSortOrder.OLDEST_FIRST -> batchGroups.sortedBy { it.timestamp }
-                        ReadyCardsSortOrder.BY_PROFILE -> batchGroups.sortedBy { it.profile }
-                        ReadyCardsSortOrder.BY_PRICE -> batchGroups.sortedByDescending { it.totalValue }
+                        ReadyCardsSortOrder.NEWEST_FIRST -> readyCardGroups.sortedByDescending { it.timestamp }
+                        ReadyCardsSortOrder.OLDEST_FIRST -> readyCardGroups.sortedBy { it.timestamp }
+                        ReadyCardsSortOrder.BY_PROFILE -> readyCardGroups.sortedBy { it.profile }
+                        ReadyCardsSortOrder.BY_PRICE -> readyCardGroups.sortedByDescending { it.totalValue }
                     }
                 }
 
-                val sortedIndividualCards = remember(rawIndividualCards, readySortOrder) {
+                val sortedIndividualCards: List<HotspotCard> = remember(readyIndividualCards, readySortOrder) {
                     when (readySortOrder) {
-                        ReadyCardsSortOrder.NEWEST_FIRST -> rawIndividualCards.sortedByDescending { viewModel.getCardCreationTimestamp(it) }
-                        ReadyCardsSortOrder.OLDEST_FIRST -> rawIndividualCards.sortedBy { viewModel.getCardCreationTimestamp(it) }
-                        ReadyCardsSortOrder.BY_PROFILE -> rawIndividualCards.sortedBy { it.profile }
-                        ReadyCardsSortOrder.BY_PRICE -> rawIndividualCards.sortedByDescending { parsePriceNumber(it.price) }
+                        ReadyCardsSortOrder.NEWEST_FIRST -> readyIndividualCards.sortedByDescending { viewModel.getCardCreationTimestamp(it) }
+                        ReadyCardsSortOrder.OLDEST_FIRST -> readyIndividualCards.sortedBy { viewModel.getCardCreationTimestamp(it) }
+                        ReadyCardsSortOrder.BY_PROFILE -> readyIndividualCards.sortedBy { it.profile }
+                        ReadyCardsSortOrder.BY_PRICE -> readyIndividualCards.sortedByDescending { parsePriceNumber(it.price) }
                     }
                 }
 
-                val totalFinancialVal = remember(readyCards) { readyCards.sumOf { parsePriceNumber(it.price) } }
+                val totalFinancialVal: Double = remember(readyCardGroups, readyIndividualCards) {
+                    readyCardGroups.sumOf { it.totalValue } + readyIndividualCards.sumOf { parsePriceNumber(it.price) }
+                }
+
+                val totalReadyCount = countUnused
+
 
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -519,11 +453,11 @@ fun CardsScreen(
                     // 1. Analytics & Tracking Header Card
                     item {
                         ReadyCardsDashboardCard(
-                            totalReadyCount = readyCards.size,
+                            totalReadyCount = totalReadyCount,
                             totalFinancialValue = totalFinancialVal,
-                            batchesCount = batchGroups.size,
-                            batchCardsCount = rawBatchCards.size,
-                            individualCardsCount = rawIndividualCards.size,
+                            batchesCount = readyCardGroups.size,
+                            batchCardsCount = readyCardGroups.sumOf { it.cards.size },
+                            individualCardsCount = readyIndividualCards.size,
                             currentSubFilter = readySubFilter,
                             onSubFilterSelected = { readySubFilter = it },
                             currentSortOrder = readySortOrder,
@@ -548,7 +482,7 @@ fun CardsScreen(
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Text(
-                                        text = "الدفعات الجماعية المتاحة للبيع (${sortedBatches.size} دفعة - ${rawBatchCards.size} كرت)",
+                                        text = "الدفعات الجماعية المتاحة للبيع (${sortedBatches.size} دفعة - ${readyCardGroups.sumOf { it.cards.size }} كرت)",
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -693,7 +627,7 @@ fun CardsScreen(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(filteredCards, key = { it.id }) { card ->
+                    items(pagedFilteredCards, key = { it.id }) { card ->
                         HotspotCardItem(
                             card = card,
                             creationTimestamp = viewModel.getCardCreationTimestamp(card),
@@ -706,6 +640,24 @@ fun CardsScreen(
                             onDelete = { cardToDelete = card },
                             onVerifyAndActivate = { viewModel.verifyAndActivateCard(card) }
                         )
+                    }
+                    if (pagedFilteredCards.size < cardStats.total) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Button(
+                                    onClick = { viewModel.loadMoreCards() },
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = RouterBlue)
+                                ) {
+                                    Text("تحميل المزيد من الكروت...")
+                                }
+                            }
+                        }
                     }
                     item {
                         Spacer(modifier = Modifier.height(80.dp)) // padding for FAB
@@ -813,24 +765,19 @@ fun CardsScreen(
 
     // Ready Cards Detailed Package Breakdown Dialog
     if (showReadyCardsDetailDialog) {
-        val readyCards = remember(distinctCards, activeUsernames) {
-            distinctCards.filter { card ->
-                !activeUsernames.contains(card.name) &&
-                (card.uptime.isBlank() || card.uptime == "0s") &&
-                card.bytesIn == 0L && card.bytesOut == 0L &&
-                !card.isExpired
-            }
+        val readyCardsForDialog = remember(readyIndividualCards, readyCardGroups) {
+            readyIndividualCards + readyCardGroups.flatMap { it.cards }
         }
         ReadyCardsDetailDialog(
-            readyCards = readyCards,
+            readyCards = readyCardsForDialog,
             onDismiss = { showReadyCardsDetailDialog = false },
-            onPrintCards = { cards ->
-                viewModel.setPrintableCards(cards)
-                showReadyCardsDetailDialog = false
+            onPrintCards = { selectedCards ->
+                viewModel.setPrintableCards(selectedCards)
                 onOpenPrintScreen()
             }
         )
     }
+
 }
 
 @Composable
@@ -1191,16 +1138,7 @@ enum class ReadyCardsSortOrder(val title: String) {
     BY_PRICE("حسب السعر")
 }
 
-data class CardBatchGroup(
-    val batchKey: String,
-    val title: String,
-    val profile: String,
-    val price: String,
-    val timestamp: Long,
-    val formattedDate: String,
-    val totalValue: Double,
-    val cards: List<HotspotCard>
-)
+
 
 fun extractCardTimestamp(card: HotspotCard, viewModel: MainViewModel? = null): Long {
     if (viewModel != null) return viewModel.getCardCreationTimestamp(card)

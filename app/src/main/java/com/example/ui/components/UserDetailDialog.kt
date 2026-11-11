@@ -246,6 +246,81 @@ fun UserDetailDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                // Status Summary Section (Remaining Data/Time)
+                val quotaLimit = subscriberProfile?.quotaLimitBytes ?: session.packageLimitBytes
+                val isExh = subscriberProfile?.isQuotaExhausted ?: session.isQuotaExhausted || (quotaLimit > 0L && lifetimeTotalBytes >= quotaLimit)
+                val remBytes = if (quotaLimit > 0L) (quotaLimit - lifetimeTotalBytes).coerceAtLeast(0L) else 0L
+                val timeRem = subscriberProfile?.timeRemainingFormatted ?: ""
+                
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = (if (isExh) StatusErrorRed else StatusActiveGreen).copy(alpha = 0.08f),
+                    border = BorderStroke(1.dp, (if (isExh) StatusErrorRed else StatusActiveGreen).copy(alpha = 0.3f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background((if (isExh) StatusErrorRed else StatusActiveGreen).copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isExh) Icons.Default.Warning else Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = if (isExh) StatusErrorRed else StatusActiveGreen,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
+                        
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isExh) "الباقة منتهية (استهلاك كامل)" else "الباقة نشطة ومفعلة حالياً",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isExh) StatusErrorRed else StatusActiveGreen
+                            )
+                            val statusDesc = buildString {
+                                if (quotaLimit > 0L) {
+                                    append("المتبقي: ${NetworkUtils.formatBytes(remBytes)}")
+                                    if (timeRem.isNotBlank() && timeRem != "0 ثانية") append(" • $timeRem")
+                                } else {
+                                    append("الباقة مفتوحة غير محدودة")
+                                }
+                            }
+                            Text(
+                                text = statusDesc,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        
+                        if (quotaLimit > 0L) {
+                            val pct = (lifetimeTotalBytes.toFloat() / quotaLimit.toFloat()).coerceIn(0f, 1f)
+                            Box(contentAlignment = Alignment.Center) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    progress = { pct },
+                                    modifier = Modifier.size(40.dp),
+                                    color = if (isExh) StatusErrorRed else StatusActiveGreen,
+                                    strokeWidth = 4.dp,
+                                    trackColor = (if (isExh) StatusErrorRed else StatusActiveGreen).copy(alpha = 0.2f)
+                                )
+                                Text(
+                                    text = "${(pct * 100).toInt()}%",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = if (isExh) StatusErrorRed else StatusActiveGreen
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Quick Sub-tabs
                 Row(
                     modifier = Modifier.fillMaxWidth(),

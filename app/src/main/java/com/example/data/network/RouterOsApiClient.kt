@@ -237,6 +237,13 @@ class RouterOsApiClient {
                         val comment = map["comment"] ?: ""
                         val profile = map["profile"] ?: "default"
                         val parsedPrice = extractPriceFromText(comment, profile, name)
+                        val upUsed = map["bytes-in"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                        val downUsed = map["bytes-out"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                        val totalLimit = map["limit-bytes-total"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                        val outLimit = map["limit-bytes-out"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                        val inLimit = map["limit-bytes-in"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                        val effectiveLimit = if (totalLimit > 0L) totalLimit else if (outLimit > 0L) outLimit else inLimit
+                        
                         list.add(
                             HotspotCard(
                                 id = map[".id"] ?: "c_${list.size}",
@@ -244,10 +251,10 @@ class RouterOsApiClient {
                                 password = map["password"] ?: "",
                                 profile = profile,
                                 uptime = map["uptime"] ?: "0s",
-                                bytesIn = map["bytes-in"]?.toLongOrNull() ?: 0L,
-                                bytesOut = map["bytes-out"]?.toLongOrNull() ?: 0L,
+                                bytesIn = upUsed,
+                                bytesOut = downUsed,
                                 limitUptime = map["limit-uptime"] ?: "",
-                                limitBytesTotal = map["limit-bytes-total"]?.toLongOrNull() ?: 0L,
+                                limitBytesTotal = effectiveLimit,
                                 comment = comment,
                                 disabled = map["disabled"] == "true" || map["disabled"] == "yes",
                                 price = parsedPrice,
@@ -359,10 +366,10 @@ class RouterOsApiClient {
                             val boundLimits = v7ProfileToLimit[name] ?: emptyList()
                             for (bLimitName in boundLimits) {
                                 val lData = v7Limitations[bLimitName] ?: continue
-                                val downLimit = lData["download-limit"]?.toLongOrNull() ?: 0L
-                                val upLimit = lData["upload-limit"]?.toLongOrNull() ?: 0L
-                                val totalLimit = lData["transfer-limit"]?.toLongOrNull()
-                                    ?: lData["total-limit"]?.toLongOrNull()
+                                val downLimit = lData["download-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                                val upLimit = lData["upload-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                                val totalLimit = lData["transfer-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                                    ?: lData["total-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                                     ?: (if (downLimit > 0L || upLimit > 0L) downLimit + upLimit else 0L)
 
                                 if (totalLimit > 0L) {
@@ -453,9 +460,9 @@ class RouterOsApiClient {
                             val boundLimits = v6ProfileToLimit[name] ?: emptyList()
                             for (bLimitName in boundLimits) {
                                 val lData = v6Limitations[bLimitName] ?: continue
-                                val downLimit = lData["download-limit"]?.toLongOrNull() ?: 0L
-                                val upLimit = lData["upload-limit"]?.toLongOrNull() ?: 0L
-                                val transferLimit = lData["transfer-limit"]?.toLongOrNull() ?: 0L
+                                val downLimit = lData["download-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                                val upLimit = lData["upload-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                                val transferLimit = lData["transfer-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                                 val total = if (transferLimit > 0L) transferLimit else (downLimit + upLimit)
                                 if (total > 0L) {
                                     v6DataLimit = formatBytes(total)
@@ -716,14 +723,18 @@ class RouterOsApiClient {
     }
 
     private fun extractDataLimitFromText(name: String, comment: String): String {
-        val combined = "$name $comment"
+        val combined = "$name $comment".lowercase()
         if (combined.isBlank()) return "غير محدد"
-        val match = Regex("""(?i)(\d+(?:\.\d+)?)\s*(GB|MB|GI|MI|G|M|جيجا|ميجا)""").find(combined)
-        if (match != null && match.groupValues.size > 1) {
+        
+        // Match patterns like: 1024MB, 1GB, 500 ميجا, 2 جيجا, 1000m, 500mb
+        val regex = Regex("""(\d+(?:\.\d+)?)\s*(gb|mb|gi|mi|g|m|جيجا|ميجا)""")
+        val match = regex.find(combined)
+        
+        if (match != null && match.groupValues.size > 2) {
             val num = match.groupValues[1]
-            val unit = match.groupValues[2].uppercase()
+            val unit = match.groupValues[2]
             val normalizedUnit = when {
-                unit.startsWith("G") || unit.contains("جيجا") -> "GB"
+                unit.startsWith("g") || unit.contains("جيجا") -> "GB"
                 else -> "MB"
             }
             return "$num $normalizedUnit"
@@ -965,7 +976,9 @@ class RouterOsApiClient {
                             if (primary.isSuccess) primary else executeRemoval("/user-manager/user/remove", "=numbers=$targetName")
                         }
                         CardTargetSystem.USER_MANAGER_V6 -> {
-                            executeRemoval("/tool/user-manager/user/remove", "=numbers=$targetName")
+                            val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=$targetName"
+                            val primary = executeRemoval("/tool/user-manager/user/remove", idParam)
+                            if (primary.isSuccess) primary else executeRemoval("/tool/user-manager/user/remove", "=numbers=$targetName")
                         }
                     }
                     if (res.isSuccess) return@withContext res
@@ -1042,7 +1055,8 @@ class RouterOsApiClient {
                         return@withContext executeSet("/user-manager/user/set", idParam)
                     }
                     CardTargetSystem.USER_MANAGER_V6 -> {
-                        return@withContext executeSet("/tool/user-manager/user/set", "=numbers=$targetName")
+                        val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=$targetName"
+                        return@withContext executeSet("/tool/user-manager/user/set", idParam)
                     }
                 }
             } catch (e: Exception) {
@@ -1092,17 +1106,18 @@ class RouterOsApiClient {
                     else -> synchronized(cachedProfiles) {
                         if (cachedProfiles.any { it.isUserManager } && cachedProfiles.none { it.isHotspot }) true
                         else if (cachedProfiles.any { it.isHotspot } && cachedProfiles.none { it.isUserManager }) false
-                        else true
+                        else false
                     }
                 }
 
                 // 1. User Manager system
                 if (shouldBeUserManager) {
-                    if (profileName.isNotBlank() && !profileName.equals("default", ignoreCase = true)) {
-                        ensureUserManagerProfileExists(profileName, targetProfile)
+                    val isV6 = targetProfile?.source == "usermanager_v6" || profileSource == "usermanager_v6"
+                    val profileAlreadyExists = targetProfile != null && targetProfile.name.trim().equals(profileName, ignoreCase = true)
+                    if (!profileAlreadyExists && profileName.isNotBlank() && !profileName.equals("default", ignoreCase = true)) {
+                        ensureUserManagerProfileExists(profileName, targetProfile, isV6 = isV6)
                     }
 
-                    val isV6 = targetProfile?.source == "usermanager_v6" || profileSource == "usermanager_v6"
                     val umResult = if (isV6) {
                         val customer = targetProfile?.comment?.takeIf { it.isNotBlank() } ?: "admin"
                         addUserManagerV6User(card, customer)
@@ -1114,8 +1129,9 @@ class RouterOsApiClient {
                         return@withContext umResult
                     } else {
                         val umError = umResult.exceptionOrNull()?.message ?: "فشل إنشاء كرت يوزرمانجر"
-                        // Intelligent fallback: If router does not have user-manager package installed ("no such command"), try Hotspot
-                        if (umError.contains("no such command", ignoreCase = true) || umError.contains("no such", ignoreCase = true)) {
+                        // Intelligent fallback: If router does not have user-manager package installed ("no such command") or user preferred hotspot
+                        if (umError.contains("no such command", ignoreCase = true) || umError.contains("no such", ignoreCase = true) ||
+                            (preferredSystem == "hotspot" || card.isHotspotCard)) {
                             if (profileName.isNotBlank() && !profileName.equals("default", ignoreCase = true)) {
                                 ensureHotspotProfileExists(profileName, targetProfile)
                             }
@@ -1188,29 +1204,32 @@ class RouterOsApiClient {
         } catch (_: Exception) {}
     }
 
-    private fun ensureUserManagerProfileExists(profileName: String, targetProfile: HotspotProfile?) {
-        try {
-            // Check v7
-            val v7Sentences = executeSentence(listOf("/user-manager/profile/print", "?name=$profileName"))
-            if (v7Sentences.none { it.firstOrNull() == "!re" }) {
-                val v7Words = mutableListOf("/user-manager/profile/add", "=name=$profileName")
-                val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
-                v7Words.add("=validity=$valTime")
-                val priceNum = targetProfile?.priceNumber?.takeIf { it > 0 } ?: 0.0
-                if (priceNum > 0) v7Words.add("=price=${priceNum.toInt()}")
-                executeSentence(v7Words)
-            }
-        } catch (_: Exception) {}
-        try {
-            // Check v6
-            val v6Sentences = executeSentence(listOf("/tool/user-manager/profile/print", "?name=$profileName"))
-            if (v6Sentences.none { it.firstOrNull() == "!re" }) {
-                val v6Words = mutableListOf("/tool/user-manager/profile/add", "=name=$profileName", "=customer=admin")
-                val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
-                v6Words.add("=validity=$valTime")
-                executeSentence(v6Words)
-            }
-        } catch (_: Exception) {}
+    private fun ensureUserManagerProfileExists(profileName: String, targetProfile: HotspotProfile?, isV6: Boolean = false) {
+        if (isV6) {
+            try {
+                // Check v6 only
+                val v6Sentences = executeSentence(listOf("/tool/user-manager/profile/print", "?name=$profileName"))
+                if (v6Sentences.none { it.firstOrNull() == "!re" }) {
+                    val v6Words = mutableListOf("/tool/user-manager/profile/add", "=name=$profileName", "=customer=admin")
+                    val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
+                    v6Words.add("=validity=$valTime")
+                    executeSentence(v6Words)
+                }
+            } catch (_: Exception) {}
+        } else {
+            try {
+                // Check v7 only
+                val v7Sentences = executeSentence(listOf("/user-manager/profile/print", "?name=$profileName"))
+                if (v7Sentences.none { it.firstOrNull() == "!re" }) {
+                    val v7Words = mutableListOf("/user-manager/profile/add", "=name=$profileName")
+                    val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
+                    v7Words.add("=validity=$valTime")
+                    val priceNum = targetProfile?.priceNumber?.takeIf { it > 0 } ?: 0.0
+                    if (priceNum > 0) v7Words.add("=price=${priceNum.toInt()}")
+                    executeSentence(v7Words)
+                }
+            } catch (_: Exception) {}
+        }
     }
 
     private fun addHotspotNativeUser(card: HotspotCard): Result<Boolean> {
@@ -1309,11 +1328,21 @@ class RouterOsApiClient {
         val startTime = System.currentTimeMillis()
 
         try {
-            // Stage 1: Pre-check if user already exists on UM v7
+            // Stage 1: Pre-check if user already exists on UM v7 & extract internalId
+            var internalId: String? = null
             var userExists = false
             try {
                 val printExisting = executeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
-                userExists = printExisting.any { it.firstOrNull() == "!re" }
+                for (s in printExisting) {
+                    if (s.firstOrNull() == "!re") {
+                        userExists = true
+                        val idVal = s.firstOrNull { it.startsWith("=.id=") }?.removePrefix("=.id=")
+                        if (!idVal.isNullOrBlank()) {
+                            internalId = idVal
+                            break
+                        }
+                    }
+                }
             } catch (_: Exception) {}
 
             // Stage 2: Create user if not already present
@@ -1340,11 +1369,15 @@ class RouterOsApiClient {
                         return Result.failure(Exception("خطأ الراوتر في إنشاء المستخدم: $msg"))
                     }
                 }
+                val doneSentence = addSentences.firstOrNull { it.firstOrNull() == "!done" }
+                val retId = doneSentence?.firstOrNull { it.startsWith("=ret=") }?.removePrefix("=ret=")
+                if (!retId.isNullOrBlank()) {
+                    internalId = retId
+                }
             }
 
             // Stage 3: Bind and verify User-Profile in UM v7
             if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
-                // Check if profile is already assigned
                 var profileAlreadyBound = false
                 try {
                     val existingProfSentences = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
@@ -1365,27 +1398,22 @@ class RouterOsApiClient {
                         val profMsg = profTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                             ?: "فشل ربط المستخدم بالباقة في يوزرمانجر"
                         
-                        // Check if it failed because already bound
                         if (!profMsg.contains("already", ignoreCase = true)) {
-                            // Recovery check: did the user-profile actually get added before timeout/trap?
                             val recheck = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
                             val verified = recheck.any { it.firstOrNull() == "!re" }
                             if (!verified) {
-                                return Result.failure(Exception("تم إنشاء المستخدم $cardName ولكن تعذر ربط الباقة ($cleanProfile): $profMsg. يرجى إعادة محاولة تعيين الباقة."))
+                                return Result.failure(Exception("تم إنشاء المستخدم $cardName ولكن تعذر ربط الباقة ($cleanProfile): $profMsg"))
                             }
                         }
                     }
                 }
             }
 
-            // Stage 4: Ensure User is active & enabled
-            executeSentence(listOf("/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
-
-            // Stage 5: Final Verification in Router
-            val finalCheck = executeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
-            val isConfirmed = finalCheck.any { it.firstOrNull() == "!re" }
-            if (!isConfirmed) {
-                return Result.failure(Exception("لم يؤكد الراوتر حفظ الكرت $cardName في يوزرمانجر"))
+            // Stage 4: Ensure User is active & enabled (only if user existed and had internalId)
+            if (userExists && !internalId.isNullOrBlank()) {
+                try {
+                    executeSentence(listOf("/user-manager/user/set", "=numbers=$internalId", "=disabled=no"))
+                } catch (_: Exception) {}
             }
 
             return Result.success(true)
@@ -1393,26 +1421,25 @@ class RouterOsApiClient {
             val duration = System.currentTimeMillis() - startTime
             val rawMsg = e.message ?: e.localizedMessage ?: "Timeout"
             
-            // Intelligent Reconciliation after Timeout/Socket error:
-            // Check if the user was actually created on the router despite the read timeout!
+            // Reconciliation check
             try {
                 if (ensureConnectedInternal()) {
                     val checkUser = executeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
                     if (checkUser.any { it.firstOrNull() == "!re" }) {
-                        // User exists! Now verify or repair profile binding
                         if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
-                            val checkProf = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
-                            if (checkProf.none { it.firstOrNull() == "!re" }) {
-                                executeSentence(listOf("/user-manager/user-profile/add", "=user=$cardName", "=profile=$cleanProfile"))
-                            }
+                            try {
+                                val checkProf = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
+                                if (checkProf.none { it.firstOrNull() == "!re" }) {
+                                    executeSentence(listOf("/user-manager/user-profile/add", "=user=$cardName", "=profile=$cleanProfile"))
+                                }
+                            } catch (_: Exception) {}
                         }
-                        executeSentence(listOf("/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
                         return Result.success(true)
                     }
                 }
             } catch (_: Exception) {}
 
-            return Result.failure(Exception("استغرقت العملية ($duration ms) مع الراوتر: $rawMsg. تم فحص السيرفر لمنع تكرار الكرت."))
+            return Result.failure(Exception("استغرقت العملية ($duration ms) مع الراوتر: $rawMsg."))
         }
     }
 
@@ -1423,15 +1450,25 @@ class RouterOsApiClient {
         val startTime = System.currentTimeMillis()
 
         try {
-            // Stage 1: Pre-check if user already exists on UM v6
-            var userExists = false
+            // Stage 1: Pre-check if user already exists on UM v6 & extract internalId (.id)
+            var internalId: String? = null
+            var userAlreadyExists = false
             try {
                 val checkV6 = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
-                userExists = checkV6.any { it.firstOrNull() == "!re" }
+                for (s in checkV6) {
+                    if (s.firstOrNull() == "!re") {
+                        userAlreadyExists = true
+                        val idVal = s.firstOrNull { it.startsWith("=.id=") }?.removePrefix("=.id=")
+                        if (!idVal.isNullOrBlank()) {
+                            internalId = idVal
+                            break
+                        }
+                    }
+                }
             } catch (_: Exception) {}
 
-            // Stage 2: Add user in User Manager v6
-            if (!userExists) {
+            // Stage 2: Add user in User Manager v6 if not present
+            if (!userAlreadyExists) {
                 val words = mutableListOf(
                     "/tool/user-manager/user/add",
                     "=username=$cardName",
@@ -1452,67 +1489,128 @@ class RouterOsApiClient {
                         return Result.failure(Exception("خطأ الراوتر في إنشاء المستخدم: $msg"))
                     }
                 }
+                val doneSentence = addSentences.firstOrNull { it.firstOrNull() == "!done" }
+                val retId = doneSentence?.firstOrNull { it.startsWith("=ret=") }?.removePrefix("=ret=")
+                if (!retId.isNullOrBlank()) {
+                    internalId = retId
+                }
+            }
+
+            // Ensure we have the internalId if missing
+            if (internalId.isNullOrBlank()) {
+                try {
+                    val reCheck = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
+                    for (s in reCheck) {
+                        if (s.firstOrNull() == "!re") {
+                            val idVal = s.firstOrNull { it.startsWith("=.id=") }?.removePrefix("=.id=")
+                            if (!idVal.isNullOrBlank()) {
+                                internalId = idVal
+                                break
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
             }
 
             // Stage 3: Assign & activate profile in UM v6
             if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
-                val actWords = listOf(
-                    "/tool/user-manager/user/create-and-activate-profile",
-                    "=numbers=$cardName",
-                    "=profile=$cleanProfile",
-                    "=customer=$cust"
-                )
-                val actSentences = executeSentence(actWords)
-                val actTrap = actSentences.firstOrNull { it.firstOrNull() == "!trap" }
-                val actDone = actSentences.any { it.firstOrNull() == "!done" }
-                var profileAssigned = (actTrap == null && actDone)
+                var profileAssigned = false
 
+                // Method A: Direct user-profile/add (Fastest and safest in RouterOS v6, binds by username without numbers ambiguity)
+                try {
+                    val userProfWords = listOf(
+                        "/tool/user-manager/user-profile/add",
+                        "=user=$cardName",
+                        "=profile=$cleanProfile"
+                    )
+                    val profSentences = executeSentence(userProfWords)
+                    val profTrap = profSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                    val profDone = profSentences.any { it.firstOrNull() == "!done" }
+                    if (profDone && profTrap == null) {
+                        profileAssigned = true
+                    }
+                } catch (_: Exception) {}
+
+                // Method B: create-and-activate-profile using internal .id pointer (e.g. *1F)
+                if (!profileAssigned && !internalId.isNullOrBlank()) {
+                    try {
+                        val actWords = mutableListOf(
+                            "/tool/user-manager/user/create-and-activate-profile",
+                            "=numbers=$internalId",
+                            "=profile=$cleanProfile"
+                        )
+                        if (cust.isNotBlank()) {
+                            actWords.add("=customer=$cust")
+                        }
+                        val actSentences = executeSentence(actWords)
+                        val actTrap = actSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                        val actDone = actSentences.any { it.firstOrNull() == "!done" }
+                        if (actDone && actTrap == null) {
+                            profileAssigned = true
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // Method C: create-and-activate-profile without customer argument
+                if (!profileAssigned && !internalId.isNullOrBlank()) {
+                    try {
+                        val actWords = listOf(
+                            "/tool/user-manager/user/create-and-activate-profile",
+                            "=numbers=$internalId",
+                            "=profile=$cleanProfile"
+                        )
+                        val actSentences = executeSentence(actWords)
+                        val actTrap = actSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                        val actDone = actSentences.any { it.firstOrNull() == "!done" }
+                        if (actDone && actTrap == null) {
+                            profileAssigned = true
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // Method D: Verify if profile is bound or active
                 if (!profileAssigned) {
-                    val setSentences = executeSentence(listOf(
-                        "/tool/user-manager/user/set",
-                        "=numbers=$cardName",
-                        "=actual-profile=$cleanProfile",
-                        "=disabled=no"
-                    ))
-                    val setTrap = setSentences.firstOrNull { it.firstOrNull() == "!trap" }
-                    val setDone = setSentences.any { it.firstOrNull() == "!done" }
-                    profileAssigned = (setTrap == null && setDone)
+                    try {
+                        val checkProf = executeSentence(listOf("/tool/user-manager/user-profile/print", "?user=$cardName"))
+                        if (checkProf.any { it.firstOrNull() == "!re" }) {
+                            profileAssigned = true
+                        }
+                    } catch (_: Exception) {}
                 }
 
                 if (!profileAssigned) {
-                    val errMsg = actTrap?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
-                        ?: "فشل تعيين وتفعيل الباقة في User Manager v6"
-                    
-                    // Recheck if profile is set despite the trap/warning
-                    val v6Check = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
-                    val hasProfile = v6Check.any { s -> s.firstOrNull() == "!re" && s.any { it.contains(cleanProfile, ignoreCase = true) } }
-                    if (!hasProfile) {
-                        return Result.failure(Exception("تم إنشاء المستخدم $cardName ولكن تعذر تفعيل باقة v6 ($cleanProfile): $errMsg"))
-                    }
+                    return Result.failure(Exception("تم إنشاء المستخدم $cardName ولكن تعذر ربط وتفعيل باقة v6 ($cleanProfile)"))
                 }
             }
 
-            // Stage 4: Ensure active and enabled
-            executeSentence(listOf("/tool/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
+            // Stage 4: Ensure active and enabled (only if previously existed or using internalId)
+            if (userAlreadyExists && !internalId.isNullOrBlank()) {
+                try {
+                    executeSentence(listOf("/tool/user-manager/user/set", "=numbers=$internalId", "=disabled=no"))
+                } catch (_: Exception) {}
+            }
+
             return Result.success(true)
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
             val rawMsg = e.message ?: e.localizedMessage ?: "Timeout"
 
-            // Intelligent Reconciliation after Timeout/Socket error on v6
+            // Non-blocking Reconciliation
             try {
                 if (ensureConnectedInternal()) {
                     val checkV6 = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
-                    if (checkV6.any { it.firstOrNull() == "!re" }) {
+                    val userRec = checkV6.firstOrNull { it.firstOrNull() == "!re" }
+                    if (userRec != null) {
+                        // User exists on the router! Fast profile assignment
                         if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
-                            executeSentence(listOf(
-                                "/tool/user-manager/user/create-and-activate-profile",
-                                "=numbers=$cardName",
-                                "=profile=$cleanProfile",
-                                "=customer=$cust"
-                            ))
+                            try {
+                                executeSentence(listOf(
+                                    "/tool/user-manager/user-profile/add",
+                                    "=user=$cardName",
+                                    "=profile=$cleanProfile"
+                                ))
+                            } catch (_: Exception) {}
                         }
-                        executeSentence(listOf("/tool/user-manager/user/set", "=numbers=$cardName", "=disabled=no"))
                         return Result.success(true)
                     }
                 }
@@ -2243,6 +2341,19 @@ class RouterOsApiClient {
                             val comment = map["comment"] ?: ""
                             val profile = map["profile"] ?: map["actual-profile"] ?: "UserManager"
                             val price = extractPriceFromText(comment, profile, name)
+                            
+                            // MikroTik User Manager v6:
+                            // download-used = Router to Client (Download) -> bytesOut
+                            // upload-used = Client to Router (Upload) -> bytesIn
+                            val downUsed = map["download-used"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                            val upUsed = map["upload-used"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                            
+                            val downLimit = map["download-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                            val totalLimit = map["total-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                            val transLimit = map["transfer-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
+                            
+                            val bestLimit = if (totalLimit > 0L) totalLimit else if (transLimit > 0L) transLimit else downLimit
+
                             list.add(
                                 HotspotCard(
                                     id = map[".id"] ?: "um_${list.size}",
@@ -2250,10 +2361,10 @@ class RouterOsApiClient {
                                     password = map["password"] ?: "",
                                     profile = profile,
                                     uptime = map["uptime"] ?: map["till-time"] ?: "0s",
-                                    bytesIn = map["download-used"]?.toLongOrNull() ?: 0L,
-                                    bytesOut = map["upload-used"]?.toLongOrNull() ?: 0L,
+                                    bytesIn = upUsed,
+                                    bytesOut = downUsed,
                                     limitUptime = map["time-limit"] ?: "",
-                                    limitBytesTotal = map["download-limit"]?.toLongOrNull() ?: 0L,
+                                    limitBytesTotal = bestLimit,
                                     comment = comment,
                                     disabled = map["disabled"] == "true" || map["disabled"] == "yes",
                                     price = price,

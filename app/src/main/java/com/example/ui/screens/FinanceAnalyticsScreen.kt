@@ -90,6 +90,7 @@ fun FinanceAnalyticsScreen(
 
     var selectedTab by remember { mutableStateOf(FinanceTab.OVERVIEW) }
     var selectedMonthKey by remember { mutableStateOf<String?>(null) }
+    var pkgToEditPrice by remember { mutableStateOf<DetailedPackageProfitStat?>(null) }
     
     // Filter mode: null means "Last 6 Months" (default), otherwise a specific year string
     var activeYearFilter by remember { mutableStateOf<String?>(null) }
@@ -119,6 +120,19 @@ fun FinanceAnalyticsScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
+        // Global Pricing Dialog
+        if (pkgToEditPrice != null) {
+            PackagePricingDialog(
+                profileName = pkgToEditPrice!!.profileName,
+                initialSalePrice = pkgToEditPrice!!.salePrice,
+                initialCostPrice = pkgToEditPrice!!.costPrice,
+                onDismiss = { pkgToEditPrice = null },
+                onSave = { sale, cost ->
+                    viewModel.savePackagePricing(pkgToEditPrice!!.profileName, sale, cost)
+                }
+            )
+        }
+
         // Top Header Bar
         Surface(
             color = MaterialTheme.colorScheme.surface,
@@ -349,7 +363,8 @@ fun FinanceAnalyticsScreen(
                     items(packageStats, key = { it.profileName }) { pkg ->
                         PackageProfitDetailCard(
                             pkg = pkg,
-                            currencyFormat = currencyFormat
+                            currencyFormat = currencyFormat,
+                            onEditPrice = { pkgToEditPrice = pkg }
                         )
                     }
                 }
@@ -1039,9 +1054,74 @@ private fun PackageProfitQuickSection(
 }
 
 @Composable
+private fun PackagePricingDialog(
+    profileName: String,
+    initialSalePrice: Double,
+    initialCostPrice: Double,
+    onDismiss: () -> Unit,
+    onSave: (Double, Double) -> Unit
+) {
+    var salePriceInput by remember { mutableStateOf(if (initialSalePrice > 0) initialSalePrice.toInt().toString() else "") }
+    var costPriceInput by remember { mutableStateOf(if (initialCostPrice > 0) initialCostPrice.toInt().toString() else "") }
+
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text("ضبط أسعار باقة: $profileName", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                
+                androidx.compose.material3.OutlinedTextField(
+                    value = salePriceInput,
+                    onValueChange = { if (it.all { c -> c.isDigit() }) salePriceInput = it },
+                    label = { Text("سعر البيع للجمهور (ر.ي)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
+                )
+
+                androidx.compose.material3.OutlinedTextField(
+                    value = costPriceInput,
+                    onValueChange = { if (it.all { c -> c.isDigit() }) costPriceInput = it },
+                    label = { Text("تكلفة الكرت الواحد (ر.ي)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    androidx.compose.material3.TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
+                        Text("إلغاء")
+                    }
+                    androidx.compose.material3.Button(
+                        onClick = {
+                            val sale = salePriceInput.toDoubleOrNull() ?: 0.0
+                            val cost = costPriceInput.toDoubleOrNull() ?: 0.0
+                            onSave(sale, cost)
+                            onDismiss()
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("حفظ")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PackageProfitDetailCard(
     pkg: DetailedPackageProfitStat,
-    currencyFormat: NumberFormat
+    currencyFormat: NumberFormat,
+    onEditPrice: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1055,21 +1135,32 @@ private fun PackageProfitDetailCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(pkg.profileName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    Text("سعر البيع: ${currencyFormat.format(pkg.salePrice)} ر.ي | التكلفة: ${currencyFormat.format(pkg.costPrice)} ر.ي", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (pkg.salePrice > 0) {
+                        Text("سعر البيع: ${currencyFormat.format(pkg.salePrice)} ر.ي | التكلفة: ${currencyFormat.format(pkg.costPrice)} ر.ي", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        Text("⚠️ السعر غير محدد - يرجى ضبط الأسعار", style = MaterialTheme.typography.labelSmall, color = StatusErrorRed, fontWeight = FontWeight.Bold)
+                    }
                 }
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = StatusActiveGreen.copy(alpha = 0.15f)
-                ) {
-                    Text(
-                        text = "هامش ${pkg.profitMarginPercent.toInt()}%",
-                        color = StatusActiveGreen,
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
+                
+                IconButton(onClick = onEditPrice) {
+                    Icon(Icons.Default.Timeline, contentDescription = "تعديل الأسعار", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                }
+                
+                if (pkg.salePrice > 0) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = StatusActiveGreen.copy(alpha = 0.15f)
+                    ) {
+                        Text(
+                            text = "هامش ${pkg.profitMarginPercent.toInt()}%",
+                            color = StatusActiveGreen,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
                 }
             }
 
