@@ -475,6 +475,7 @@ fun MainPagerContent(
                     onNavigateToActiveUsers = { scope.launch { pagerState.animateScrollToPage(MainTab.ACTIVE_USERS.ordinal) } },
                     onNavigateToCards = { scope.launch { pagerState.animateScrollToPage(MainTab.CARDS.ordinal) } },
                     onNavigateToProfiles = { scope.launch { pagerState.animateScrollToPage(MainTab.PROFILES.ordinal) } },
+                    onNavigateToNodes = { scope.launch { pagerState.animateScrollToPage(MainTab.NODES.ordinal) } },
                     onOpenBatchGenerator = { onOpenBatchGenerator(0L) },
                     onOpenPrintScreen = {
                         onOpenPrintScreen(viewModel.cards.value)
