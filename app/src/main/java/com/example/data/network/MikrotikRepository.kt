@@ -1080,15 +1080,43 @@ class MikrotikRepository(
                 }
             }
 
-            // 2. Fetch Network Nodes infrastructure
+            // 2. Fetch Network Nodes infrastructure & Interface traffic stats
+            val interfaceStatsRes = routerOsApiClient.getInterfaceStats()
+            if (interfaceStatsRes.isSuccess) {
+                val ifList = interfaceStatsRes.getOrThrow()
+                if (ifList.isNotEmpty()) {
+                    _interfaceStats.value = ifList
+                    calculateAndUpdateLiveTrafficSpeeds(ifList)
+                }
+            }
+
             val bridgeHosts = routerOsApiClient.getBridgeHosts().getOrDefault(emptyList())
+            val hotspotHosts = routerOsApiClient.getHotspotHosts().getOrDefault(emptyList())
             val wirelessRegs = routerOsApiClient.getWirelessRegistrations().getOrDefault(emptyList())
             val ipAddressesList = routerOsApiClient.getRouterAddresses().getOrDefault(emptyList())
             val wirelessList = routerOsApiClient.getWirelessInterfaces().getOrDefault(emptyList())
+            val vlanList = routerOsApiClient.getVlanInterfaces().getOrDefault(emptyList())
             val neighborsList = routerOsApiClient.getDiscoveredNeighbors().getOrDefault(emptyList()).toMutableList()
+
+            // Map each user's MAC address to their connected physical or virtual interface
+            val socketMacToInterface = mutableMapOf<String, String>()
+            bridgeHosts.forEach { hostMap ->
+                val mac = (hostMap["mac-address"] ?: "").uppercase().trim()
+                val onIf = hostMap["on-interface"] ?: hostMap["interface"] ?: ""
+                if (mac.isNotBlank() && onIf.isNotBlank()) {
+                    socketMacToInterface[mac] = onIf
+                }
+            }
+            hotspotHosts.forEach { hostMap ->
+                val mac = (hostMap["mac-address"] ?: "").uppercase().trim()
+                val onIf = hostMap["interface"] ?: hostMap["bridge-port"] ?: ""
+                if (mac.isNotBlank() && onIf.isNotBlank()) {
+                    socketMacToInterface[mac] = onIf
+                }
+            }
             
-            // Re-sync sessions and topology with full network context
-            activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, emptyMap(), wirelessRegs, emptyList(), ipAddressesList) }
+            // Re-sync sessions and topology with full network context and exact client-to-node mapping
+            activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, socketMacToInterface, wirelessRegs, vlanList, ipAddressesList) }
 
             // 3. Fetch Logs (Limit for performance)
             routerOsApiClient.getSystemLogs(limit = 60).getOrNull()?.let { _systemLogs.value = it }
@@ -2569,6 +2597,78 @@ class MikrotikRepository(
         }
     }
 
+    /**
+     * Periodically queries live network interface statistics to calculate continuous Rx/Tx network speed
+     * in Kbps without performing a full sync.
+     */
+     suspend fun pollLiveTrafficSpeeds(): Result<Unit> {
+         val config = activeConfig ?: return Result.failure(Exception("لم يتم ضبط إعدادات الاتصال"))
+         if (config.isDemoMode) {
+             val current = _resourceState.value
+             val newRx = (current.rxSpeedKbps + Random.nextDouble(-400.0, 500.0)).coerceAtLeast(350.0)
+             val newTx = (current.txSpeedKbps + Random.nextDouble(-200.0, 300.0)).coerceAtLeast(180.0)
+             _resourceState.value = current.copy(
+                 rxSpeedKbps = newRx,
+                 txSpeedKbps = newTx
+             )
+             recordBandwidthPoint(newRx, newTx)
+             return Result.success(Unit)
+         }
+
+         return withContext(Dispatchers.IO) {
+             try {
+                 if (isApiSocketMode) {
+                     val ifRes = routerOsApiClient.getInterfaceStats()
+                     if (ifRes.isSuccess) {
+                         val ifList = ifRes.getOrThrow()
+                         if (ifList.isNotEmpty()) {
+                             _interfaceStats.value = ifList
+                             calculateAndUpdateLiveTrafficSpeeds(ifList)
+                         }
+                     }
+                 } else {
+                     val protocol = if (config.useHttps) "https" else "http"
+                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                     val credential = Credentials.basic(config.username, config.password)
+                     val ifReq = Request.Builder()
+                         .url("$baseUrl/rest/interface?.proplist=.id,name,type,mac-address,rx-byte,tx-byte,rx-packet,tx-packet,running,disabled,comment")
+                         .header("Authorization", credential)
+                         .build()
+                     val ifResp = httpClient.newCall(ifReq).execute()
+                     if (ifResp.isSuccessful) {
+                         val ifArr = JSONArray(ifResp.body?.string() ?: "[]")
+                         val ifList = mutableListOf<com.example.data.model.InterfaceStats>()
+                         for (i in 0 until ifArr.length()) {
+                             val o = ifArr.getJSONObject(i)
+                             ifList.add(
+                                 com.example.data.model.InterfaceStats(
+                                     id = o.optString(".id", "if$i"),
+                                     name = o.optString("name", "ether${i + 1}"),
+                                     type = o.optString("type", "ether"),
+                                     macAddress = o.optString("mac-address", ""),
+                                     rxBytes = o.optLong("rx-byte", 0L),
+                                     txBytes = o.optLong("tx-byte", 0L),
+                                     rxPackets = o.optLong("rx-packet", 0L),
+                                     txPackets = o.optLong("tx-packet", 0L),
+                                     isRunning = o.optBoolean("running", true),
+                                     disabled = o.optBoolean("disabled", false),
+                                     comment = o.optString("comment", "")
+                                 )
+                             )
+                         }
+                         if (ifList.isNotEmpty()) {
+                             _interfaceStats.value = ifList
+                             calculateAndUpdateLiveTrafficSpeeds(ifList)
+                         }
+                     }
+                 }
+                 Result.success(Unit)
+             } catch (e: Exception) {
+                 Result.failure(e)
+             }
+         }
+     }
+
     suspend fun refreshCardsFromRouter() {
         val config = activeConfig ?: return
         if (config.isDemoMode) return
@@ -2587,7 +2687,22 @@ class MikrotikRepository(
                             combinedCards.add(umCard)
                         }
                     }
-                    val distinctCards = combinedCards.distinctBy { it.name }
+                    val currentInMemory = _cards.value.associateBy { it.name }
+                    val mergedCards = mutableListOf<HotspotCard>()
+                    val processedNames = mutableSetOf<String>()
+
+                    for (c in combinedCards) {
+                        mergedCards.add(c)
+                        processedNames.add(c.name)
+                    }
+                    // Keep recent in-memory cards that router might not have returned immediately
+                    for ((name, card) in currentInMemory) {
+                        if (!processedNames.contains(name)) {
+                            mergedCards.add(card)
+                        }
+                    }
+
+                    val distinctCards = mergedCards.distinctBy { it.name }
                     val sortedCards = sortCardsByNewestFirst(distinctCards)
                     if (sortedCards.isNotEmpty()) {
                         _cards.value = sortedCards
@@ -2670,7 +2785,21 @@ class MikrotikRepository(
                         }
                     } catch (_: Exception) {}
 
-                    val sortedCards = sortCardsByNewestFirst(cardList.distinctBy { it.name })
+                    val currentInMemory = _cards.value.associateBy { it.name }
+                    val mergedList = mutableListOf<HotspotCard>()
+                    val processedNames = mutableSetOf<String>()
+
+                    for (c in cardList) {
+                        mergedList.add(c)
+                        processedNames.add(c.name)
+                    }
+                    for ((name, card) in currentInMemory) {
+                        if (!processedNames.contains(name)) {
+                            mergedList.add(card)
+                        }
+                    }
+
+                    val sortedCards = sortCardsByNewestFirst(mergedList.distinctBy { it.name })
                     if (sortedCards.isNotEmpty()) {
                         _cards.value = sortedCards
                         syncCardsToRoom(sortedCards)

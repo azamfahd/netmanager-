@@ -141,6 +141,21 @@ fun NetworkNodesScreen(
     val homeCount = allNodes.count { it.nodeType == NetworkNodeType.HOME_NODE }
 
     val displayedNodes = nodes
+    var topologyFilterOnlyWithUsers by remember { mutableStateOf(true) }
+
+    val displayedTopologyNodes = remember(displayedNodes, topologyFilterOnlyWithUsers) {
+        if (!topologyFilterOnlyWithUsers) {
+            displayedNodes
+        } else {
+            // Smart filter: Keep main towers + nodes with active users or active traffic, fallback to all if none
+            val filtered = displayedNodes.filter { node ->
+                node.nodeType == NetworkNodeType.MAIN_TOWER ||
+                node.connectedUsers > 0 ||
+                (node.isOnline && (node.rxSpeedKbps + node.txSpeedKbps > 10.0))
+            }
+            if (filtered.isNotEmpty()) filtered else displayedNodes
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -569,12 +584,20 @@ fun NetworkNodesScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(
-                                        text = "🌐 خريطة وتخطيط الشبكة السيبرانية (${displayedNodes.size} نقطة)",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
+                                    Column {
+                                        Text(
+                                            text = "🌐 خريطة وتخطيط الشبكة السيبرانية (${displayedTopologyNodes.size} نقطة)",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = if (topologyFilterOnlyWithUsers) "عرض الأبراج ونقاط التوزيع النشطة وبها مستخدمين" else "عرض كامل النقاط المكتشفة",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
 
                                     Button(
                                         onClick = { showFullScreenTopology = true },
@@ -593,11 +616,59 @@ fun NetworkNodesScreen(
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "تكبير ملء الشاشة ⛶",
+                                            text = "تكبير ⛶",
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 11.sp
                                         )
                                     }
+                                }
+
+                                // Quick filter toggles for Cyber Topology
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    FilterChip(
+                                        selected = topologyFilterOnlyWithUsers,
+                                        onClick = { topologyFilterOnlyWithUsers = true },
+                                        label = {
+                                            Text(
+                                                text = "النشطة وبها مستخدمين (${displayedNodes.count { it.connectedUsers > 0 || it.nodeType == NetworkNodeType.MAIN_TOWER }})",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.Group,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+
+                                    FilterChip(
+                                        selected = !topologyFilterOnlyWithUsers,
+                                        onClick = { topologyFilterOnlyWithUsers = false },
+                                        label = {
+                                            Text(
+                                                text = "عرض كافة النقاط (${displayedNodes.size})",
+                                                fontSize = 11.sp
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.Hub,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
                                 }
 
                                 Spacer(modifier = Modifier.height(4.dp))
@@ -605,7 +676,7 @@ fun NetworkNodesScreen(
                                 SpiderwebTopologyGraph(
                                     centralRouterName = "الراوتر الرئيسي (سيرفر الشبكة)",
                                     centralRouterIp = currentConfigState.value.ipAddress,
-                                    nodes = displayedNodes,
+                                    nodes = displayedTopologyNodes,
                                     onNodeClick = { selectedNodeForDetail = it },
                                     onToggleFullScreen = { showFullScreenTopology = true }
                                 )
@@ -1051,7 +1122,7 @@ fun NetworkNodesScreen(
         FullScreenTopologyDialog(
             centralRouterName = "الراوتر الرئيسي (سيرفر الشبكة)",
             centralRouterIp = currentConfigState.value.ipAddress,
-            nodes = allNodes,
+            nodes = displayedTopologyNodes,
             onDismiss = { showFullScreenTopology = false },
             onNodeClick = { selectedNodeForDetail = it }
         )
@@ -2114,7 +2185,44 @@ fun RecursiveNodeTreeItem(
                         maxLines = 1
                     )
                     if (isOffline) {
-                        Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(Color.Red))
+                        Surface(
+                            color = Color(0xFFD32F2F).copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "مغلقة / غير نشطة",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFD32F2F),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    } else if (node.effectiveStatus == NodeStatus.DISABLED) {
+                        Surface(
+                            color = Color(0xFFFF9800).copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "معطلة بالراوتر",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFF9800),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    } else {
+                        Surface(
+                            color = Color(0xFF00C853).copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "نشطة 🟢",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF00C853),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
                     }
                     if (node.vlanId != null && node.vlanId > 0) {
                         Surface(
@@ -2132,8 +2240,9 @@ fun RecursiveNodeTreeItem(
                     }
                 }
                 val parentPortInfo = if (!node.parentInterface.isNullOrBlank()) " • عبر: ${node.parentInterface}" else ""
+                val trafficInfo = if (node.rxSpeedKbps + node.txSpeedKbps > 0) " • سرعة: ${com.example.data.network.NetworkUtils.formatSpeed(node.rxSpeedKbps + node.txSpeedKbps)}" else ""
                 Text(
-                    text = "${node.ipAddress} • ${node.connectedUsers} مشترك$parentPortInfo",
+                    text = "${node.ipAddress} • ${node.connectedUsers} مشترك$parentPortInfo$trafficInfo",
                     fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

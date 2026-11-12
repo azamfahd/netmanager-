@@ -701,28 +701,55 @@ private fun CyberTrafficHudCard(
                     )
                 }
 
-                Surface(
-                    color = CyberGreenBright.copy(alpha = 0.12f),
-                    shape = RoundedCornerShape(8.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    val totalSpeedKbps = rxSpeedKbps + txSpeedKbps
+                    val (qualityLabel, qualityColor, qualityBg) = when {
+                        totalSpeedKbps >= 10240.0 -> Triple("السرعة: ممتازة وقوية جداً ⚡", Color(0xFF00E676), Color(0xFF00E676).copy(alpha = 0.15f))
+                        totalSpeedKbps >= 3072.0 -> Triple("السرعة: جيدة ومستقرة 📶", Color(0xFF00E5FF), Color(0xFF00E5FF).copy(alpha = 0.15f))
+                        totalSpeedKbps >= 512.0 -> Triple("السرعة: متوسطة / مقبولة", Color(0xFFFFB300), Color(0xFFFFB300).copy(alpha = 0.15f))
+                        else -> Triple("السرعة: ضعيفة أو هادئة", Color(0xFF9E9E9E), Color(0xFF9E9E9E).copy(alpha = 0.15f))
+                    }
+
+                    Surface(
+                        color = qualityBg,
+                        shape = RoundedCornerShape(8.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(CyberGreenNeon)
-                        )
                         Text(
-                            text = "بث فوري",
+                            text = qualityLabel,
                             style = MaterialTheme.typography.labelSmall,
-                            color = CyberGreenBright,
+                            color = qualityColor,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
                         )
+                    }
+
+                    Surface(
+                        color = CyberGreenBright.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(CyberGreenNeon)
+                            )
+                            Text(
+                                text = "مباشر",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyberGreenBright,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp
+                            )
+                        }
                     }
                 }
             }

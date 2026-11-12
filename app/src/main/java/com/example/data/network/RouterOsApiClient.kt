@@ -2188,6 +2188,51 @@ class RouterOsApiClient {
         }
     }
 
+    suspend fun getInterfaceStats(): Result<List<InterfaceStats>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
+                }
+                writeSentence(listOf("/interface/print", "=.proplist=.id,name,type,mac-address,rx-byte,tx-byte,rx-packet,tx-packet,running,disabled,comment"))
+                val sentences = readAllSentencesUntilDone()
+                val list = mutableListOf<InterfaceStats>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        val map = parseSentenceToMap(s)
+                        val name = map["name"] ?: "unknown"
+                        val rxBytes = map["rx-byte"]?.toLongOrNull() ?: 0L
+                        val txBytes = map["tx-byte"]?.toLongOrNull() ?: 0L
+                        val rxPackets = map["rx-packet"]?.toLongOrNull() ?: 0L
+                        val txPackets = map["tx-packet"]?.toLongOrNull() ?: 0L
+                        val isRunning = map["running"] == "true" || map["running"] == "yes"
+                        val isDisabled = map["disabled"] == "true" || map["disabled"] == "yes"
+                        val comment = map["comment"] ?: ""
+
+                        list.add(
+                            InterfaceStats(
+                                id = map[".id"] ?: "if_${list.size}",
+                                name = name,
+                                type = map["type"] ?: "ether",
+                                macAddress = map["mac-address"] ?: "",
+                                rxBytes = rxBytes,
+                                txBytes = txBytes,
+                                rxPackets = rxPackets,
+                                txPackets = txPackets,
+                                isRunning = isRunning,
+                                disabled = isDisabled,
+                                comment = comment
+                            )
+                        )
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
     suspend fun getRouterBoardInfo(): Result<RouterBoardInfo> {
         return withContext(Dispatchers.IO) {
             try {

@@ -2047,11 +2047,26 @@ class MainViewModel(
         pauseAutoRefreshUntil = System.currentTimeMillis() + durationMs
     }
 
+    private var trafficPollJob: kotlinx.coroutines.Job? = null
+
     private fun startAutoRefresh() {
         stopAutoRefresh()
+        // Fast 3-second live traffic polling loop for real-time speed display
+        trafficPollJob = viewModelScope.launch {
+            while (isActive) {
+                delay(3000)
+                val currentConn = _connectionState.value
+                if (currentConn is ConnectionState.Connected && !currentConn.isOffline) {
+                    try {
+                        repository.pollLiveTrafficSpeeds()
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+
         refreshJob = viewModelScope.launch {
             while (isActive && _autoRefresh.value) {
-                // Increased delay to 8 seconds to prevent rapid overwrites and respect router processing time
+                // Background cycle every 8 seconds for overall router data
                 delay(8000)
                 
                 if (System.currentTimeMillis() < pauseAutoRefreshUntil) {
@@ -2095,6 +2110,8 @@ class MainViewModel(
     private fun stopAutoRefresh() {
         refreshJob?.cancel()
         refreshJob = null
+        trafficPollJob?.cancel()
+        trafficPollJob = null
     }
 
     fun kickUser(user: HotspotActiveUser) {
