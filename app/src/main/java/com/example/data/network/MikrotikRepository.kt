@@ -234,9 +234,12 @@ class MikrotikRepository(
     private val _interfaceStats = MutableStateFlow<List<com.example.data.model.InterfaceStats>>(emptyList())
     val interfaceStats: StateFlow<List<com.example.data.model.InterfaceStats>> = _interfaceStats.asStateFlow()
 
-    // Real-Time Traffic Calculation Tracking
+    // Real-Time Traffic Calculation Tracking (Professional Sliding Window Smoothing)
     private var lastTrafficCalculationTimeMs: Long = 0L
     private val lastInterfaceBytesMap = mutableMapOf<String, Pair<Long, Long>>() // name -> (rxBytes, txBytes)
+    private val rxSpeedWindow = mutableListOf<Double>()
+    private val txSpeedWindow = mutableListOf<Double>()
+    private val WINDOW_SIZE = 4 // Average over last 4 polls to smooth out jitter
 
     private val _activeUsers = MutableStateFlow<List<HotspotActiveUser>>(emptyList())
     val activeUsers: StateFlow<List<HotspotActiveUser>> = _activeUsers.asStateFlow()
@@ -2492,7 +2495,7 @@ class MikrotikRepository(
 
     /**
      * Calculates real-time Rx and Tx traffic speed in Kbps based on delta bytes across polling intervals.
-     * Prevents static/hung 0 Kbps displays when connected to a real MikroTik router.
+     * Uses a sliding window average to provide a professional, stable, and accurate speed reading.
      */
     private fun calculateAndUpdateLiveTrafficSpeeds(interfaces: List<com.example.data.model.InterfaceStats>) {
         val now = System.currentTimeMillis()
@@ -2510,26 +2513,39 @@ class MikrotikRepository(
         for (iface in targetIfaces) {
             val prev = lastInterfaceBytesMap[iface.name]
             if (prev != null) {
-                hasValidPreviousData = true
-                val deltaRx = (iface.rxBytes - prev.first).coerceAtLeast(0L)
-                val deltaTx = (iface.txBytes - prev.second).coerceAtLeast(0L)
+                // Handle counter resets (if iface was restarted)
+                val deltaRx = if (iface.rxBytes >= prev.first) iface.rxBytes - prev.first else 0L
+                val deltaTx = if (iface.txBytes >= prev.second) iface.txBytes - prev.second else 0L
+                
                 totalDeltaRxBytes += deltaRx
                 totalDeltaTxBytes += deltaTx
+                hasValidPreviousData = true
             }
             lastInterfaceBytesMap[iface.name] = Pair(iface.rxBytes, iface.txBytes)
         }
 
         if (hasValidPreviousData && prevTime > 0L) {
-            val deltaSec = ((now - prevTime) / 1000.0).coerceIn(0.5, 30.0)
-            // (Bytes * 8) / (1024 * seconds) = Kbps
-            val rxKbps = ((totalDeltaRxBytes * 8.0) / (1024.0 * deltaSec)).coerceAtLeast(0.0)
-            val txKbps = ((totalDeltaTxBytes * 8.0) / (1024.0 * deltaSec)).coerceAtLeast(0.0)
+            val deltaSec = ((now - prevTime) / 1000.0).coerceIn(0.4, 20.0)
+            
+            // Raw calculation: (Bytes * 8) / (1024 * seconds) = Kbps
+            val rawRxKbps = ((totalDeltaRxBytes * 8.0) / (1024.0 * deltaSec)).coerceAtLeast(0.0)
+            val rawTxKbps = ((totalDeltaTxBytes * 8.0) / (1024.0 * deltaSec)).coerceAtLeast(0.0)
+
+            // Professional Smoothing: Sliding Window Average
+            rxSpeedWindow.add(rawRxKbps)
+            txSpeedWindow.add(rawTxKbps)
+            
+            if (rxSpeedWindow.size > WINDOW_SIZE) rxSpeedWindow.removeAt(0)
+            if (txSpeedWindow.size > WINDOW_SIZE) txSpeedWindow.removeAt(0)
+            
+            val smoothedRx = rxSpeedWindow.average()
+            val smoothedTx = txSpeedWindow.average()
 
             _resourceState.value = _resourceState.value.copy(
-                rxSpeedKbps = rxKbps,
-                txSpeedKbps = txKbps
+                rxSpeedKbps = smoothedRx,
+                txSpeedKbps = smoothedTx
             )
-            recordBandwidthPoint(rxKbps, txKbps)
+            recordBandwidthPoint(smoothedRx, smoothedTx)
         }
     }
 

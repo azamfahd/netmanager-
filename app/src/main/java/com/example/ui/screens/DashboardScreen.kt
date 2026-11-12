@@ -157,15 +157,19 @@ fun DashboardScreen(
 
         // 4. Interactive 2x2 Cyber Metrics Matrix (مصفوفة الإحصائيات الذكية)
         item {
+            val totalClientsAcrossNodes = remember(networkNodes) { networkNodes.sumOf { it.connectedUsers } }
             CyberMetricsMatrix(
                 activeUsersCount = activeUsers.size,
+                onlineNodesCount = onlineNodesCount,
                 totalCardsCount = cards.size,
-                availableCardsCount = cards.count { !it.isActive && !it.isExpired },
+                availableCardsCount = availableCardsCount,
                 cpuLoad = resource.cpuLoad,
                 freeMemoryBytes = resource.freeMemoryBytes,
                 totalMemoryBytes = resource.totalMemoryBytes,
                 onActiveUsersClick = onNavigateToActiveUsers,
-                onCardsClick = onNavigateToCards
+                onCardsClick = onNavigateToCards,
+                onNodesClick = onNavigateToNodes,
+                nodesSubtitle = "$totalClientsAcrossNodes مشترك عبر الأبراج"
             )
         }
 
@@ -997,13 +1001,16 @@ private fun CyberTowersSummaryCard(
 @Composable
 private fun CyberMetricsMatrix(
     activeUsersCount: Int,
+    onlineNodesCount: Int,
     totalCardsCount: Int,
     availableCardsCount: Int,
     cpuLoad: Int,
     freeMemoryBytes: Long,
     totalMemoryBytes: Long,
     onActiveUsersClick: () -> Unit,
-    onCardsClick: () -> Unit
+    onCardsClick: () -> Unit,
+    onNodesClick: () -> Unit,
+    nodesSubtitle: String = "نقطة بث نشطة"
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -1014,7 +1021,7 @@ private fun CyberMetricsMatrix(
             CyberStatCard(
                 title = "المستخدمين النشطين",
                 value = "$activeUsersCount",
-                subtitle = "متصلون الآن بالهوتسبوت",
+                subtitle = "متصلون الآن",
                 icon = Icons.Default.Group,
                 accentColor = CyberGreenBright,
                 modifier = Modifier
@@ -1023,17 +1030,17 @@ private fun CyberMetricsMatrix(
                 testTag = "metric_active_users"
             )
 
-            // Total Cards Card
+            // Towers & Nodes Card (The new requested shortcut)
             CyberStatCard(
-                title = "إجمالي الكروت",
-                value = "$totalCardsCount",
-                subtitle = "$availableCardsCount كرت متاح للبيع",
-                icon = Icons.Default.ConfirmationNumber,
+                title = "الأبراج والنقاط",
+                value = "$onlineNodesCount",
+                subtitle = nodesSubtitle,
+                icon = Icons.Default.CellTower,
                 accentColor = NetworkCyan,
                 modifier = Modifier
                     .weight(1f)
-                    .clickable { onCardsClick() },
-                testTag = "metric_total_cards"
+                    .clickable { onNodesClick() },
+                testTag = "metric_network_nodes_shortcut"
             )
         }
 
@@ -1041,33 +1048,46 @@ private fun CyberMetricsMatrix(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // Total Cards Card
+            CyberStatCard(
+                title = "إجمالي الكروت",
+                value = "$totalCardsCount",
+                subtitle = "$availableCardsCount كرت متاح",
+                icon = Icons.Default.ConfirmationNumber,
+                accentColor = Color(0xFFFFA000), // Amber
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable { onCardsClick() },
+                testTag = "metric_total_cards"
+            )
+
             // CPU Load Card
             val validCpu = cpuLoad.coerceIn(0, 100)
             val cpuColor = if (validCpu > 75) StatusErrorRed else CyberGreenBright
             CyberProgressCard(
-                title = "استهلاك المعالج CPU",
+                title = "المعالج CPU",
                 percentage = validCpu,
-                detailText = "حمل المعالج: $validCpu%",
+                detailText = "$validCpu%",
                 accentColor = cpuColor,
                 icon = Icons.Default.Memory,
                 modifier = Modifier.weight(1f)
             )
-
-            // RAM Memory Card
-            val memUsedPercent = if (totalMemoryBytes > 0L) {
-                ((totalMemoryBytes - freeMemoryBytes).toFloat() / totalMemoryBytes * 100f).toInt().coerceIn(1, 99)
-            } else {
-                35
-            }
-            CyberProgressCard(
-                title = "استهلاك الذاكرة RAM",
-                percentage = memUsedPercent,
-                detailText = "${NetworkUtils.formatBytes(freeMemoryBytes)} متاح",
-                accentColor = NetworkCyan,
-                icon = Icons.Default.Storage,
-                modifier = Modifier.weight(1f)
-            )
         }
+
+        // RAM Memory Card (Moved to full width bottom row for better balance)
+        val memUsedPercent = if (totalMemoryBytes > 0L) {
+            ((totalMemoryBytes - freeMemoryBytes).toFloat() / totalMemoryBytes * 100f).toInt().coerceIn(1, 99)
+        } else {
+            35
+        }
+        CyberProgressCard(
+            title = "استهلاك الذاكرة RAM",
+            percentage = memUsedPercent,
+            detailText = "${NetworkUtils.formatBytes(freeMemoryBytes)} متاح من ${NetworkUtils.formatBytes(totalMemoryBytes)}",
+            accentColor = NetworkCyan,
+            icon = Icons.Default.Storage,
+            modifier = Modifier.fillMaxWidth()
+        )
     }
 }
 
