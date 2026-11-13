@@ -14,6 +14,8 @@ import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Bundle
 import android.os.CancellationSignal
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.print.PageRange
 import android.print.PrintAttributes
@@ -24,10 +26,8 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.example.data.model.HotspotCard
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.io.InputStream
-import kotlin.math.min
+import kotlin.math.max
 
 enum class CardTemplateType(val title: String) {
     SCOUD_BLUE("قالب سكود نت الأزرق (المعتمد)"),
@@ -51,17 +51,36 @@ data class CardDesignConfig(
     val cardWidthMm: Float = 50f,
     val cardHeightMm: Float = 18f
 ) {
-    val cardsPerPage: Int get() = columns * rows
+    val safeColumns: Int get() = columns.coerceAtLeast(1)
+    val safeRows: Int get() = rows.coerceAtLeast(1)
+    val cardsPerPage: Int get() = safeColumns * safeRows
 }
 
 object VoucherPrintUtils {
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     fun loadBitmapFromUri(context: Context, uri: Uri?): Bitmap? {
         if (uri == null) return null
         return try {
-            val input: InputStream? = context.contentResolver.openInputStream(uri)
-            BitmapFactory.decodeStream(input)
-        } catch (e: Exception) {
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, boundsOpts)
+            }
+            val maxDim = 1024
+            var sampleSize = 1
+            if (boundsOpts.outWidth > maxDim || boundsOpts.outHeight > maxDim) {
+                val halfW = boundsOpts.outWidth / 2
+                val halfH = boundsOpts.outHeight / 2
+                while ((halfW / sampleSize) >= maxDim && (halfH / sampleSize) >= maxDim) {
+                    sampleSize *= 2
+                }
+            }
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, decodeOpts)
+            }
+        } catch (_: Exception) {
             null
         }
     }
@@ -78,13 +97,15 @@ object VoucherPrintUtils {
         pageWidth: Int,
         pageHeight: Int
     ) {
+        val safeCols = config.safeColumns
+        val safeRows = config.safeRows
         val marginX = 20f
         val marginY = 20f
         val printableWidth = pageWidth - (marginX * 2)
         val printableHeight = pageHeight - (marginY * 2)
 
-        val cardW = printableWidth / config.columns
-        val cardH = printableHeight / config.rows
+        val cardW = printableWidth / safeCols
+        val cardH = printableHeight / safeRows
 
         val paintBg = Paint().apply {
             isAntiAlias = true
@@ -102,13 +123,6 @@ object VoucherPrintUtils {
             color = Color.rgb(30, 30, 30)
             textSize = cardH * 0.16f
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
-        }
-        val paintCodeLabel = Paint().apply {
-            isAntiAlias = true
-            color = Color.rgb(2, 119, 189)
-            textSize = cardH * 0.14f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
             textAlign = Paint.Align.CENTER
         }
         val paintCodeValue = Paint().apply {
@@ -155,9 +169,9 @@ object VoucherPrintUtils {
         val totalCardsOnThisPage = config.cardsPerPage
         val startIndex = pageIndex * totalCardsOnThisPage
 
-        for (row in 0 until config.rows) {
-            for (col in 0 until config.columns) {
-                val cardIndexInList = startIndex + (row * config.columns + col)
+        for (row in 0 until safeRows) {
+            for (col in 0 until safeCols) {
+                val cardIndexInList = startIndex + (row * safeCols + col)
                 if (cardIndexInList >= pageCards.size) break
 
                 val card = pageCards[cardIndexInList]
@@ -170,21 +184,18 @@ object VoucherPrintUtils {
                 // 1. Draw card background
                 canvas.drawRoundRect(cardRect, 4f, 4f, paintBg)
 
-                if (customBgBitmap != null && config.templateType == CardTemplateType.CUSTOM_IMAGE) {
+                if (customBgBitmap != null && !customBgBitmap.isRecycled && config.templateType == CardTemplateType.CUSTOM_IMAGE) {
                     val srcRect = Rect(0, 0, customBgBitmap.width, customBgBitmap.height)
                     canvas.drawBitmap(customBgBitmap, srcRect, cardRect, null)
                 } else {
-                    // Template decorative elements
                     val badgeWidth = cardW * 0.20f
                     val badgeRect = RectF(right - badgeWidth, top, right, bottom)
                     canvas.drawRoundRect(badgeRect, 2f, 2f, paintPriceBadgeBg)
 
-                    // Draw Price in badge
                     val priceNum = card.price.replace(Regex("[^0-9]"), "").ifEmpty { "500" }
                     canvas.drawText(priceNum, badgeRect.centerX(), top + cardH * 0.45f, paintPriceText)
                     canvas.drawText("ريال", badgeRect.centerX(), top + cardH * 0.75f, paintPriceSub)
 
-                    // Draw Left decorative rocket or wifi band
                     val leftBarRect = RectF(left, top, left + 4f, bottom)
                     canvas.drawRect(leftBarRect, paintPriceBadgeBg)
                 }
@@ -195,24 +206,20 @@ object VoucherPrintUtils {
                 // 3. Card Texts
                 val contentCenterX = left + (cardW * 0.40f) + (config.offsetXPercent * cardW * 0.2f)
 
-                // Header line: Time / Quota
                 val timeLimit = if (card.limitUptime.isNotBlank()) card.limitUptime else "24 ساعة"
                 val quotaMb = if (card.limitBytesTotal > 0) "${card.limitBytesTotal / (1024 * 1024)} ميجا" else "1024 ميجا"
                 val headerStr = "$timeLimit . $quotaMb"
                 canvas.drawText(headerStr, contentCenterX, top + cardH * 0.24f, paintTextHeader)
 
-                // Code Login Label & Value
                 val codeY = top + cardH * 0.58f + (config.offsetYPercent * cardH * 0.2f)
                 canvas.drawText("رمز الدخول: ${card.name}", contentCenterX, codeY, paintCodeValue)
 
-                // Dotted separator
                 val linePaint = Paint().apply {
                     color = Color.rgb(210, 220, 230)
                     strokeWidth = 1f
                 }
                 canvas.drawLine(left + 10f, top + cardH * 0.68f, right - (cardW * 0.25f), top + cardH * 0.68f, linePaint)
 
-                // Footer line: Network name & contact
                 val footerStr = "${config.networkName} | ت: ${config.contactPhone}"
                 canvas.drawText(footerStr, contentCenterX, top + cardH * 0.88f, paintFooter)
             }
@@ -220,7 +227,7 @@ object VoucherPrintUtils {
     }
 
     /**
-     * Export all pages to a multi-page PDF document
+     * Export all pages to a multi-page PDF document on a background worker thread
      */
     fun exportToPdf(
         context: Context,
@@ -228,50 +235,58 @@ object VoucherPrintUtils {
         config: CardDesignConfig,
         onComplete: (File?) -> Unit
     ) {
-        try {
-            val customBitmap = loadBitmapFromUri(context, config.customImageUri)
-            val pdfDocument = PdfDocument()
-
-            val pageWidth = 1240 // A4 at ~150 DPI for crisp printing
-            val pageHeight = 1754
-
-            val totalCards = cards.size
-            val cardsPerPage = config.cardsPerPage
-            val totalPages = (totalCards + cardsPerPage - 1) / cardsPerPage
-
-            for (p in 0 until totalPages) {
-                val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, p + 1).create()
-                val page = pdfDocument.startPage(pageInfo)
-
-                drawCardsPage(
-                    canvas = page.canvas,
-                    pageIndex = p,
-                    pageCards = cards,
-                    config = config,
-                    customBgBitmap = customBitmap,
-                    pageWidth = pageWidth,
-                    pageHeight = pageHeight
-                )
-
-                pdfDocument.finishPage(page)
-            }
-
-            val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
-            val pdfFile = File(exportDir, "vouchers_sheet_${System.currentTimeMillis()}.pdf")
-            val outputStream = FileOutputStream(pdfFile)
-            pdfDocument.writeTo(outputStream)
-            outputStream.close()
-            pdfDocument.close()
-
-            onComplete(pdfFile)
-        } catch (e: Exception) {
-            e.printStackTrace()
+        if (cards.isEmpty()) {
+            Toast.makeText(context, "لا توجد كروت محددة للتصدير", Toast.LENGTH_SHORT).show()
             onComplete(null)
+            return
         }
+        val appContext = context.applicationContext
+        Thread {
+            val pdfDocument = PdfDocument()
+            var customBitmap: Bitmap? = null
+            try {
+                customBitmap = loadBitmapFromUri(appContext, config.customImageUri)
+                val pageWidth = 1240
+                val pageHeight = 1754
+
+                val cardsPerPage = max(1, config.cardsPerPage)
+                val totalPages = max(1, (cards.size + cardsPerPage - 1) / cardsPerPage)
+
+                for (p in 0 until totalPages) {
+                    val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, p + 1).create()
+                    val page = pdfDocument.startPage(pageInfo)
+
+                    drawCardsPage(
+                        canvas = page.canvas,
+                        pageIndex = p,
+                        pageCards = cards,
+                        config = config,
+                        customBgBitmap = customBitmap,
+                        pageWidth = pageWidth,
+                        pageHeight = pageHeight
+                    )
+
+                    pdfDocument.finishPage(page)
+                }
+
+                val exportDir = File(appContext.cacheDir, "exports").apply { mkdirs() }
+                val pdfFile = File(exportDir, "vouchers_sheet_${System.currentTimeMillis()}.pdf")
+                FileOutputStream(pdfFile).use { outputStream ->
+                    pdfDocument.writeTo(outputStream)
+                }
+                mainHandler.post { onComplete(pdfFile) }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                mainHandler.post { onComplete(null) }
+            } finally {
+                try { pdfDocument.close() } catch (_: Exception) {}
+                try { customBitmap?.recycle() } catch (_: Exception) {}
+            }
+        }.start()
     }
 
     /**
-     * Export a single page as a high-resolution PNG image
+     * Export a single page as a high-resolution PNG image on a background worker thread
      */
     fun exportPageToImage(
         context: Context,
@@ -280,35 +295,47 @@ object VoucherPrintUtils {
         config: CardDesignConfig,
         onComplete: (File?) -> Unit
     ) {
-        try {
-            val customBitmap = loadBitmapFromUri(context, config.customImageUri)
-            val pageWidth = 1240
-            val pageHeight = 1754
-
-            val bitmap = Bitmap.createBitmap(pageWidth, pageHeight, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-
-            drawCardsPage(
-                canvas = canvas,
-                pageIndex = pageIndex,
-                pageCards = cards,
-                config = config,
-                customBgBitmap = customBitmap,
-                pageWidth = pageWidth,
-                pageHeight = pageHeight
-            )
-
-            val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
-            val imgFile = File(exportDir, "vouchers_page_${pageIndex + 1}_${System.currentTimeMillis()}.png")
-            val outputStream = FileOutputStream(imgFile)
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
-            outputStream.close()
-
-            onComplete(imgFile)
-        } catch (e: Exception) {
-            e.printStackTrace()
+        if (cards.isEmpty()) {
+            Toast.makeText(context, "لا توجد كروت محددة للتصدير", Toast.LENGTH_SHORT).show()
             onComplete(null)
+            return
         }
+        val appContext = context.applicationContext
+        Thread {
+            var customBitmap: Bitmap? = null
+            var bitmap: Bitmap? = null
+            try {
+                customBitmap = loadBitmapFromUri(appContext, config.customImageUri)
+                val pageWidth = 1240
+                val pageHeight = 1754
+
+                bitmap = Bitmap.createBitmap(pageWidth, pageHeight, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bitmap)
+
+                drawCardsPage(
+                    canvas = canvas,
+                    pageIndex = pageIndex.coerceAtLeast(0),
+                    pageCards = cards,
+                    config = config,
+                    customBgBitmap = customBitmap,
+                    pageWidth = pageWidth,
+                    pageHeight = pageHeight
+                )
+
+                val exportDir = File(appContext.cacheDir, "exports").apply { mkdirs() }
+                val imgFile = File(exportDir, "vouchers_page_${pageIndex + 1}_${System.currentTimeMillis()}.png")
+                FileOutputStream(imgFile).use { outputStream ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+                }
+                mainHandler.post { onComplete(imgFile) }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                mainHandler.post { onComplete(null) }
+            } finally {
+                try { bitmap?.recycle() } catch (_: Exception) {}
+                try { customBitmap?.recycle() } catch (_: Exception) {}
+            }
+        }.start()
     }
 
     /**
@@ -340,6 +367,10 @@ object VoucherPrintUtils {
         cards: List<HotspotCard>,
         config: CardDesignConfig
     ) {
+        if (cards.isEmpty()) {
+            Toast.makeText(context, "لا توجد كروت محددة للطباعة", Toast.LENGTH_SHORT).show()
+            return
+        }
         val printManager = context.getSystemService(Context.PRINT_SERVICE) as? PrintManager
         if (printManager == null) {
             Toast.makeText(context, "خدمة الطباعة غير متوفرة على هذا الجهاز", Toast.LENGTH_SHORT).show()
@@ -363,8 +394,8 @@ object VoucherPrintUtils {
                     return
                 }
 
-                val cardsPerPage = config.cardsPerPage
-                totalPages = (cards.size + cardsPerPage - 1) / cardsPerPage
+                val cardsPerPage = max(1, config.cardsPerPage)
+                totalPages = max(1, (cards.size + cardsPerPage - 1) / cardsPerPage)
 
                 val info = PrintDocumentInfo.Builder("كروت_الهوتسبوت_${System.currentTimeMillis()}.pdf")
                     .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
@@ -380,40 +411,45 @@ object VoucherPrintUtils {
                 cancellationSignal: CancellationSignal?,
                 callback: WriteResultCallback?
             ) {
+                val fd = destination?.fileDescriptor
+                if (fd == null) {
+                    callback?.onWriteFailed("وجهة الطباعة غير متاحة")
+                    return
+                }
                 val pdfDocument = PdfDocument()
                 val pageWidth = 1240
                 val pageHeight = 1754
+                try {
+                    for (p in 0 until totalPages) {
+                        if (cancellationSignal?.isCanceled == true) {
+                            callback?.onWriteCancelled()
+                            return
+                        }
 
-                for (p in 0 until totalPages) {
-                    if (cancellationSignal?.isCanceled == true) {
-                        callback?.onWriteCancelled()
-                        return
+                        val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, p + 1).create()
+                        val page = pdfDocument.startPage(pageInfo)
+
+                        drawCardsPage(
+                            canvas = page.canvas,
+                            pageIndex = p,
+                            pageCards = cards,
+                            config = config,
+                            customBgBitmap = customBitmap,
+                            pageWidth = pageWidth,
+                            pageHeight = pageHeight
+                        )
+
+                        pdfDocument.finishPage(page)
                     }
 
-                    val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, p + 1).create()
-                    val page = pdfDocument.startPage(pageInfo)
-
-                    drawCardsPage(
-                        canvas = page.canvas,
-                        pageIndex = p,
-                        pageCards = cards,
-                        config = config,
-                        customBgBitmap = customBitmap,
-                        pageWidth = pageWidth,
-                        pageHeight = pageHeight
-                    )
-
-                    pdfDocument.finishPage(page)
-                }
-
-                try {
-                    val outputStream = FileOutputStream(destination?.fileDescriptor)
-                    pdfDocument.writeTo(outputStream)
-                    outputStream.close()
-                    pdfDocument.close()
+                    FileOutputStream(fd).use { outputStream ->
+                        pdfDocument.writeTo(outputStream)
+                    }
                     callback?.onWriteFinished(arrayOf(PageRange.ALL_PAGES))
                 } catch (e: Exception) {
                     callback?.onWriteFailed(e.message)
+                } finally {
+                    try { pdfDocument.close() } catch (_: Exception) {}
                 }
             }
         }
@@ -421,3 +457,4 @@ object VoucherPrintUtils {
         printManager.print("طباعة كروت شبكة ميكروتك", printAdapter, PrintAttributes.Builder().build())
     }
 }
+

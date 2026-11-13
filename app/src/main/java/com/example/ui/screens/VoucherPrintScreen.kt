@@ -106,7 +106,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import com.example.data.model.HotspotCard
+import com.example.data.model.PrintableBatchOption
 import com.example.ui.theme.NetworkCyan
 import com.example.ui.theme.RouterBlue
 import com.example.ui.theme.RouterBlueDark
@@ -124,7 +127,11 @@ import kotlin.math.roundToInt
 fun VoucherPrintScreen(
     cards: List<HotspotCard>,
     onBackClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    batchOptions: List<PrintableBatchOption> = emptyList(),
+    activeBatchKey: String? = null,
+    onSelectBatchCards: ((List<HotspotCard>, String?) -> Unit)? = null,
+    onMarkPrinted: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -214,6 +221,7 @@ fun VoucherPrintScreen(
                     // Export PDF Button
                     IconButton(
                         onClick = {
+                            onMarkPrinted?.invoke()
                             Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
                             VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
                                 if (file != null) {
@@ -235,6 +243,7 @@ fun VoucherPrintScreen(
                     // Export Image Button
                     IconButton(
                         onClick = {
+                            onMarkPrinted?.invoke()
                             Toast.makeText(context, "جاري تصدير الصفحة الحالية كصورة...", Toast.LENGTH_SHORT).show()
                             VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
                                 if (file != null) {
@@ -277,6 +286,7 @@ fun VoucherPrintScreen(
                     // Print Button (Compact)
                     Button(
                         onClick = {
+                            onMarkPrinted?.invoke()
                             VoucherPrintUtils.printVouchers(context, cards, currentConfig)
                         },
                         shape = RoundedCornerShape(8.dp),
@@ -303,12 +313,80 @@ fun VoucherPrintScreen(
             )
         }
     ) { innerPadding ->
-        BoxWithConstraints(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            val isWideScreen = maxWidth >= 800.dp
+            // Quick Switcher for Newly Added / Saved Batches
+            if (batchOptions.isNotEmpty() && onSelectBatchCards != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 2.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        items(batchOptions, key = { it.batchKey }) { batch ->
+                            val isSelected = activeBatchKey == batch.batchKey
+                            val countInBatch = batch.readyCards.size.takeIf { it > 0 } ?: batch.allCardsInBatch.size
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = {
+                                    val targetCards = batch.readyCards.ifEmpty { batch.allCardsInBatch }
+                                    onSelectBatchCards(targetCards, batch.batchKey)
+                                    currentPageIndex = 0
+                                },
+                                label = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        if (batch.isNewlyAdded) {
+                                            Surface(
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = if (isSelected) Color.White.copy(alpha = 0.25f) else StatusActiveGreen.copy(alpha = 0.16f)
+                                            ) {
+                                                Text(
+                                                    text = "جديد",
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isSelected) Color.White else StatusActiveGreen,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = "${batch.title} ($countInBatch)",
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = RouterBlue,
+                                    selectedLabelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            }
+
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                val isWideScreen = maxWidth >= 800.dp
 
             if (isWideScreen) {
                 // Wide Screen: Dual Pane (Left Sheet Preview, Right Control Panel matching image)
@@ -383,9 +461,11 @@ fun VoucherPrintScreen(
                             contactPhone = contactPhone,
                             onContactPhoneChange = { contactPhone = it },
                             onPrintClick = {
+                                onMarkPrinted?.invoke()
                                 VoucherPrintUtils.printVouchers(context, cards, currentConfig)
                             },
                             onExportPdfClick = {
+                                onMarkPrinted?.invoke()
                                 Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
                                 VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
                                     if (file != null) {
@@ -396,6 +476,7 @@ fun VoucherPrintScreen(
                                 }
                             },
                             onExportImageClick = {
+                                onMarkPrinted?.invoke()
                                 Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
                                 VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
                                     if (file != null) {
@@ -447,7 +528,7 @@ fun VoucherPrintScreen(
                     }
 
                     // Sliding Side Drawer for Customization Panel with swipe-to-dismiss gesture
-                    AnimatedVisibility(
+                    androidx.compose.animation.AnimatedVisibility(
                         visible = showControlPanel,
                         modifier = Modifier.align(Alignment.CenterEnd),
                         enter = androidx.compose.animation.slideInHorizontally(initialOffsetX = { it }),
@@ -528,9 +609,11 @@ fun VoucherPrintScreen(
                                         contactPhone = contactPhone,
                                         onContactPhoneChange = { contactPhone = it },
                                         onPrintClick = {
+                                            onMarkPrinted?.invoke()
                                             VoucherPrintUtils.printVouchers(context, cards, currentConfig)
                                         },
                                         onExportPdfClick = {
+                                            onMarkPrinted?.invoke()
                                             Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
                                             VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
                                                 if (file != null) {
@@ -541,6 +624,7 @@ fun VoucherPrintScreen(
                                             }
                                         },
                                         onExportImageClick = {
+                                            onMarkPrinted?.invoke()
                                             Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
                                             VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
                                                 if (file != null) {
@@ -556,6 +640,7 @@ fun VoucherPrintScreen(
                         }
                     }
                 }
+            }
             }
         }
     }

@@ -47,6 +47,7 @@ object RouterCacheManager {
         return File(context.filesDir, "router_snapshot_$sanitizedIp.json")
     }
 
+    @Synchronized
     fun saveSnapshot(
         context: Context,
         ipAddress: String,
@@ -226,6 +227,7 @@ object RouterCacheManager {
         } catch (e: Exception) {}
     }
 
+    @Synchronized
     fun loadSnapshot(context: Context, ipAddress: String): RouterSnapshot? {
         try {
             val file = getCacheFile(context, ipAddress)
@@ -509,6 +511,7 @@ object RouterCacheManager {
         }
     }
 
+    @Synchronized
     fun getLatestSnapshot(context: Context): RouterSnapshot? {
         val files = mutableListOf<File>()
         context.filesDir.listFiles { _, name -> name.startsWith("router_snapshot_") && name.endsWith(".json") }?.let {
@@ -537,6 +540,7 @@ object RouterCacheManager {
         return latestSnapshot
     }
 
+    @Synchronized
     fun getAllCachedSnapshots(context: Context): List<RouterSnapshot> {
         val files = mutableListOf<File>()
         context.filesDir.listFiles { _, name -> name.startsWith("router_snapshot_") && name.endsWith(".json") }?.let {
@@ -556,6 +560,7 @@ object RouterCacheManager {
         return result.sortedByDescending { it.timestamp }
     }
 
+    @Synchronized
     fun clearCacheForRouter(context: Context, ipAddress: String): Boolean {
         return try {
             val sanitized = ipAddress.replace(Regex("[^a-zA-Z0-9_]"), "_")

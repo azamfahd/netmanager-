@@ -224,6 +224,9 @@ fun MainScreen(
                             preselectedAgentIdForBatch = preselectedId
                             showBatchGeneratorDialog = true
                         },
+                        onNavigateToPrintStudio = {
+                            navController.navigate(Screen.VoucherPrint)
+                        },
                         onOpenPrintScreen = { cards ->
                             viewModel.setPrintableCards(cards)
                             navController.navigate(Screen.VoucherPrint)
@@ -261,9 +264,19 @@ fun MainScreen(
                 }
                 composable<Screen.VoucherPrint> {
                     val printableCards by viewModel.printableCards.collectAsStateWithLifecycle()
+                    val batchOptions by viewModel.printableBatchOptions.collectAsStateWithLifecycle()
+                    val activeBatchKey by viewModel.selectedPrintableBatchKey.collectAsStateWithLifecycle()
                     VoucherPrintScreen(
                         cards = printableCards,
-                        onBackClick = { navController.popBackStack() }
+                        onBackClick = { navController.popBackStack() },
+                        batchOptions = batchOptions,
+                        activeBatchKey = activeBatchKey,
+                        onSelectBatchCards = { batchCards, batchKey ->
+                            viewModel.setPrintableCards(batchCards, batchKey)
+                        },
+                        onMarkPrinted = {
+                            viewModel.markCurrentBatchAsPrinted()
+                        }
                     )
                 }
                 composable<Screen.UserSessionDetail> { backStackEntry ->
@@ -437,6 +450,7 @@ fun MainPagerContent(
     activeUsersCount: Int,
     hasOfflineNodes: Boolean,
     onOpenBatchGenerator: (Long) -> Unit,
+    onNavigateToPrintStudio: () -> Unit,
     onOpenPrintScreen: (List<com.example.data.model.HotspotCard>) -> Unit,
     onOpenSessionDetail: (String) -> Unit,
     onOpenAdminAudit: () -> Unit,
@@ -446,6 +460,7 @@ fun MainPagerContent(
     val pagerState = rememberPagerState(initialPage = 0) { MainTab.entries.size }
     val scope = rememberCoroutineScope()
     val tabScrollState = rememberScrollState()
+    var showDashboardPrintDialog by remember { mutableStateOf(false) }
 
     // Smoothly scroll the floating dock so that the selected tab is always in view
     LaunchedEffect(pagerState.currentPage) {
@@ -478,7 +493,7 @@ fun MainPagerContent(
                     onNavigateToNodes = { scope.launch { pagerState.animateScrollToPage(MainTab.NODES.ordinal) } },
                     onOpenBatchGenerator = { onOpenBatchGenerator(0L) },
                     onOpenPrintScreen = {
-                        onOpenPrintScreen(viewModel.cards.value)
+                        showDashboardPrintDialog = true
                     },
                     onNavigateToFinance = { scope.launch { pagerState.animateScrollToPage(MainTab.FINANCE.ordinal) } },
                     modifier = Modifier.padding(bottom = 78.dp)
@@ -498,7 +513,7 @@ fun MainPagerContent(
                     onOpenBatchGenerator = {
                         onOpenBatchGenerator(0L)
                     },
-                    onOpenPrintScreen = { onOpenPrintScreen(viewModel.cards.value) },
+                    onOpenPrintScreen = { onNavigateToPrintStudio() },
                     onOpenSessionDetail = { session ->
                         onOpenSessionDetail(session.username)
                     },
@@ -558,6 +573,23 @@ fun MainPagerContent(
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 8.dp)
+        )
+    }
+
+    if (showDashboardPrintDialog) {
+        val allCards by viewModel.cards.collectAsStateWithLifecycle()
+        val batchOptions by viewModel.printableBatchOptions.collectAsStateWithLifecycle()
+        var pendingBatchKey by remember { mutableStateOf<String?>(null) }
+        com.example.ui.components.PrintSelectionDialog(
+            allCards = allCards,
+            batchOptions = batchOptions,
+            onDismiss = { showDashboardPrintDialog = false },
+            onBatchSelectedForPrint = { key -> pendingBatchKey = key },
+            onConfirmSelection = { selectedCards ->
+                viewModel.setPrintableCards(selectedCards, pendingBatchKey)
+                showDashboardPrintDialog = false
+                onNavigateToPrintStudio()
+            }
         )
     }
 }

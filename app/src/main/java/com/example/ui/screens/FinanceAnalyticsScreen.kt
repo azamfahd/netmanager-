@@ -100,12 +100,13 @@ fun FinanceAnalyticsScreen(
     }
     
     val filteredMonths = remember(monthlySales, activeYearFilter) {
-        if (activeYearFilter == null) {
+        val yearFilter = activeYearFilter
+        if (yearFilter == null) {
             // Default: Show the most recent 6 months that have any data or are recent
             monthlySales.take(6)
         } else {
             // Filter by the selected year
-            monthlySales.filter { it.monthKey.startsWith(activeYearFilter!!) }
+            monthlySales.filter { it.monthKey.startsWith(yearFilter) }
         }
     }
 
@@ -121,14 +122,14 @@ fun FinanceAnalyticsScreen(
             .background(MaterialTheme.colorScheme.background)
     ) {
         // Global Pricing Dialog
-        if (pkgToEditPrice != null) {
+        pkgToEditPrice?.let { targetPkg ->
             PackagePricingDialog(
-                profileName = pkgToEditPrice!!.profileName,
-                initialSalePrice = pkgToEditPrice!!.salePrice,
-                initialCostPrice = pkgToEditPrice!!.costPrice,
+                profileName = targetPkg.profileName,
+                initialSalePrice = targetPkg.salePrice,
+                initialCostPrice = targetPkg.costPrice,
                 onDismiss = { pkgToEditPrice = null },
                 onSave = { sale, cost ->
-                    viewModel.savePackagePricing(pkgToEditPrice!!.profileName, sale, cost)
+                    viewModel.savePackagePricing(targetPkg.profileName, sale, cost)
                 }
             )
         }

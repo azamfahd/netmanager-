@@ -117,9 +117,9 @@ fun AuthScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            if (errorMessage != null) {
+            errorMessage?.let { errText ->
                 Text(
-                    text = errorMessage!!,
+                    text = errText,
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(bottom = 16.dp)

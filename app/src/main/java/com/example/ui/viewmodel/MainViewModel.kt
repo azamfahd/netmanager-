@@ -64,6 +64,7 @@ import org.json.JSONArray
 
 enum class CardFilter {
     ALL,
+    BATCHES,
     ACTIVE,
     UNUSED,
     EXPIRED,
@@ -1545,7 +1546,7 @@ class MainViewModel(
             val isUnused = !isCurrentlyOnline && !isUsedOffline && !card.isExpired
 
             val matchesFilter = when (filter) {
-                CardFilter.ALL -> true
+                CardFilter.ALL, CardFilter.BATCHES -> true
                 CardFilter.ACTIVE -> isCurrentlyOnline && !card.isExpired
                 CardFilter.UNUSED -> isUnused
                 CardFilter.EXPIRED -> card.isExpired
@@ -1566,73 +1567,121 @@ class MainViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val readyCardGroups: StateFlow<List<CardBatchGroup>> = combine(filteredCards, _cardFilter) { list, filter ->
-        if (filter != CardFilter.UNUSED || list.isEmpty()) return@combine emptyList()
-        
-        // Partition and Group in background
-        val commentCounts = list.groupingBy { it.comment }.eachCount()
-        val (rawBatchCards, _) = list.partition { card ->
-            val c = card.comment.lowercase()
-            when {
-                c.contains("فردي") -> false
-                c.contains("دفعة") || c.contains("batch") -> true
-                card.id.startsWith("gen_") -> true
-                card.comment.isNotBlank() && (commentCounts[card.comment] ?: 0) > 1 -> true
-                else -> false
-            }
+    private fun cardMatchesSearchAndSystem(
+        card: HotspotCard,
+        query: String,
+        systemFilter: CardSystemFilter,
+        extraTextMatch: Boolean = false
+    ): Boolean {
+        val matchesQuery = query.isBlank() || extraTextMatch ||
+                card.name.contains(query, ignoreCase = true) ||
+                card.comment.contains(query, ignoreCase = true) ||
+                card.profile.contains(query, ignoreCase = true)
+        val matchesSystem = when (systemFilter) {
+            CardSystemFilter.ALL -> true
+            CardSystemFilter.HOTSPOT -> card.isHotspotCard
+            CardSystemFilter.USER_MANAGER -> card.isUserManagerCard
         }
+        return matchesQuery && matchesSystem
+    }
 
-        rawBatchCards.groupBy { card ->
-            when {
-                card.comment.contains("دفعة") || card.comment.contains("batch") -> card.comment
-                card.id.startsWith("gen_") -> {
-                    val parts = card.id.split("_")
-                    if (parts.size >= 2) "batch_${parts[1]}_${card.profile}" else card.comment.ifBlank { "دفعة_${card.profile}" }
-                }
-                card.comment.isNotBlank() -> card.comment
-                else -> "batch_${card.profile}_${card.price}"
+    // Printable vouchers sheet & batch print tracking
+    private val printedBatchesPrefs = appContext?.getSharedPreferences("netmanager_printed_batches", Context.MODE_PRIVATE)
+    private val _printedBatchKeys = MutableStateFlow<Set<String>>(
+        printedBatchesPrefs?.getStringSet("printed_keys", emptySet())?.toSet() ?: emptySet()
+    )
+    private val _selectedPrintableBatchKey = MutableStateFlow<String?>(null)
+    val selectedPrintableBatchKey: StateFlow<String?> = _selectedPrintableBatchKey.asStateFlow()
+
+    private val _printableCards = MutableStateFlow<List<HotspotCard>>(emptyList())
+    val printableCards: StateFlow<List<HotspotCard>> = _printableCards.asStateFlow()
+
+    private val batchPartitionState: StateFlow<IndependentBatchPartitionResult> = combine(
+        cards, activeUsers, batchHistory, _printedBatchKeys
+    ) { allCards, liveActiveUsers, batches, printedKeys ->
+        val activeNamesLower = liveActiveUsers.map { it.user.lowercase() }.toSet()
+        partitionCardsIntoIndependentBatches(
+            allCards = allCards,
+            activeUserNamesLower = activeNamesLower,
+            batches = batches,
+            printedKeys = printedKeys,
+            timestampProvider = { repository.getCardCreationTimestamp(it) }
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), IndependentBatchPartitionResult())
+
+    val allBatchGroups: StateFlow<List<CardBatchGroup>> = combine(
+        batchPartitionState, _cardSearchQuery, _cardSystemFilter
+    ) { partition, query, systemFilter ->
+        partition.batchGroups.mapNotNull { batch ->
+            val batchHeaderMatches = query.isNotBlank() && (
+                batch.title.contains(query, ignoreCase = true) ||
+                    batch.profile.contains(query, ignoreCase = true)
+            )
+            val matchingAll = batch.allBatchCards.filter {
+                cardMatchesSearchAndSystem(it, query, systemFilter, batchHeaderMatches)
             }
-        }.map { (key, cardsInBatch) ->
-            val first = cardsInBatch.first()
-            val ts = cardsInBatch.maxOfOrNull { repository.getCardCreationTimestamp(it) } ?: 0L
-            val formattedDate = if (ts > 0L) NetworkUtils.formatArabicFullDateTime(ts) else "تاريخ محفوظ في الراوتر"
-            val title = when {
-                first.comment.isNotBlank() && first.comment != "دفعة كروت" -> first.comment
-                first.price.isNotBlank() -> "دفعة كروت (${first.profile}) - ${first.price}"
-                else -> "دفعة كروت (${first.profile})"
+            if (matchingAll.isEmpty()) return@mapNotNull null
+            val matchingReady = batch.readyCards.filter {
+                cardMatchesSearchAndSystem(it, query, systemFilter, batchHeaderMatches)
             }
-            val totalVal = cardsInBatch.sumOf { pStr ->
-                val cleaned = pStr.price.replace(",", "").filter { it.isDigit() || it == '.' }
-                cleaned.toDoubleOrNull() ?: 0.0
-            }
-            CardBatchGroup(
-                batchKey = key,
-                title = title,
-                profile = first.profile,
-                price = first.price,
-                timestamp = ts,
-                formattedDate = formattedDate,
-                totalValue = totalVal,
-                cards = cardsInBatch
+            val totalVal = matchingAll.sumOf { parseBatchPriceValue(it.price.ifBlank { batch.price }) }
+            batch.copy(
+                cards = matchingAll,
+                allBatchCards = matchingAll,
+                readyCards = matchingReady,
+                totalValue = totalVal
             )
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val readyIndividualCards: StateFlow<List<HotspotCard>> = combine(filteredCards, _cardFilter) { list, filter ->
-        if (filter != CardFilter.UNUSED || list.isEmpty()) return@combine emptyList()
-        
-        val commentCounts = list.groupingBy { it.comment }.eachCount()
-        val (_, rawIndividualCards) = list.partition { card ->
-            val c = card.comment.lowercase()
-            when {
-                c.contains("فردي") -> false
-                c.contains("دفعة") || c.contains("batch") -> true
-                card.id.startsWith("gen_") -> true
-                card.comment.isNotBlank() && (commentCounts[card.comment] ?: 0) > 1 -> true
-                else -> false
+    val allIndividualCards: StateFlow<List<HotspotCard>> = combine(
+        batchPartitionState, _cardSearchQuery, _cardSystemFilter
+    ) { partition, query, systemFilter ->
+        partition.ungroupedCards.filter {
+            cardMatchesSearchAndSystem(it, query, systemFilter)
+        }.sortedWith(
+            compareByDescending<HotspotCard> { repository.getCardCreationTimestamp(it) }
+                .thenByDescending { it.id }
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val readyCardGroups: StateFlow<List<CardBatchGroup>> = combine(
+        batchPartitionState, _cardFilter, _cardSearchQuery, _cardSystemFilter
+    ) { partition, filter, query, systemFilter ->
+        if (filter != CardFilter.UNUSED) return@combine emptyList()
+        partition.batchGroups.mapNotNull { batch ->
+            val batchHeaderMatches = query.isNotBlank() && (
+                batch.title.contains(query, ignoreCase = true) ||
+                    batch.profile.contains(query, ignoreCase = true)
+            )
+            val matchingReady = batch.readyCards.filter {
+                cardMatchesSearchAndSystem(it, query, systemFilter, batchHeaderMatches)
             }
+            if (matchingReady.isEmpty()) return@mapNotNull null
+            val readyVal = matchingReady.sumOf { parseBatchPriceValue(it.price.ifBlank { batch.price }) }
+            batch.copy(
+                cards = matchingReady,
+                readyCards = matchingReady,
+                totalValue = readyVal
+            )
         }
-        rawIndividualCards
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val readyIndividualCards: StateFlow<List<HotspotCard>> = combine(
+        batchPartitionState, activeUsers, _cardFilter, _cardSearchQuery, _cardSystemFilter
+    ) { partition, liveActiveUsers, filter, query, systemFilter ->
+        if (filter != CardFilter.UNUSED) return@combine emptyList()
+        val activeNamesLower = liveActiveUsers.map { it.user.lowercase() }.toSet()
+        partition.ungroupedCards.filter { card ->
+            val lower = card.name.lowercase()
+            val isReady = !activeNamesLower.contains(lower) &&
+                (card.uptime.isBlank() || card.uptime == "0s") &&
+                card.bytesIn == 0L && card.bytesOut == 0L && !card.isExpired
+            isReady && cardMatchesSearchAndSystem(card, query, systemFilter)
+        }.sortedWith(
+            compareByDescending<HotspotCard> { repository.getCardCreationTimestamp(it) }
+                .thenByDescending { it.id }
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val pagedFilteredCards: StateFlow<List<HotspotCard>> = combine(
@@ -1687,9 +1736,9 @@ class MainViewModel(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Printable vouchers sheet
-    private val _printableCards = MutableStateFlow<List<HotspotCard>>(emptyList())
-    val printableCards: StateFlow<List<HotspotCard>> = _printableCards.asStateFlow()
+    val printableBatchOptions: StateFlow<List<com.example.data.model.PrintableBatchOption>> =
+        batchPartitionState.map { it.printableOptions }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Auto-refresh loop
     private val _autoRefresh = MutableStateFlow(true)
@@ -1712,6 +1761,9 @@ class MainViewModel(
     }
 
     private var refreshJob: Job? = null
+    private var connectJob: Job? = null
+    private var consecutiveRefreshFailures = 0
+    private val seenRouterLogKeys = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
 
     // User message toasts / snackbars
     private val _toastEvent = MutableSharedFlow<String>()
@@ -1853,7 +1905,11 @@ class MainViewModel(
         saveToFavorites: Boolean = true,
         context: Context? = null
     ) {
-        viewModelScope.launch {
+        connectJob?.cancel()
+        stopAutoRefresh()
+        consecutiveRefreshFailures = 0
+        seenRouterLogKeys.clear()
+        connectJob = viewModelScope.launch {
             val targetContext = context ?: appContext
             _currentConfig.value = config
 
@@ -1994,6 +2050,9 @@ class MainViewModel(
     }
 
     fun disconnect() {
+        connectJob?.cancel()
+        connectJob = null
+        consecutiveRefreshFailures = 0
         stopAutoRefresh()
         repository.disconnect()
         _connectionState.value = ConnectionState.Disconnected
@@ -2012,8 +2071,10 @@ class MainViewModel(
                 _connectionState.value = currentConn.copy(isSyncing = true)
                 _toastEvent.emit("جاري محاولة الاتصال بالراوتر ومزامنة البيانات...")
                 val res = repository.refreshData()
+                val latestConn = _connectionState.value as? ConnectionState.Connected ?: return@launch
                 if (res.isSuccess) {
-                    _connectionState.value = currentConn.copy(
+                    consecutiveRefreshFailures = 0
+                    _connectionState.value = latestConn.copy(
                         isSyncing = false,
                         isOffline = false,
                         offlineReason = "",
@@ -2029,8 +2090,8 @@ class MainViewModel(
                     }
                 } else {
                     val err = res.exceptionOrNull()?.message ?: "الراوتر غير متاح حالياً"
-                    logApplicationError("SYNC_RETRY", err, "IP: ${currentConn.ipAddress}")
-                    _connectionState.value = currentConn.copy(
+                    logApplicationError("SYNC_RETRY", err, "IP: ${latestConn.ipAddress}")
+                    _connectionState.value = latestConn.copy(
                         isSyncing = false,
                         isOffline = true,
                         offlineReason = err
@@ -2051,6 +2112,7 @@ class MainViewModel(
 
     private fun startAutoRefresh() {
         stopAutoRefresh()
+        consecutiveRefreshFailures = 0
         // Fast 3-second live traffic polling loop for real-time speed display
         trafficPollJob = viewModelScope.launch {
             while (isActive) {
@@ -2068,34 +2130,43 @@ class MainViewModel(
             while (isActive && _autoRefresh.value) {
                 // Background cycle every 8 seconds for overall router data
                 delay(8000)
-                
+
                 if (System.currentTimeMillis() < pauseAutoRefreshUntil) {
                     continue
                 }
-                
+
                 val currentConn = _connectionState.value
                 if (currentConn is ConnectionState.Connected) {
                     if (currentConn.isDemo) {
                         repository.refreshData()
                     } else {
                         val res = repository.refreshData()
+                        val latestConn = _connectionState.value as? ConnectionState.Connected ?: continue
                         if (res.isSuccess) {
-                            if (currentConn.isOffline) {
-                                _connectionState.value = currentConn.copy(
+                            consecutiveRefreshFailures = 0
+                            if (latestConn.isOffline) {
+                                _connectionState.value = latestConn.copy(
                                     isOffline = false,
                                     offlineReason = "",
                                     lastSyncTime = System.currentTimeMillis()
                                 )
                                 _toastEvent.emit("✅ تم استعادة الاتصال بالراوتر وتحديث البيانات بنجاح!")
                                 taskQueueManager.processPendingTasks(repository)
-                            } else if (pendingTasksCount.value > 0) {
-                                // Background automatic retry with exponential backoff
-                                taskQueueManager.processPendingTasks(repository)
+                            } else {
+                                _connectionState.value = latestConn.copy(
+                                    lastSyncTime = System.currentTimeMillis()
+                                )
+                                if (pendingTasksCount.value > 0) {
+                                    // Background automatic retry with exponential backoff
+                                    taskQueueManager.processPendingTasks(repository)
+                                }
                             }
                         } else {
-                            if (!currentConn.isOffline) {
+                            consecutiveRefreshFailures++
+                            // Require 2 consecutive failures before marking offline to avoid single-packet flapping
+                            if (consecutiveRefreshFailures >= 2 && !latestConn.isOffline) {
                                 val err = res.exceptionOrNull()?.message ?: "انقطاع مؤقت في الاتصال بالراوتر"
-                                _connectionState.value = currentConn.copy(
+                                _connectionState.value = latestConn.copy(
                                     isOffline = true,
                                     offlineReason = err
                                 )
@@ -2236,6 +2307,8 @@ class MainViewModel(
         }
     }
 
+    private var lastBatchTimestamp = 0L
+
     fun generateBatch(config: BatchGenerationConfig) {
         viewModelScope.launch {
             val result = repository.generateBatch(config, database.appDao())
@@ -2257,11 +2330,13 @@ class MainViewModel(
                 }
 
                 if (cards.isNotEmpty()) {
-                    // Save batch history
+                    // Save batch history with all generated card names for independent group separation & tracking
                     val jsonArr = JSONArray()
-                    cards.take(10).forEach { jsonArr.put(it.name) }
-                    val batchId = "batch_${System.currentTimeMillis()}"
-                    val timestamp = System.currentTimeMillis()
+                    cards.forEach { jsonArr.put(it.name) }
+                    val nowTs = System.currentTimeMillis()
+                    val timestamp = if (nowTs <= lastBatchTimestamp) lastBatchTimestamp + 1 else nowTs
+                    lastBatchTimestamp = timestamp
+                    val batchId = "batch_$timestamp"
                     database.appDao().insertBatch(
                         BatchHistoryEntity(
                             batchId = batchId,
@@ -2319,6 +2394,15 @@ class MainViewModel(
 
                     // Set printable cards for instant preview
                     _printableCards.value = cards
+                    _selectedPrintableBatchKey.value = batchId
+
+                    // Ensure the newly generated batch is immediately visible in CardsScreen
+                    if (_cardFilter.value != CardFilter.ALL &&
+                        _cardFilter.value != CardFilter.BATCHES &&
+                        _cardFilter.value != CardFilter.UNUSED
+                    ) {
+                        _cardFilter.value = CardFilter.BATCHES
+                    }
                 }
             } else {
                 recordSystemEvent("إضافة", "دفعة كروت", config.batchComment.ifBlank { "دفعة كروت" }, "فشل توليد دفعة كروت في الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
@@ -2571,8 +2655,25 @@ class MainViewModel(
         }
     }
 
-    fun setPrintableCards(cardsToPrint: List<HotspotCard>) {
+    fun setPrintableCards(cardsToPrint: List<HotspotCard>, batchKey: String? = null) {
         _printableCards.value = cardsToPrint
+        _selectedPrintableBatchKey.value = batchKey
+    }
+
+    fun markBatchAsPrinted(batchKey: String) {
+        if (batchKey.isBlank()) return
+        val updated = _printedBatchKeys.value + batchKey
+        _printedBatchKeys.value = updated
+        try {
+            printedBatchesPrefs?.edit()?.putStringSet("printed_keys", updated)?.apply()
+        } catch (_: Exception) {}
+    }
+
+    fun markCurrentBatchAsPrinted() {
+        val currentKey = _selectedPrintableBatchKey.value
+        if (!currentKey.isNullOrBlank()) {
+            markBatchAsPrinted(currentKey)
+        }
     }
 
     fun deleteSavedRouter(id: Long) {
@@ -2751,47 +2852,62 @@ class MainViewModel(
             val ctx = appContext
             if (ctx != null) {
                 viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    com.example.data.local.RouterCacheManager.saveSnapshot(
-                        context = ctx,
-                        ipAddress = snapshot.ipAddress,
-                        routerName = snapshot.routerName,
-                        resource = snapshot.resource,
-                        routerBoard = snapshot.routerBoard,
-                        cards = snapshot.cards,
-                        profiles = snapshot.profiles,
-                        activeUsers = snapshot.activeUsers,
-                        servers = snapshot.servers,
-                        nodes = snapshot.nodes,
-                        logs = snapshot.logs,
-                        ipBindings = snapshot.ipBindings
-                    )
-                    
-                    // Persist logs to Room
+                    val hasMeaningfulData = snapshot.cards.isNotEmpty() ||
+                        snapshot.activeUsers.isNotEmpty() ||
+                        snapshot.nodes.isNotEmpty() ||
+                        snapshot.profiles.isNotEmpty()
+                    if (hasMeaningfulData) {
+                        com.example.data.local.RouterCacheManager.saveSnapshot(
+                            context = ctx,
+                            ipAddress = snapshot.ipAddress,
+                            routerName = snapshot.routerName,
+                            resource = snapshot.resource,
+                            routerBoard = snapshot.routerBoard,
+                            cards = snapshot.cards,
+                            profiles = snapshot.profiles,
+                            activeUsers = snapshot.activeUsers,
+                            servers = snapshot.servers,
+                            nodes = snapshot.nodes,
+                            logs = snapshot.logs,
+                            ipBindings = snapshot.ipBindings
+                        )
+                    }
+
+                    // Persist only unseen logs to Room & Cloud so 8s refreshes do not flood DB/Firestore
                     val dao = database.appDao()
                     snapshot.logs.forEach { log ->
-                        val timestamp = System.currentTimeMillis()
-                        val insertedId = dao.insertSystemEventLog(
-                            SystemEventLogEntity(
-                                actionType = if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام",
-                                targetType = "راوتر",
-                                targetName = "سجل خارجي",
-                                description = log.message,
-                                details = "Topic: ${log.topics}",
-                                timestamp = timestamp
+                        val logKey = "${log.time}|${log.topics}|${log.message}"
+                        val isNewLog = synchronized(seenRouterLogKeys) {
+                            if (seenRouterLogKeys.size > 500) {
+                                val first = seenRouterLogKeys.firstOrNull()
+                                if (first != null) seenRouterLogKeys.remove(first)
+                            }
+                            seenRouterLogKeys.add(logKey)
+                        }
+                        if (isNewLog && log.message.isNotBlank()) {
+                            val timestamp = System.currentTimeMillis()
+                            val insertedId = dao.insertSystemEventLog(
+                                SystemEventLogEntity(
+                                    actionType = if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام",
+                                    targetType = "راوتر",
+                                    targetName = "سجل خارجي",
+                                    description = log.message,
+                                    details = "Topic: ${log.topics}",
+                                    timestamp = timestamp
+                                )
                             )
-                        )
-                        
-                        // Sync to Cloud
-                        syncToCloud("systemLogs", insertedId.toString(), mapOf(
-                            "id" to insertedId.toString(),
-                            "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
-                            "actionType" to (if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام"),
-                            "targetType" to "راوتر",
-                            "targetName" to "سجل خارجي",
-                            "description" to log.message,
-                            "status" to "INFO",
-                            "operatorUsername" to "system"
-                        ))
+
+                            syncToCloud("systemLogs", insertedId.toString(), mapOf(
+                                "id" to insertedId.toString(),
+                                "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
+                                "actionType" to (if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام"),
+                                "targetType" to "راوتر",
+                                "targetName" to "سجل خارجي",
+                                "description" to log.message,
+                                "status" to "INFO",
+                                "operatorUsername" to "system"
+                            ))
+                        }
                     }
                 }
             }
@@ -2930,9 +3046,10 @@ class MainViewModel(
                     }
                 }
 
-                // Detect users who disconnected since last check to archive their logout and reason
+                // Detect users who disconnected since last check ONLY when actively online (never during offline drops)
+                val isOnlineConnected = _connectionState.value.let { it is ConnectionState.Connected && !it.isOffline }
                 val currentNames = activeList.map { it.user }.toSet()
-                if (previousActiveUsernames.isNotEmpty()) {
+                if (isOnlineConnected && previousActiveUsernames.isNotEmpty()) {
                     val disconnectedNames = previousActiveUsernames - currentNames
                     if (disconnectedNames.isNotEmpty()) {
                         val logoutTimeFormatted = com.example.data.network.NetworkUtils.formatArabicFullDateTime(System.currentTimeMillis())
@@ -2973,7 +3090,9 @@ class MainViewModel(
                         }
                     }
                 }
-                previousActiveUsernames = currentNames
+                if (isOnlineConnected || activeList.isNotEmpty()) {
+                    previousActiveUsernames = currentNames
+                }
             }
         }
         viewModelScope.launch {
@@ -3034,7 +3153,292 @@ class MainViewModel(
         super.onCleared()
         stopAutoRefresh()
     }
+
+    companion object {
+        internal fun parseBatchPriceValue(priceStr: String): Double {
+            if (priceStr.isBlank()) return 0.0
+            val cleaned = priceStr.replace(",", "").filter { it.isDigit() || it == '.' }
+            return cleaned.toDoubleOrNull() ?: 0.0
+        }
+
+        internal fun partitionCardsIntoIndependentBatches(
+            allCards: List<HotspotCard>,
+            activeUserNamesLower: Set<String>,
+            batches: List<BatchHistoryEntity>,
+            printedKeys: Set<String>,
+            timestampProvider: (HotspotCard) -> Long
+        ): IndependentBatchPartitionResult {
+            val distinctCards = allCards.distinctBy { it.name.lowercase() }
+            if (distinctCards.isEmpty()) {
+                return IndependentBatchPartitionResult()
+            }
+
+            fun isCardReady(card: HotspotCard): Boolean {
+                val lower = card.name.lowercase()
+                return !activeUserNamesLower.contains(lower) &&
+                    (card.uptime.isBlank() || card.uptime == "0s") &&
+                    card.bytesIn == 0L && card.bytesOut == 0L && !card.isExpired
+            }
+
+            fun computeBatchGroup(
+                batchKey: String,
+                title: String,
+                profile: String,
+                price: String,
+                timestamp: Long,
+                formattedDate: String,
+                cardsInBatch: List<HotspotCard>,
+                expectedCount: Int,
+                batchNumber: Int
+            ): Pair<CardBatchGroup, com.example.data.model.PrintableBatchOption> {
+                val normalized = cardsInBatch.map { card ->
+                    if (card.price.isBlank() && price.isNotBlank()) card.copy(price = price) else card
+                }
+                val readyList = normalized.filter(::isCardReady)
+                var activeCnt = 0
+                var usedOfflineCnt = 0
+                var expiredCnt = 0
+                for (c in normalized) {
+                    val lower = c.name.lowercase()
+                    when {
+                        c.isExpired -> expiredCnt++
+                        activeUserNamesLower.contains(lower) -> activeCnt++
+                        !isCardReady(c) -> usedOfflineCnt++
+                    }
+                }
+                val totalVal = normalized.sumOf { parseBatchPriceValue(it.price.ifBlank { price }) }
+                val isPrinted = printedKeys.contains(batchKey)
+                val firstCard = normalized.first()
+                val resolvedProfile = profile.ifBlank { firstCard.profile }
+                val resolvedPrice = price.ifBlank { firstCard.price }
+                val hasUm = normalized.any { it.isUserManagerCard }
+                val hasHs = normalized.any { it.isHotspotCard }
+                val sysLabel = when {
+                    hasUm && hasHs -> "مختلط"
+                    hasUm -> "يوزرمانجر"
+                    else -> "هوتسبوت"
+                }
+
+                val group = CardBatchGroup(
+                    batchKey = batchKey,
+                    title = title,
+                    profile = resolvedProfile,
+                    price = resolvedPrice,
+                    timestamp = timestamp,
+                    formattedDate = formattedDate,
+                    totalValue = totalVal,
+                    cards = normalized,
+                    allBatchCards = normalized,
+                    readyCards = readyList,
+                    totalGeneratedCount = maxOf(expectedCount, normalized.size),
+                    readyCount = readyList.size,
+                    activeCount = activeCnt,
+                    usedOfflineCount = usedOfflineCnt,
+                    expiredCount = expiredCnt,
+                    isPrintedBefore = isPrinted,
+                    batchNumber = batchNumber,
+                    sourceSystemLabel = sysLabel
+                )
+                val printOption = com.example.data.model.PrintableBatchOption(
+                    batchKey = batchKey,
+                    title = if (batchNumber > 0) "#$batchNumber • $title" else title,
+                    profileName = resolvedProfile,
+                    price = resolvedPrice,
+                    timestamp = timestamp,
+                    formattedDate = formattedDate,
+                    readyCards = readyList,
+                    allCardsInBatch = normalized,
+                    isPrintedBefore = isPrinted,
+                    isNewlyAdded = !isPrinted && readyList.isNotEmpty()
+                )
+                return group to printOption
+            }
+
+            // Pre-parse explicit card sets for each saved BatchHistoryEntity
+            val parsedNamesByBatchId = mutableMapOf<String, Set<String>>()
+            val allExplicitSavedNames = mutableSetOf<String>()
+            batches.forEach { batch ->
+                val names = mutableSetOf<String>()
+                if (batch.cardsJson.isNotBlank()) {
+                    try {
+                        val arr = JSONArray(batch.cardsJson)
+                        for (i in 0 until arr.length()) {
+                            val n = arr.optString(i, "").trim().lowercase()
+                            if (n.isNotBlank()) {
+                                names.add(n)
+                                allExplicitSavedNames.add(n)
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+                parsedNamesByBatchId[batch.batchId] = names
+            }
+
+            val batchNumberById = batches
+                .sortedWith(compareBy<BatchHistoryEntity> { it.createdAt }.thenBy { it.batchId })
+                .mapIndexed { idx, batch -> batch.batchId to (idx + 1) }
+                .toMap()
+
+            val consumedNames = mutableSetOf<String>()
+            val batchGroups = mutableListOf<CardBatchGroup>()
+            val printOptions = mutableListOf<com.example.data.model.PrintableBatchOption>()
+
+            // 1. Strictly isolate every saved BatchHistoryEntity into its own independent group
+            batches.sortedWith(
+                compareByDescending<BatchHistoryEntity> { it.createdAt }
+                    .thenByDescending { it.batchId }
+            ).forEach { batch ->
+                val savedNames = parsedNamesByBatchId[batch.batchId].orEmpty()
+                val directMatches = distinctCards.filter {
+                    val lower = it.name.lowercase()
+                    !consumedNames.contains(lower) && savedNames.contains(lower)
+                }.toMutableList()
+
+                // Fallback strictly for legacy DB entries where cardsJson was truncated to 10 names
+                if (savedNames.size < batch.cardCount && directMatches.size < batch.cardCount) {
+                    val needed = (batch.cardCount - directMatches.size).coerceAtLeast(0)
+                    val extraMatches = distinctCards.filter { card ->
+                        val lower = card.name.lowercase()
+                        if (consumedNames.contains(lower) || savedNames.contains(lower)) return@filter false
+                        // Never steal cards explicitly recorded under another batch
+                        if (allExplicitSavedNames.contains(lower)) return@filter false
+                        val matchesCommentAndProfile = batch.name.isNotBlank() &&
+                            card.comment.equals(batch.name, ignoreCase = true) &&
+                            card.profile.equals(batch.profileName, ignoreCase = true)
+                        val cardTs = timestampProvider(card)
+                        val matchesTimestampAndProfile = cardTs > 0L &&
+                            kotlin.math.abs(cardTs - batch.createdAt) <= 120_000L &&
+                            card.profile.equals(batch.profileName, ignoreCase = true)
+                        matchesCommentAndProfile || matchesTimestampAndProfile
+                    }.take(needed)
+                    directMatches.addAll(extraMatches)
+                }
+
+                if (directMatches.isNotEmpty()) {
+                    directMatches.forEach { consumedNames.add(it.name.lowercase()) }
+                    val formattedDate = if (batch.createdAt > 0L) {
+                        NetworkUtils.formatArabicFullDateTime(batch.createdAt)
+                    } else {
+                        "دفعة مسجلة"
+                    }
+                    val title = batch.name.ifBlank { "دفعة (${batch.profileName})" }
+                    val (group, opt) = computeBatchGroup(
+                        batchKey = batch.batchId,
+                        title = title,
+                        profile = batch.profileName,
+                        price = batch.price,
+                        timestamp = batch.createdAt,
+                        formattedDate = formattedDate,
+                        cardsInBatch = directMatches,
+                        expectedCount = batch.cardCount,
+                        batchNumber = batchNumberById[batch.batchId] ?: 0
+                    )
+                    batchGroups.add(group)
+                    printOptions.add(opt)
+                }
+            }
+
+            // 2. Group remaining batch-like router cards WITHOUT merging separate batches generated at different times
+            val remainingCards = distinctCards.filter { !consumedNames.contains(it.name.lowercase()) }
+            val commentCounts = remainingCards.groupingBy { it.comment.trim() }.eachCount()
+            val remainingBatchCards = remainingCards.filter { card ->
+                val c = card.comment.lowercase()
+                when {
+                    c.contains("فردي") -> false
+                    c.contains("دفعة") || c.contains("batch") -> true
+                    card.id.startsWith("gen_") -> true
+                    card.comment.isNotBlank() && (commentCounts[card.comment.trim()] ?: 0) > 1 -> true
+                    else -> false
+                }
+            }
+
+            // Partition into gen_-timestamped batches vs time-clustered router groups
+            val routerClusters = linkedMapOf<String, List<HotspotCard>>()
+            val (genCards, nonGenCards) = remainingBatchCards.partition {
+                it.id.startsWith("gen_") && (it.id.split("_").getOrNull(1)?.toLongOrNull() != null)
+            }
+
+            genCards.groupBy { card ->
+                val genTs = card.id.split("_").getOrNull(1)?.toLongOrNull() ?: 0L
+                val bucket = genTs / 5_000L
+                "router_gen_${bucket}_${card.profile.trim().lowercase()}"
+            }.forEach { (k, list) ->
+                routerClusters[k] = list
+            }
+
+            nonGenCards.groupBy { card ->
+                card.comment.trim().lowercase() to card.profile.trim().lowercase()
+            }.forEach { (pairKey, cardsInPair) ->
+                val sortedByTime = cardsInPair.sortedBy { timestampProvider(it) }
+                var clusterIdx = 0
+                var currentCluster = mutableListOf<HotspotCard>()
+                var prevTs = 0L
+                for (card in sortedByTime) {
+                    val ts = timestampProvider(card)
+                    if (currentCluster.isNotEmpty() && prevTs > 0L && ts > 0L && kotlin.math.abs(ts - prevTs) > 120_000L) {
+                        val clusterKey = "router_grp_${pairKey.first.hashCode()}_${pairKey.second.hashCode()}_$clusterIdx"
+                        routerClusters[clusterKey] = currentCluster
+                        clusterIdx++
+                        currentCluster = mutableListOf()
+                    }
+                    currentCluster.add(card)
+                    if (ts > 0L) prevTs = ts
+                }
+                if (currentCluster.isNotEmpty()) {
+                    val clusterKey = "router_grp_${pairKey.first.hashCode()}_${pairKey.second.hashCode()}_$clusterIdx"
+                    routerClusters[clusterKey] = currentCluster
+                }
+            }
+
+            routerClusters.forEach { (key, cardsInGroup) ->
+                cardsInGroup.forEach { consumedNames.add(it.name.lowercase()) }
+                val first = cardsInGroup.first()
+                val ts = cardsInGroup.maxOfOrNull { timestampProvider(it) } ?: 0L
+                val formattedDate = if (ts > 0L) NetworkUtils.formatArabicFullDateTime(ts) else "تاريخ محفوظ في الراوتر"
+                val title = when {
+                    first.comment.isNotBlank() && first.comment != "دفعة كروت" -> first.comment
+                    first.price.isNotBlank() -> "مجموعة (${first.profile}) - ${first.price}"
+                    else -> "مجموعة (${first.profile})"
+                }
+                val (group, opt) = computeBatchGroup(
+                    batchKey = key,
+                    title = title,
+                    profile = first.profile,
+                    price = first.price,
+                    timestamp = ts,
+                    formattedDate = formattedDate,
+                    cardsInBatch = cardsInGroup,
+                    expectedCount = cardsInGroup.size,
+                    batchNumber = 0
+                )
+                batchGroups.add(group)
+                printOptions.add(opt)
+            }
+
+            val ungrouped = distinctCards.filter { !consumedNames.contains(it.name.lowercase()) }
+            val sortedGroups = batchGroups.sortedWith(
+                compareByDescending<CardBatchGroup> { it.timestamp }
+                    .thenByDescending { it.batchNumber }
+                    .thenByDescending { it.batchKey }
+            )
+            val sortedPrintOptions = printOptions.sortedWith(
+                compareByDescending<com.example.data.model.PrintableBatchOption> { it.isNewlyAdded }
+                    .thenByDescending { it.timestamp }
+            )
+            return IndependentBatchPartitionResult(
+                batchGroups = sortedGroups,
+                ungroupedCards = ungrouped,
+                printableOptions = sortedPrintOptions
+            )
+        }
+    }
 }
+
+data class IndependentBatchPartitionResult(
+    val batchGroups: List<CardBatchGroup> = emptyList(),
+    val ungroupedCards: List<HotspotCard> = emptyList(),
+    val printableOptions: List<com.example.data.model.PrintableBatchOption> = emptyList()
+)
 
 class MainViewModelFactory(
     private val repository: MikrotikRepository,

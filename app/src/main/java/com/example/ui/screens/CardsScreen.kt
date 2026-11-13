@@ -124,14 +124,19 @@ fun CardsScreen(
     modifier: Modifier = Modifier
 ) {
     val pagedFilteredCards by viewModel.pagedFilteredCards.collectAsStateWithLifecycle()
+    val filteredCards by viewModel.filteredCards.collectAsStateWithLifecycle()
+    val allBatchGroups by viewModel.allBatchGroups.collectAsStateWithLifecycle()
+    val allIndividualCards by viewModel.allIndividualCards.collectAsStateWithLifecycle()
     val readyCardGroups by viewModel.readyCardGroups.collectAsStateWithLifecycle()
     val readyIndividualCards by viewModel.readyIndividualCards.collectAsStateWithLifecycle()
+    val printableBatchOptions by viewModel.printableBatchOptions.collectAsStateWithLifecycle()
     val allCards by viewModel.cards.collectAsStateWithLifecycle()
     val activeUsers by viewModel.activeUsers.collectAsStateWithLifecycle()
     val userSessions by viewModel.userSessions.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val searchQuery by viewModel.cardSearchQuery.collectAsStateWithLifecycle()
     val currentFilter by viewModel.cardFilter.collectAsStateWithLifecycle()
+    val cardDisplayLimit by viewModel.cardDisplayLimit.collectAsStateWithLifecycle()
     val pendingTasksCount by viewModel.pendingTasksCount.collectAsStateWithLifecycle()
     val isProcessingQueue by viewModel.isProcessingQueue.collectAsStateWithLifecycle()
 
@@ -147,6 +152,16 @@ fun CardsScreen(
     var readySubFilter by remember { mutableStateOf(ReadyCardsSubFilter.ALL) }
     var readySortOrder by remember { mutableStateOf(ReadyCardsSortOrder.NEWEST_FIRST) }
     var collapsedBatchKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var expandedLifecycleBatchKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var lastAutoExpandedBatchKey by remember { mutableStateOf<String?>(null) }
+
+    val newestBatchKey = allBatchGroups.firstOrNull()?.batchKey
+    androidx.compose.runtime.LaunchedEffect(newestBatchKey) {
+        if (newestBatchKey != null && newestBatchKey != lastAutoExpandedBatchKey) {
+            expandedLifecycleBatchKeys = expandedLifecycleBatchKeys + newestBatchKey
+            lastAutoExpandedBatchKey = newestBatchKey
+        }
+    }
 
     val cardStats by viewModel.cardStats.collectAsStateWithLifecycle()
     val countActive = cardStats.active
@@ -338,6 +353,14 @@ fun CardsScreen(
                     modifier = Modifier.height(36.dp)
                 )
                 FilterChip(
+                    selected = currentFilter == CardFilter.BATCHES,
+                    onClick = { viewModel.updateCardFilter(CardFilter.BATCHES) },
+                    leadingIcon = { Icon(Icons.Default.Group, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                    label = { Text("الدفعات (${allBatchGroups.size})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
+                )
+                FilterChip(
                     selected = currentFilter == CardFilter.UNUSED,
                     onClick = { viewModel.updateCardFilter(CardFilter.UNUSED) },
                     label = { Text("جاهزة للبيع ($countUnused)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
@@ -376,8 +399,15 @@ fun CardsScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
+            val isCurrentViewEmpty = when (currentFilter) {
+                CardFilter.BATCHES -> allBatchGroups.isEmpty()
+                CardFilter.UNUSED -> readyCardGroups.isEmpty() && readyIndividualCards.isEmpty()
+                CardFilter.ALL -> allBatchGroups.isEmpty() && allIndividualCards.isEmpty()
+                else -> pagedFilteredCards.isEmpty()
+            }
+
             // Cards List
-            if (pagedFilteredCards.isEmpty()) {
+            if (isCurrentViewEmpty) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -393,7 +423,10 @@ fun CardsScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = if (searchQuery.isNotBlank()) "لا توجد كروت تطابق البحث" else if (currentFilter != CardFilter.ALL) "لا توجد كروت في هذا القسم" else "لا توجد كروت، اضغط على زر توليد كروت لإضافة كروت جديدة للشبكة",
+                            text = if (searchQuery.isNotBlank()) "لا توجد كروت أو دفعات تطابق البحث"
+                            else if (currentFilter == CardFilter.BATCHES) "لا توجد دفعات مولّدة حتى الآن، اضغط على زر التوليد لإنشاء دفعة مستقلة"
+                            else if (currentFilter != CardFilter.ALL) "لا توجد كروت في هذا القسم"
+                            else "لا توجد كروت، اضغط على زر توليد كروت لإضافة كروت جديدة للشبكة",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -401,7 +434,7 @@ fun CardsScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (currentFilter != CardFilter.ALL) {
                                 OutlinedButton(
-                                onClick = { viewModel.updateCardFilter(CardFilter.ALL) },
+                                    onClick = { viewModel.updateCardFilter(CardFilter.ALL) },
                                     shape = RoundedCornerShape(12.dp)
                                 ) {
                                     Text("عرض كل الكروت (${cardStats.total})")
@@ -416,6 +449,163 @@ fun CardsScreen(
                                 Text("توليد كروت جديدة الآن")
                             }
                         }
+                    }
+                }
+            } else if (currentFilter == CardFilter.BATCHES || currentFilter == CardFilter.ALL) {
+                val sortedLifecycleBatches: List<CardBatchGroup> = remember(allBatchGroups, readySortOrder) {
+                    when (readySortOrder) {
+                        ReadyCardsSortOrder.NEWEST_FIRST -> allBatchGroups.sortedWith(
+                            compareByDescending<CardBatchGroup> { it.timestamp }.thenByDescending { it.batchNumber }
+                        )
+                        ReadyCardsSortOrder.OLDEST_FIRST -> allBatchGroups.sortedWith(
+                            compareBy<CardBatchGroup> { it.timestamp }.thenBy { it.batchNumber }
+                        )
+                        ReadyCardsSortOrder.BY_PROFILE -> allBatchGroups.sortedBy { it.profile }
+                        ReadyCardsSortOrder.BY_PRICE -> allBatchGroups.sortedByDescending { it.totalValue }
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    if (sortedLifecycleBatches.isNotEmpty()) {
+                        item(key = "batches_tracking_summary") {
+                            BatchesLifecycleSummaryCard(
+                                batches = sortedLifecycleBatches,
+                                isBatchesOnlyTab = currentFilter == CardFilter.BATCHES,
+                                currentSortOrder = readySortOrder,
+                                onSortOrderSelected = { readySortOrder = it },
+                                areAllExpanded = sortedLifecycleBatches.all { expandedLifecycleBatchKeys.contains(it.batchKey) },
+                                onToggleExpandAll = { expandAll ->
+                                    expandedLifecycleBatchKeys = if (expandAll) {
+                                        sortedLifecycleBatches.map { it.batchKey }.toSet()
+                                    } else {
+                                        emptySet()
+                                    }
+                                }
+                            )
+                        }
+
+                        sortedLifecycleBatches.forEach { batch ->
+                            val isExpanded = expandedLifecycleBatchKeys.contains(batch.batchKey)
+                            item(key = "lifecycle_batch_header_${batch.batchKey}") {
+                                BatchGroupHeaderCard(
+                                    batch = batch,
+                                    isExpanded = isExpanded,
+                                    onToggleExpand = {
+                                        expandedLifecycleBatchKeys = if (isExpanded) {
+                                            expandedLifecycleBatchKeys - batch.batchKey
+                                        } else {
+                                            expandedLifecycleBatchKeys + batch.batchKey
+                                        }
+                                    },
+                                    onPrintBatch = {
+                                        val toPrint = if (batch.readyCards.isNotEmpty()) batch.readyCards else batch.allBatchCards
+                                        viewModel.setPrintableCards(toPrint, batch.batchKey)
+                                        onOpenPrintScreen()
+                                    },
+                                    onPrintAllInBatch = if (batch.readyCards.isNotEmpty() && batch.allBatchCards.size > batch.readyCards.size) {
+                                        {
+                                            viewModel.setPrintableCards(batch.allBatchCards, batch.batchKey)
+                                            onOpenPrintScreen()
+                                        }
+                                    } else null,
+                                    onCopyBatchCodes = {
+                                        val text = batch.cards.joinToString("\n") { card ->
+                                            if (card.password.isNotBlank() && card.password != card.name) {
+                                                "كود: ${card.name} | كلمة السر: ${card.password} | باقة: ${card.profile} | سعر: ${card.price}"
+                                            } else {
+                                                "كود: ${card.name} | باقة: ${card.profile} | سعر: ${card.price}"
+                                            }
+                                        }
+                                        clipboardManager.setText(AnnotatedString(text))
+                                        Toast.makeText(context, "تم نسخ أكواد ${batch.cards.size} كرت للحافظة بنجاح", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            }
+
+                            if (isExpanded) {
+                                items(batch.cards, key = { "lifecycle_batch_card_${batch.batchKey}_${it.id}_${it.name}" }) { card ->
+                                    Box(modifier = Modifier.padding(start = 12.dp)) {
+                                        HotspotCardItem(
+                                            card = card,
+                                            creationTimestamp = viewModel.getCardCreationTimestamp(card),
+                                            onClick = { onCardDetailClick(card) },
+                                            onEdit = { cardToEdit = card },
+                                            onReactivate = { cardToReactivate = card },
+                                            onToggleDisabled = { viewModel.toggleCardDisabled(card.id, card.disabled) },
+                                            onDelete = { cardToDelete = card },
+                                            onVerifyAndActivate = { viewModel.verifyAndActivateCard(card) }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (currentFilter == CardFilter.ALL && allIndividualCards.isNotEmpty()) {
+                        val pagedIndividuals = allIndividualCards.take(cardDisplayLimit)
+                        item(key = "all_individual_header") {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 6.dp, bottom = 2.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Person,
+                                        contentDescription = null,
+                                        tint = StatusActiveGreen,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "الكروت الفردية / غير المصنفة (${allIndividualCards.size} كرت)",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                        items(pagedIndividuals, key = { "all_ind_${it.id}_${it.name}_${it.isUserManagerCard}" }) { card ->
+                            HotspotCardItem(
+                                card = card,
+                                creationTimestamp = viewModel.getCardCreationTimestamp(card),
+                                onClick = { onCardDetailClick(card) },
+                                onEdit = { cardToEdit = card },
+                                onReactivate = { cardToReactivate = card },
+                                onToggleDisabled = { viewModel.toggleCardDisabled(card.id, card.disabled) },
+                                onDelete = { cardToDelete = card },
+                                onVerifyAndActivate = { viewModel.verifyAndActivateCard(card) }
+                            )
+                        }
+                        if (pagedIndividuals.size < allIndividualCards.size) {
+                            item(key = "load_more_individuals") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Button(
+                                        onClick = { viewModel.loadMoreCards() },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = RouterBlue)
+                                    ) {
+                                        Text("تحميل المزيد من الكروت...")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    item(key = "batches_bottom_spacer") {
+                        Spacer(modifier = Modifier.height(80.dp))
                     }
                 }
             } else if (currentFilter == CardFilter.UNUSED) {
@@ -503,9 +693,15 @@ fun CardsScreen(
                                             }
                                         },
                                         onPrintBatch = {
-                                            viewModel.setPrintableCards(batch.cards)
+                                            viewModel.setPrintableCards(batch.cards, batch.batchKey)
                                             onOpenPrintScreen()
                                         },
+                                        onPrintAllInBatch = if (batch.allBatchCards.size > batch.cards.size) {
+                                            {
+                                                viewModel.setPrintableCards(batch.allBatchCards, batch.batchKey)
+                                                onOpenPrintScreen()
+                                            }
+                                        } else null,
                                         onCopyBatchCodes = {
                                             val text = batch.cards.joinToString("\n") { card ->
                                                 if (card.password.isNotBlank() && card.password != card.name) {
@@ -521,7 +717,7 @@ fun CardsScreen(
                                 }
 
                                 if (isExpanded) {
-                                    items(batch.cards, key = { "batch_card_${batch.batchKey}_${it.id}" }) { card ->
+                                    items(batch.cards, key = { "batch_card_${batch.batchKey}_${it.id}_${it.name}" }) { card ->
                                         Box(modifier = Modifier.padding(start = 12.dp)) {
                                             HotspotCardItem(
                                                 card = card,
@@ -594,7 +790,7 @@ fun CardsScreen(
                                 }
                             }
 
-                            items(sortedIndividualCards, key = { "ind_card_${it.id}" }) { card ->
+                            items(sortedIndividualCards, key = { "ind_card_${it.id}_${it.name}" }) { card ->
                                 HotspotCardItem(
                                     card = card,
                                     creationTimestamp = viewModel.getCardCreationTimestamp(card),
@@ -627,7 +823,7 @@ fun CardsScreen(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(pagedFilteredCards, key = { it.id }) { card ->
+                    items(pagedFilteredCards, key = { "${it.id}_${it.name}_${it.isUserManagerCard}" }) { card ->
                         HotspotCardItem(
                             card = card,
                             creationTimestamp = viewModel.getCardCreationTimestamp(card),
@@ -641,7 +837,7 @@ fun CardsScreen(
                             onVerifyAndActivate = { viewModel.verifyAndActivateCard(card) }
                         )
                     }
-                    if (pagedFilteredCards.size < cardStats.total) {
+                    if (pagedFilteredCards.size < filteredCards.size) {
                         item {
                             Box(
                                 modifier = Modifier
@@ -752,11 +948,14 @@ fun CardsScreen(
 
     // Print Category & Ready Cards Selection Dialog
     if (showPrintSelectionDialog) {
+        var selectedBatchKeyForPrint by remember { mutableStateOf<String?>(null) }
         PrintSelectionDialog(
             allCards = allCards,
+            batchOptions = printableBatchOptions,
             onDismiss = { showPrintSelectionDialog = false },
+            onBatchSelectedForPrint = { key -> selectedBatchKeyForPrint = key },
             onConfirmSelection = { selectedCards ->
-                viewModel.setPrintableCards(selectedCards)
+                viewModel.setPrintableCards(selectedCards, selectedBatchKeyForPrint)
                 showPrintSelectionDialog = false
                 onOpenPrintScreen()
             }
@@ -1394,13 +1593,223 @@ fun ReadyCardsDashboardCard(
 }
 
 @Composable
+fun BatchesLifecycleSummaryCard(
+    batches: List<CardBatchGroup>,
+    isBatchesOnlyTab: Boolean,
+    currentSortOrder: ReadyCardsSortOrder,
+    onSortOrderSelected: (ReadyCardsSortOrder) -> Unit,
+    areAllExpanded: Boolean,
+    onToggleExpandAll: (Boolean) -> Unit
+) {
+    val totalBatches = batches.size
+    val totalGenerated = remember(batches) { batches.sumOf { it.totalGeneratedCount } }
+    val totalReady = remember(batches) { batches.sumOf { it.readyCount } }
+    val totalActive = remember(batches) { batches.sumOf { it.activeCount } }
+    val totalUsedOrExpired = remember(batches) { batches.sumOf { it.usedOfflineCount + it.expiredCount } }
+    val unprintedBatches = remember(batches) { batches.count { !it.isPrintedBefore && it.readyCount > 0 } }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("batches_lifecycle_summary_card"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        border = BorderStroke(1.dp, RouterBlue.copy(alpha = 0.25f))
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(RouterBlue.copy(alpha = 0.14f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Group,
+                            contentDescription = null,
+                            tint = RouterBlue,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = if (isBatchesOnlyTab) "لوحة تتبع الدفعات المستقلة ($totalBatches دفعة)"
+                            else "الدفعات المولّدة المستقلة ($totalBatches دفعة)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "كل دفعة معزولة بتاريخها وباقتها لمتابعة البيع والطباعة بدقة",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = { onToggleExpandAll(!areAllExpanded) },
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(30.dp)
+                ) {
+                    Text(
+                        text = if (areAllExpanded) "طي الكل" else "فتح الكل",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                BatchStatMiniChip(
+                    label = "المولّد",
+                    value = "$totalGenerated",
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+                BatchStatMiniChip(
+                    label = "جاهز",
+                    value = "$totalReady",
+                    containerColor = StatusActiveGreenBg,
+                    contentColor = StatusActiveGreen,
+                    modifier = Modifier.weight(1f)
+                )
+                BatchStatMiniChip(
+                    label = "نشط",
+                    value = "$totalActive",
+                    containerColor = RouterBlue.copy(alpha = 0.12f),
+                    contentColor = RouterBlue,
+                    modifier = Modifier.weight(1f)
+                )
+                BatchStatMiniChip(
+                    label = "مستخدم/منتهي",
+                    value = "$totalUsedOrExpired",
+                    containerColor = StatusWarningAmberBg,
+                    contentColor = StatusWarningAmber,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            if (unprintedBatches > 0) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = StatusWarningAmberBg.copy(alpha = 0.7f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Print,
+                            contentDescription = null,
+                            tint = StatusWarningAmber,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "يوجد $unprintedBatches دفعة جديدة لم تُطبع بعد",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = StatusWarningAmber,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Sort,
+                    contentDescription = "ترتيب الدفعات",
+                    modifier = Modifier.size(15.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                ReadyCardsSortOrder.entries.forEach { option ->
+                    FilterChip(
+                        selected = currentSortOrder == option,
+                        onClick = { onSortOrderSelected(option) },
+                        label = { Text(option.title, fontSize = 11.sp) },
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.height(30.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BatchStatMiniChip(
+    label: String,
+    value: String,
+    containerColor: Color,
+    contentColor: Color,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(8.dp),
+        color = containerColor
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = value,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.ExtraBold,
+                color = contentColor
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = contentColor.copy(alpha = 0.85f),
+                fontSize = 10.sp
+            )
+        }
+    }
+}
+
+@Composable
 fun BatchGroupHeaderCard(
     batch: CardBatchGroup,
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
     onPrintBatch: () -> Unit,
+    onPrintAllInBatch: (() -> Unit)? = null,
     onCopyBatchCodes: () -> Unit
 ) {
+    val consumedCount = batch.activeCount + batch.usedOfflineCount + batch.expiredCount
+    val denom = maxOf(batch.totalGeneratedCount, batch.allBatchCards.size, 1)
+    val consumedFraction = (consumedCount.toFloat() / denom.toFloat()).coerceIn(0f, 1f)
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1413,7 +1822,7 @@ fun BatchGroupHeaderCard(
         border = BorderStroke(1.2.dp, RouterBlue.copy(alpha = 0.35f))
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            // Header: Title, Batch Badge, Creation Date, Expand Toggle
+            // Header: Batch #, Title, Print Status, Creation Date, Expand Toggle
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1444,21 +1853,52 @@ fun BatchGroupHeaderCard(
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState())
                         ) {
+                            if (batch.batchNumber > 0) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = RouterBlue
+                                ) {
+                                    Text(
+                                        text = "دفعة #${batch.batchNumber}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
                             Text(
                                 text = batch.title,
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
+                            if (batch.sourceSystemLabel.isNotBlank()) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = RouterBlue.copy(alpha = 0.12f)
+                                ) {
+                                    Text(
+                                        text = batch.sourceSystemLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = RouterBlue,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = RouterBlue.copy(alpha = 0.12f)
+                                color = if (batch.isPrintedBefore) StatusActiveGreenBg else StatusWarningAmberBg
                             ) {
                                 Text(
-                                    text = "دفعة جماعية",
+                                    text = if (batch.isPrintedBefore) "تمت الطباعة" else "جديد • لم يُطبع",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = RouterBlue,
+                                    color = if (batch.isPrintedBefore) StatusActiveGreen else StatusWarningAmber,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 10.sp,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -1542,7 +1982,7 @@ fun BatchGroupHeaderCard(
                     color = MaterialTheme.colorScheme.surfaceVariant
                 ) {
                     Text(
-                        text = "${batch.cards.size} كروت بالدفعة",
+                        text = "المولّد: ${batch.totalGeneratedCount} كرت",
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         fontWeight = FontWeight.Bold
@@ -1555,7 +1995,7 @@ fun BatchGroupHeaderCard(
                         color = StatusActiveGreenBg
                     ) {
                         Text(
-                            text = "إجمالي القيمة: ${batch.totalValue.toInt()} ر.ي",
+                            text = "القيمة: ${batch.totalValue.toInt()} ر.ي",
                             style = MaterialTheme.typography.labelSmall,
                             color = StatusActiveGreen,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -1565,38 +2005,124 @@ fun BatchGroupHeaderCard(
                 }
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Live Lifecycle Tracking Strip
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    BatchStatMiniChip(
+                        label = "جاهز",
+                        value = "${batch.readyCount}",
+                        containerColor = StatusActiveGreenBg,
+                        contentColor = StatusActiveGreen,
+                        modifier = Modifier.weight(1f)
+                    )
+                    BatchStatMiniChip(
+                        label = "نشط",
+                        value = "${batch.activeCount}",
+                        containerColor = RouterBlue.copy(alpha = 0.12f),
+                        contentColor = RouterBlue,
+                        modifier = Modifier.weight(1f)
+                    )
+                    BatchStatMiniChip(
+                        label = "مستخدم",
+                        value = "${batch.usedOfflineCount}",
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    BatchStatMiniChip(
+                        label = "منتهي",
+                        value = "${batch.expiredCount}",
+                        containerColor = StatusErrorRedBg,
+                        contentColor = StatusErrorRed,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "نسبة الاستهلاك والبيع: ${(consumedFraction * 100).toInt()}% ($consumedCount من $denom)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 10.sp
+                    )
+                    Text(
+                        text = "المتبقي جاهز: ${batch.readyCount}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StatusActiveGreen,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp
+                    )
+                }
+                LinearProgressIndicator(
+                    progress = { consumedFraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = RouterBlue,
+                    trackColor = StatusActiveGreenBg
+                )
+            }
+
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Action Toolbar (Print Batch, Copy All Codes, Expand/Collapse)
+            // Action Toolbar (Print Ready / Print All, Copy All Codes, Expand/Collapse)
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Button(
                     onClick = onPrintBatch,
                     shape = RoundedCornerShape(8.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = CyberGreenPrimary),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                    modifier = Modifier.height(36.dp)
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                    modifier = Modifier.height(34.dp)
                 ) {
-                    Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("طباعة الدفعة كاملة", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = if (batch.readyCards.isNotEmpty()) "طباعة الجاهزة (${batch.readyCards.size})"
+                        else "طباعة الدفعة (${batch.allBatchCards.size})",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (onPrintAllInBatch != null) {
+                    OutlinedButton(
+                        onClick = onPrintAllInBatch,
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 9.dp, vertical = 0.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("الكل (${batch.allBatchCards.size})", fontSize = 11.sp)
+                    }
                 }
 
                 OutlinedButton(
                     onClick = onCopyBatchCodes,
                     shape = RoundedCornerShape(8.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                    modifier = Modifier.height(36.dp)
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 9.dp, vertical = 0.dp),
+                    modifier = Modifier.height(34.dp)
                 ) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(13.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("نسخ جميع الأكواد", fontSize = 12.sp)
+                    Text("نسخ الأكواد", fontSize = 11.sp)
                 }
-
-                Spacer(modifier = Modifier.weight(1f))
 
                 Surface(
                     shape = RoundedCornerShape(8.dp),

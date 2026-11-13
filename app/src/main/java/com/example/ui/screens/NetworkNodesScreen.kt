@@ -47,6 +47,9 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.ui.text.style.TextOverflow
 import com.example.ui.components.NodeClientItemCard
 import com.example.data.model.HotspotActiveUser
 import androidx.compose.ui.platform.LocalContext
@@ -143,17 +146,19 @@ fun NetworkNodesScreen(
     val displayedNodes = nodes
     var topologyFilterOnlyWithUsers by remember { mutableStateOf(true) }
 
+    val activeWithUsersCount = remember(displayedNodes) {
+        displayedNodes.count { node ->
+            node.isOnline && node.effectiveStatus == NodeStatus.ACTIVE && node.connectedUsers > 0
+        }
+    }
+
     val displayedTopologyNodes = remember(displayedNodes, topologyFilterOnlyWithUsers) {
         if (!topologyFilterOnlyWithUsers) {
             displayedNodes
         } else {
-            // Smart filter: Keep main towers + nodes with active users or active traffic, fallback to all if none
-            val filtered = displayedNodes.filter { node ->
-                node.nodeType == NetworkNodeType.MAIN_TOWER ||
-                node.connectedUsers > 0 ||
-                (node.isOnline && (node.rxSpeedKbps + node.txSpeedKbps > 10.0))
+            displayedNodes.filter { node ->
+                node.isOnline && node.effectiveStatus == NodeStatus.ACTIVE && node.connectedUsers > 0
             }
-            if (filtered.isNotEmpty()) filtered else displayedNodes
         }
     }
 
@@ -318,7 +323,7 @@ fun NetworkNodesScreen(
 
                         // Last Heartbeat Time
                         Text(
-                            text = if (lastHeartbeatScanTime != null) "آخر فحص: $lastHeartbeatScanTime" else "$totalUsersOnNodes مشترك",
+                            text = if (lastHeartbeatScanTime > 0L) "آخر فحص: ${NetworkUtils.formatCardCreationDate(lastHeartbeatScanTime)}" else "$totalUsersOnNodes مشترك",
                             color = Color.White.copy(alpha = 0.9f),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Medium
@@ -592,7 +597,11 @@ fun NetworkNodesScreen(
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                         Text(
-                                            text = if (topologyFilterOnlyWithUsers) "عرض الأبراج ونقاط التوزيع النشطة وبها مستخدمين" else "عرض كامل النقاط المكتشفة",
+                                            text = if (topologyFilterOnlyWithUsers) {
+                                                "عرض النقاط المتصلة التي بها مشتركين فعلياً فقط (إخفاء الفارغة والطافية)"
+                                            } else {
+                                                "عرض كافة النقاط المسجلة في الشبكة (${displayedNodes.size})"
+                                            },
                                             style = MaterialTheme.typography.labelSmall,
                                             fontSize = 10.sp,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -636,7 +645,7 @@ fun NetworkNodesScreen(
                                         onClick = { topologyFilterOnlyWithUsers = true },
                                         label = {
                                             Text(
-                                                text = "النشطة وبها مستخدمين (${displayedNodes.count { it.connectedUsers > 0 || it.nodeType == NetworkNodeType.MAIN_TOWER }})",
+                                                text = "بها مشتركين فقط ($activeWithUsersCount)",
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.Bold
                                             )
@@ -669,6 +678,41 @@ fun NetworkNodesScreen(
                                         },
                                         shape = RoundedCornerShape(8.dp)
                                     )
+                                }
+
+                                if (topologyFilterOnlyWithUsers && displayedTopologyNodes.isEmpty()) {
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 6.dp),
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+                                        ),
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                text = "لا توجد نقاط بها مشتركين حالياً — البقية (${displayedNodes.size}) مرتبة في شجرة الأبراج.",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            OutlinedButton(
+                                                onClick = { topologyFilterOnlyWithUsers = false },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                modifier = Modifier.height(32.dp)
+                                            ) {
+                                                Text("عرض الكل", fontSize = 11.sp)
+                                            }
+                                        }
+                                    }
                                 }
 
                                 Spacer(modifier = Modifier.height(4.dp))
@@ -781,7 +825,7 @@ fun NetworkNodesScreen(
                                     }
                                 }
 
-                                items(activeNodesWithUsers, key = { it.id }) { node ->
+                                items(activeNodesWithUsers, key = { "active_${it.id}_${it.ipAddress}" }) { node ->
                                     NetworkNodeItem(
                                         node = node,
                                         onDetailClick = { selectedNodeForDetail = node },
@@ -842,7 +886,7 @@ fun NetworkNodesScreen(
                                 }
 
                                 if (isIdleGroupExpanded) {
-                                    items(activeNodesNoUsers, key = { it.id }) { node ->
+                                    items(activeNodesNoUsers, key = { "idle_${it.id}_${it.ipAddress}" }) { node ->
                                         Box(modifier = Modifier.padding(start = 8.dp)) {
                                             NetworkNodeItem(
                                                 node = node,
@@ -907,7 +951,7 @@ fun NetworkNodesScreen(
                                 }
 
                                 if (isOfflineGroupExpanded) {
-                                    items(offlineNodes, key = { it.id }) { node ->
+                                    items(offlineNodes, key = { "offline_${it.id}_${it.ipAddress}" }) { node ->
                                         Box(modifier = Modifier.padding(start = 8.dp)) {
                                             NetworkNodeItem(
                                                 node = node,
@@ -1379,7 +1423,7 @@ fun NetworkNodeItem(
                         }
 
                         Text(
-                            text = if (node.lastCheckTime != null) "🕒 نبض: ${node.lastCheckTime}" else if (node.isOnline) "⚡ استجابة ${node.pingMs}ms" else "⚠️ غير مستجيب",
+                            text = if (node.lastCheckTime > 0L) "🕒 نبض: ${NetworkUtils.formatCardCreationDate(node.lastCheckTime)}" else if (node.isOnline) "⚡ استجابة ${node.pingMs}ms" else "⚠️ غير مستجيب",
                             fontSize = 10.sp,
                             color = statusColor,
                             fontWeight = FontWeight.Medium
@@ -2010,55 +2054,164 @@ fun HierarchicalNetworkTreeView(
     onPingNode: (String) -> Unit,
     onKickUser: (HotspotActiveUser) -> Unit
 ) {
-    // 1. Build the tree structure from the flat list
-    val treeNodes = remember(nodes) {
-        val nodeMap = nodes.associateBy { it.id }
-        // Create secondary lookup by interfaceName for matching parentInterface
-        val ifaceToNodeMap = nodes.associateBy { it.interfaceName.lowercase() }
+    // 1. Mutually exclusive 4-group partition of all distinct nodes
+    val distinctNodes = remember(nodes) { nodes.distinctBy { it.id } }
+    val (activeWithUsersNodes, idleOnlineNodes, faultyOrNoNetNodes, offlineOrDisabledNodes) = remember(distinctNodes) {
+        val g1 = mutableListOf<NetworkNode>() // Online, ACTIVE, connectedUsers > 0
+        val g2 = mutableListOf<NetworkNode>() // Online, ACTIVE, connectedUsers == 0, !hasIssue
+        val g3 = mutableListOf<NetworkNode>() // NO_INTERNET or active with issue (ping/cpu/temp)
+        val g4 = mutableListOf<NetworkNode>() // OFFLINE or DISABLED
 
-        // Find children grouped by resolved parent node ID
-        val childrenMap = mutableMapOf<String, MutableList<NetworkNode>>()
-        val rootNodes = mutableListOf<NetworkNode>()
-
-        nodes.forEach { node ->
-            // Try resolving parent ID via parentTowerId, then via parentInterface
-            val directParentId = node.parentTowerId?.takeIf { nodeMap.containsKey(it) }
-            val interfaceParentId = if (directParentId == null && !node.parentInterface.isNullOrBlank()) {
-                val cleanParentIf = node.parentInterface!!.lowercase()
-                nodeMap["node_if_$cleanParentIf"]?.id ?: ifaceToNodeMap[cleanParentIf]?.id
-            } else null
-
-            val effectiveParentId = directParentId ?: interfaceParentId
-
-            if (effectiveParentId != null && effectiveParentId != node.id) {
-                childrenMap.getOrPut(effectiveParentId) { mutableListOf() }.add(node)
-            } else {
-                rootNodes.add(node)
+        distinctNodes.forEach { node ->
+            when {
+                node.effectiveStatus == NodeStatus.OFFLINE || node.effectiveStatus == NodeStatus.DISABLED -> g4.add(node)
+                node.effectiveStatus == NodeStatus.NO_INTERNET -> g3.add(node)
+                node.connectedUsers > 0 -> g1.add(node)
+                node.hasIssue -> g3.add(node)
+                else -> g2.add(node)
             }
         }
-        
-        rootNodes.map { root -> buildTreeNode(root, childrenMap) }
+        val sortedG1 = g1.sortedWith(compareByDescending<NetworkNode> { it.connectedUsers }.thenBy { it.name })
+        val sortedG2 = g2.sortedBy { it.name }
+        val sortedG3 = g3.sortedWith(
+            compareByDescending<NetworkNode> { it.effectiveStatus == NodeStatus.NO_INTERNET }.thenBy { it.name }
+        )
+        val sortedG4 = g4.sortedWith(
+            compareByDescending<NetworkNode> { it.effectiveStatus == NodeStatus.OFFLINE }.thenBy { it.name }
+        )
+        listOf(sortedG1, sortedG2, sortedG3, sortedG4)
     }
 
+    val totalActiveSubscribers = remember(activeWithUsersNodes) {
+        activeWithUsersNodes.sumOf { it.connectedUsers }
+    }
+
+    // Build parent-child trees per group so towers keep hierarchy without cross-group clutter
+    val activeTreeNodes = remember(activeWithUsersNodes) { buildTreeSubset(activeWithUsersNodes) }
+    val idleTreeNodes = remember(idleOnlineNodes) { buildTreeSubset(idleOnlineNodes) }
+    val faultyTreeNodes = remember(faultyOrNoNetNodes) { buildTreeSubset(faultyOrNoNetNodes) }
+    val offlineTreeNodes = remember(offlineOrDisabledNodes) { buildTreeSubset(offlineOrDisabledNodes) }
+
+    var expandActiveWithUsers by remember { mutableStateOf(true) }
+    var expandIdleOnline by remember { mutableStateOf(false) }
+    var expandFaulty by remember(faultyOrNoNetNodes.isNotEmpty()) { mutableStateOf(faultyOrNoNetNodes.isNotEmpty()) }
+    var expandOffline by remember { mutableStateOf(false) }
+
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("grouped_tower_tree_list"),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(bottom = 80.dp)
     ) {
-        // Root Router Header
-        item {
-            RootRouterHeader(centralRouterName, centralRouterIp, nodes.size)
+        // 1. Root Router Header
+        item(key = "root_router_header") {
+            RootRouterHeader(centralRouterName, centralRouterIp, nodes.size, totalActiveSubscribers)
         }
 
-        // Recursive Tree Items
-        treeNodes.forEach { root ->
-            renderRecursiveTree(root, 0, onNodeClick, onPingNode, onKickUser)
+        // 2. Executive 4-Metric Operational Summary Strip
+        item(key = "tree_executive_summary") {
+            TreeExecutiveSummaryStrip(
+                activeWithUsersCount = activeWithUsersNodes.size,
+                totalSubscribers = totalActiveSubscribers,
+                idleOnlineCount = idleOnlineNodes.size,
+                faultyOrNoNetCount = faultyOrNoNetNodes.size,
+                offlineOrDisabledCount = offlineOrDisabledNodes.size,
+                onClickActive = { expandActiveWithUsers = !expandActiveWithUsers },
+                onClickIdle = { expandIdleOnline = !expandIdleOnline },
+                onClickFaulty = { expandFaulty = !expandFaulty },
+                onClickOffline = { expandOffline = !expandOffline }
+            )
         }
-        
-        if (treeNodes.isEmpty()) {
+
+        // 3. Group 1: Online Towers/Nodes WITH Active Subscribers
+        if (activeWithUsersNodes.isNotEmpty()) {
+            item(key = "group_hdr_active") {
+                TreeGroupHeaderCard(
+                    title = "أبراج ونقاط متصلة وبها مشتركين",
+                    subtitle = "إجمالي $totalActiveSubscribers مشترك نشط حالياً",
+                    count = activeWithUsersNodes.size,
+                    accentColor = Color(0xFF00A859),
+                    icon = Icons.Default.Group,
+                    isExpanded = expandActiveWithUsers,
+                    onToggle = { expandActiveWithUsers = !expandActiveWithUsers },
+                    testTag = "tree_group_active"
+                )
+            }
+            if (expandActiveWithUsers) {
+                activeTreeNodes.forEach { root ->
+                    renderRecursiveTree(root, 0, "grp1", onNodeClick, onPingNode, onKickUser)
+                }
+            }
+        }
+
+        // 4. Group 2: Online Towers/Nodes WITHOUT Subscribers (Idle)
+        if (idleOnlineNodes.isNotEmpty()) {
+            item(key = "group_hdr_idle") {
+                TreeGroupHeaderCard(
+                    title = "أبراج ونقاط متصلة بدون مشتركين",
+                    subtitle = "تعمل وتبث بنظام سليم ولا يوجد عليها مستخدمون حالياً",
+                    count = idleOnlineNodes.size,
+                    accentColor = Color(0xFF0288D1),
+                    icon = Icons.Default.Wifi,
+                    isExpanded = expandIdleOnline,
+                    onToggle = { expandIdleOnline = !expandIdleOnline },
+                    testTag = "tree_group_idle"
+                )
+            }
+            if (expandIdleOnline) {
+                idleTreeNodes.forEach { root ->
+                    renderRecursiveTree(root, 0, "grp2", onNodeClick, onPingNode, onKickUser)
+                }
+            }
+        }
+
+        // 5. Group 3: No Internet or Performance Faults
+        if (faultyOrNoNetNodes.isNotEmpty()) {
+            item(key = "group_hdr_faulty") {
+                TreeGroupHeaderCard(
+                    title = "نقاط لا تبث إنترنت أو بها خلل",
+                    subtitle = "انقطاع إنترنت عن البوابة أو ارتفاع حرارة/بطء Ping",
+                    count = faultyOrNoNetNodes.size,
+                    accentColor = Color(0xFFEF6C00),
+                    icon = Icons.Default.Warning,
+                    isExpanded = expandFaulty,
+                    onToggle = { expandFaulty = !expandFaulty },
+                    testTag = "tree_group_faulty"
+                )
+            }
+            if (expandFaulty) {
+                faultyTreeNodes.forEach { root ->
+                    renderRecursiveTree(root, 0, "grp3", onNodeClick, onPingNode, onKickUser)
+                }
+            }
+        }
+
+        // 6. Group 4: Offline or Disabled
+        if (offlineOrDisabledNodes.isNotEmpty()) {
+            item(key = "group_hdr_offline") {
+                TreeGroupHeaderCard(
+                    title = "أبراج ونقاط طافية أو مغلقة",
+                    subtitle = "مطفأة، منقطعة الكهرباء/الكابل، أو معطلة من الإدارة",
+                    count = offlineOrDisabledNodes.size,
+                    accentColor = Color(0xFFC62828),
+                    icon = Icons.Default.PowerSettingsNew,
+                    isExpanded = expandOffline,
+                    onToggle = { expandOffline = !expandOffline },
+                    testTag = "tree_group_offline"
+                )
+            }
+            if (expandOffline) {
+                offlineTreeNodes.forEach { root ->
+                    renderRecursiveTree(root, 0, "grp4", onNodeClick, onPingNode, onKickUser)
+                }
+            }
+        }
+
+        if (nodes.isEmpty()) {
             item {
                 Box(modifier = Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                    Text("لا توجد بيانات لبناء الشجرة الهيكلية", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("لا توجد بيانات لبناء شجرة الأبراج", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -2070,6 +2223,31 @@ data class TreeNode(
     val children: List<TreeNode>
 )
 
+private fun buildTreeSubset(subset: List<NetworkNode>): List<TreeNode> {
+    if (subset.isEmpty()) return emptyList()
+    val nodeMap = subset.associateBy { it.id }
+    val ifaceToNodeMap = subset.associateBy { it.interfaceName.lowercase() }
+    val childrenMap = mutableMapOf<String, MutableList<NetworkNode>>()
+    val rootNodes = mutableListOf<NetworkNode>()
+
+    subset.forEach { node ->
+        val directParentId = node.parentTowerId?.takeIf { nodeMap.containsKey(it) }
+        val cleanParentIf = node.parentInterface?.trim().orEmpty().lowercase()
+        val interfaceParentId = if (directParentId == null && cleanParentIf.isNotEmpty()) {
+            nodeMap["node_if_$cleanParentIf"]?.id ?: ifaceToNodeMap[cleanParentIf]?.id
+        } else null
+
+        val effectiveParentId = directParentId ?: interfaceParentId
+        if (effectiveParentId != null && effectiveParentId != node.id) {
+            childrenMap.getOrPut(effectiveParentId) { mutableListOf() }.add(node)
+        } else {
+            rootNodes.add(node)
+        }
+    }
+
+    return rootNodes.map { root -> buildTreeNode(root, childrenMap) }
+}
+
 private fun buildTreeNode(node: NetworkNode, childrenMap: Map<String, List<NetworkNode>>): TreeNode {
     val children = childrenMap[node.id]?.map { buildTreeNode(it, childrenMap) } ?: emptyList()
     return TreeNode(node, children)
@@ -2078,11 +2256,12 @@ private fun buildTreeNode(node: NetworkNode, childrenMap: Map<String, List<Netwo
 private fun androidx.compose.foundation.lazy.LazyListScope.renderRecursiveTree(
     treeNode: TreeNode,
     level: Int,
+    groupPrefix: String,
     onNodeClick: (NetworkNode) -> Unit,
     onPingNode: (String) -> Unit,
     onKickUser: (HotspotActiveUser) -> Unit
 ) {
-    item(key = treeNode.node.id) {
+    item(key = "${groupPrefix}_${treeNode.node.id}") {
         RecursiveNodeTreeItem(
             treeNode = treeNode,
             level = level,
@@ -2093,7 +2272,230 @@ private fun androidx.compose.foundation.lazy.LazyListScope.renderRecursiveTree(
 
     if (treeNode.children.isNotEmpty()) {
         treeNode.children.forEach { child ->
-            renderRecursiveTree(child, level + 1, onNodeClick, onPingNode, onKickUser)
+            renderRecursiveTree(child, level + 1, groupPrefix, onNodeClick, onPingNode, onKickUser)
+        }
+    }
+}
+
+@Composable
+private fun TreeExecutiveSummaryStrip(
+    activeWithUsersCount: Int,
+    totalSubscribers: Int,
+    idleOnlineCount: Int,
+    faultyOrNoNetCount: Int,
+    offlineOrDisabledCount: Int,
+    onClickActive: () -> Unit,
+    onClickIdle: () -> Unit,
+    onClickFaulty: () -> Unit,
+    onClickOffline: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SummaryStatusCard(
+                title = "تعمل وبها مشتركين",
+                count = activeWithUsersCount,
+                subLabel = "$totalSubscribers مشترك متصل",
+                accentColor = Color(0xFF00A859),
+                icon = Icons.Default.Group,
+                onClick = onClickActive,
+                modifier = Modifier.weight(1f)
+            )
+            SummaryStatusCard(
+                title = "متصلة بلا مشتركين",
+                count = idleOnlineCount,
+                subLabel = "تعمل وجاهزة للبث",
+                accentColor = Color(0xFF0288D1),
+                icon = Icons.Default.Wifi,
+                onClick = onClickIdle,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SummaryStatusCard(
+                title = "لا تبث نت / خلل",
+                count = faultyOrNoNetCount,
+                subLabel = "انقطاع إنترنت أو أداء",
+                accentColor = Color(0xFFEF6C00),
+                icon = Icons.Default.WifiOff,
+                onClick = onClickFaulty,
+                modifier = Modifier.weight(1f)
+            )
+            SummaryStatusCard(
+                title = "طافية أو مغلقة",
+                count = offlineOrDisabledCount,
+                subLabel = "غير متصلة أو معطلة",
+                accentColor = Color(0xFFC62828),
+                icon = Icons.Default.PowerSettingsNew,
+                onClick = onClickOffline,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SummaryStatusCard(
+    title: String,
+    count: Int,
+    subLabel: String,
+    accentColor: Color,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.clickable(onClick = onClick),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = accentColor.copy(alpha = 0.08f)
+        ),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.28f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(accentColor.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = title,
+                    tint = accentColor,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = title,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = "$count",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = accentColor
+                    )
+                }
+                Text(
+                    text = subLabel,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TreeGroupHeaderCard(
+    title: String,
+    subtitle: String,
+    count: Int,
+    accentColor: Color,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    isExpanded: Boolean,
+    onToggle: () -> Unit,
+    testTag: String
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .testTag(testTag),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = accentColor.copy(alpha = 0.10f)
+        ),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.35f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(accentColor.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = title,
+                    tint = accentColor,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = subtitle,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = accentColor,
+                contentColor = Color.White
+            ) {
+                Text(
+                    text = "$count",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+            }
+
+            Icon(
+                imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = if (isExpanded) "طي المجموعة" else "عرض المجموعة",
+                tint = accentColor,
+                modifier = Modifier.size(22.dp)
+            )
         }
     }
 }
@@ -2107,12 +2509,14 @@ fun RecursiveNodeTreeItem(
 ) {
     val node = treeNode.node
     val isOffline = node.effectiveStatus == NodeStatus.OFFLINE
-    
-    // Pulsing Red Glow for Offline Nodes
+    val isDisabled = node.effectiveStatus == NodeStatus.DISABLED
+    val isNoInternet = node.effectiveStatus == NodeStatus.NO_INTERNET
+    val isIdle = node.effectiveStatus == NodeStatus.ACTIVE && node.connectedUsers == 0 && !node.hasIssue
+
     val infiniteTransition = rememberInfiniteTransition(label = "offline_glow")
     val glowAlpha by infiniteTransition.animateFloat(
         initialValue = 0.05f,
-        targetValue = 0.25f,
+        targetValue = 0.22f,
         animationSpec = infiniteRepeatable(
             animation = tween(1500, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
@@ -2120,114 +2524,104 @@ fun RecursiveNodeTreeItem(
         label = "alpha"
     )
 
-    val paddingStart = (level * 20).dp
-    val statusColor = if (isOffline) Color(0xFFD32F2F) else Color(node.statusColorRgb)
-    
+    val paddingStart = (level * 18).dp
+    val statusColor = when {
+        isOffline -> Color(0xFFC62828)
+        isDisabled -> Color(0xFF757575)
+        isNoInternet || node.hasIssue -> Color(0xFFEF6C00)
+        isIdle -> Color(0xFF0288D1)
+        else -> Color(0xFF00A859)
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = paddingStart, end = 8.dp, top = 2.dp, bottom = 2.dp)
+            .padding(start = paddingStart, end = 4.dp)
             .clickable(onClick = onNodeClick),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (isOffline) Color(0xFFD32F2F).copy(alpha = glowAlpha) else MaterialTheme.colorScheme.surface
         ),
         border = BorderStroke(
-            width = if (level == 0) 1.dp else 0.5.dp,
-            color = statusColor.copy(alpha = if (level == 0) 0.4f else 0.2f)
+            width = if (level == 0) 1.dp else 0.7.dp,
+            color = statusColor.copy(alpha = if (level == 0) 0.4f else 0.22f)
         )
     ) {
         Row(
-            modifier = Modifier.padding(8.dp),
+            modifier = Modifier.padding(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Connector Line (Visual guide for tree)
             if (level > 0) {
                 Box(
                     modifier = Modifier
-                        .width(1.5.dp)
-                        .height(32.dp)
-                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                        .width(2.dp)
+                        .height(34.dp)
+                        .background(statusColor.copy(alpha = 0.45f))
                 )
-                Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(10.dp))
             }
 
-            // Icon
             Box(
                 modifier = Modifier
-                    .size(if (level == 0) 42.dp else 36.dp)
+                    .size(if (level == 0) 40.dp else 34.dp)
                     .clip(CircleShape)
-                    .background(statusColor.copy(alpha = 0.15f)),
+                    .background(statusColor.copy(alpha = 0.14f)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = when (node.nodeType) {
-                        NetworkNodeType.MAIN_TOWER -> Icons.Default.CellTower
-                        NetworkNodeType.DISTRIBUTION -> Icons.Default.WifiTethering
+                    imageVector = when {
+                        isOffline -> Icons.Default.PowerSettingsNew
+                        isNoInternet -> Icons.Default.WifiOff
+                        node.nodeType == NetworkNodeType.MAIN_TOWER -> Icons.Default.CellTower
+                        node.nodeType == NetworkNodeType.DISTRIBUTION -> Icons.Default.WifiTethering
                         else -> Icons.Default.Home
                     },
                     contentDescription = null,
                     tint = statusColor,
-                    modifier = Modifier.size(if (level == 0) 22.dp else 18.dp)
+                    modifier = Modifier.size(if (level == 0) 20.dp else 17.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
 
-            // Info
-            Column(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         text = node.name,
                         fontWeight = if (level == 0) FontWeight.ExtraBold else FontWeight.Bold,
-                        fontSize = if (level == 0) 14.sp else 13.sp,
+                        fontSize = if (level == 0) 13.5.sp else 12.5.sp,
                         color = if (isOffline) Color(0xFFD32F2F) else MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
-                    if (isOffline) {
-                        Surface(
-                            color = Color(0xFFD32F2F).copy(alpha = 0.15f),
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "مغلقة / غير نشطة",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFD32F2F),
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                            )
-                        }
-                    } else if (node.effectiveStatus == NodeStatus.DISABLED) {
-                        Surface(
-                            color = Color(0xFFFF9800).copy(alpha = 0.15f),
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "معطلة بالراوتر",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFFF9800),
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                            )
-                        }
-                    } else {
-                        Surface(
-                            color = Color(0xFF00C853).copy(alpha = 0.15f),
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "نشطة 🟢",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF00C853),
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                            )
-                        }
+
+                    val (badgeText, badgeColor) = when {
+                        isOffline -> "طافية / مغلقة" to Color(0xFFC62828)
+                        isDisabled -> "معطلة بالراوتر" to Color(0xFF616161)
+                        isNoInternet -> "لا تبث إنترنت" to Color(0xFFEF6C00)
+                        node.hasIssue -> "تنبيه أداء" to Color(0xFFEF6C00)
+                        node.connectedUsers > 0 -> "${node.connectedUsers} مشترك" to Color(0xFF00A859)
+                        else -> "متصلة • بدون مشتركين" to Color(0xFF0288D1)
                     }
+
+                    Surface(
+                        color = badgeColor.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(5.dp)
+                    ) {
+                        Text(
+                            text = badgeText,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = badgeColor,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                        )
+                    }
+
                     if (node.vlanId != null && node.vlanId > 0) {
                         Surface(
-                            color = RouterBlue.copy(alpha = 0.15f),
-                            shape = RoundedCornerShape(4.dp)
+                            color = RouterBlue.copy(alpha = 0.14f),
+                            shape = RoundedCornerShape(5.dp)
                         ) {
                             Text(
                                 text = "VLAN ${node.vlanId}",
@@ -2239,32 +2633,44 @@ fun RecursiveNodeTreeItem(
                         }
                     }
                 }
-                val parentPortInfo = if (!node.parentInterface.isNullOrBlank()) " • عبر: ${node.parentInterface}" else ""
-                val trafficInfo = if (node.rxSpeedKbps + node.txSpeedKbps > 0) " • سرعة: ${com.example.data.network.NetworkUtils.formatSpeed(node.rxSpeedKbps + node.txSpeedKbps)}" else ""
+
+                val parentInfo = if (level == 0 && (!node.parentTowerName.isNullOrBlank() || !node.parentInterface.isNullOrBlank())) {
+                    " • عبر: ${node.parentTowerName ?: node.parentInterface}"
+                } else if (!node.parentInterface.isNullOrBlank()) {
+                    " • منفذ: ${node.parentInterface}"
+                } else ""
+                val trafficInfo = if (node.rxSpeedKbps + node.txSpeedKbps > 0) {
+                    " • ${NetworkUtils.formatSpeed(node.rxSpeedKbps + node.txSpeedKbps)}"
+                } else ""
+
                 Text(
-                    text = "${node.ipAddress} • ${node.connectedUsers} مشترك$parentPortInfo$trafficInfo",
+                    text = "${node.ipAddress} • ${node.nodeType.labelAr}$parentInfo$trafficInfo",
                     fontSize = 10.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+
+                if (isNoInternet || node.hasIssue) {
+                    Text(
+                        text = node.issueDescription,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = statusColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
-            // Actions
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (node.isOnline) {
-                    IconButton(onClick = onPing, modifier = Modifier.size(30.dp)) {
-                        Icon(Icons.Default.NetworkPing, contentDescription = null, tint = statusColor, modifier = Modifier.size(16.dp))
+                    IconButton(onClick = onPing, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Default.NetworkPing, contentDescription = "فحص Ping", tint = statusColor, modifier = Modifier.size(16.dp))
                     }
                 }
-                IconButton(onClick = onNodeClick, modifier = Modifier.size(30.dp)) {
-                    Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
-                }
-                if (treeNode.children.isNotEmpty()) {
-                    Icon(
-                        imageVector = Icons.Default.ExpandMore,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.size(18.dp)
-                    )
+                IconButton(onClick = onNodeClick, modifier = Modifier.size(34.dp)) {
+                    Icon(Icons.Default.Info, contentDescription = "التفاصيل", tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f), modifier = Modifier.size(16.dp))
                 }
             }
         }
@@ -2272,27 +2678,31 @@ fun RecursiveNodeTreeItem(
 }
 
 @Composable
-private fun RootRouterHeader(name: String, ip: String, totalNodes: Int) {
+private fun RootRouterHeader(name: String, ip: String, totalNodes: Int, totalSubscribers: Int) {
     Card(
-        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.22f))
     ) {
-        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Surface(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(44.dp)
+                modifier = Modifier.size(42.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Router, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
+                    Icon(Icons.Default.Router, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
                 }
             }
-            Spacer(modifier = Modifier.width(16.dp))
-            Column {
-                Text(text = name, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                Text(text = "IP: $ip • إجمالي النقاط المسجلة: $totalNodes", fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = name, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Text(
+                    text = "IP: $ip • $totalNodes نقطة مسجلة • $totalSubscribers مشترك نشط",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                )
             }
         }
     }
