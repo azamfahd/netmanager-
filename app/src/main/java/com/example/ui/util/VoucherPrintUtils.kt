@@ -346,6 +346,44 @@ object VoucherPrintUtils {
     }
 
     /**
+     * Renders a specific page into an ultra-sharp high-res Bitmap for HD Preview before saving/exporting
+     */
+    fun renderPageBitmap(
+        context: Context,
+        cards: List<HotspotCard>,
+        pageIndex: Int,
+        config: CardDesignConfig,
+        targetWidth: Int = 1600
+    ): Bitmap? {
+        if (cards.isEmpty()) return null
+        val appContext = context.applicationContext
+        var customBitmap: Bitmap? = null
+        var bitmap: Bitmap? = null
+        try {
+            customBitmap = loadBitmapFromUri(appContext, config.customImageUri, targetWidth)
+            val targetHeight = (targetWidth * (297f / 210f)).toInt()
+
+            bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bitmap)
+            drawCardsPage(
+                canvas = canvas,
+                pageIndex = pageIndex.coerceAtLeast(0),
+                pageCards = cards,
+                config = config,
+                customBgBitmap = customBitmap,
+                pageWidth = targetWidth,
+                pageHeight = targetHeight
+            )
+            return bitmap
+        } catch (_: Exception) {
+            try { bitmap?.recycle() } catch (_: Exception) {}
+            return null
+        } finally {
+            try { customBitmap?.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    /**
      * Export a single page as an ultra-sharp 300 DPI PNG image on a background worker thread
      */
     fun exportPageToImage(
