@@ -132,6 +132,26 @@ class MikrotikRepository(
         } catch (_: Exception) {}
     }
 
+    suspend fun upsertLocalCardPreservingTimestamp(
+        card: HotspotCard,
+        source: String = if (card.isUserManagerCard) "usermanager" else "hotspot"
+    ) {
+        val dao = appDao ?: return
+        try {
+            val existingTs = cardTimestampCache[card.name]?.takeIf { it > 0L }
+                ?: dao.getLocalCardByName(card.name)?.createdTimestamp?.takeIf { it > 0L }
+                ?: getCardCreationTimestamp(card)
+            cardTimestampCache[card.name] = existingTs
+            dao.insertOrUpdateLocalCard(
+                com.example.data.local.LocalCardEntity.fromHotspotCard(
+                    card = card,
+                    existingCreatedTs = existingTs,
+                    source = source
+                )
+            )
+        } catch (_: Exception) {}
+    }
+
     suspend fun initializeFromLocalDatabase() {
         val dao = appDao ?: return
         try {
@@ -3367,9 +3387,7 @@ class MikrotikRepository(
             }
             val targetCard = _cards.value.firstOrNull { it.name == card.name || it.id == card.id }
             if (targetCard != null) {
-                try {
-                    appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(targetCard))
-                } catch (_: Exception) {}
+                upsertLocalCardPreservingTimestamp(targetCard)
             }
             Result.success(true)
         }
@@ -3465,9 +3483,7 @@ class MikrotikRepository(
             _cards.value = _cards.value.map {
                 if (it.id == updatedCard.id || it.name == updatedCard.name) updatedCard else it
             }
-            try {
-                appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updatedCard))
-            } catch (_: Exception) {}
+            upsertLocalCardPreservingTimestamp(updatedCard)
             Result.success(true)
         }
     }
@@ -3488,7 +3504,7 @@ class MikrotikRepository(
                     }
                     val updated = _cards.value.firstOrNull { it.id == cardId || (targetName.isNotBlank() && it.name == targetName) }
                     if (updated != null) {
-                        try { appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updated)) } catch (_: Exception) {}
+                        upsertLocalCardPreservingTimestamp(updated)
                     }
                     return@withContext socketRes
                 }
@@ -3509,7 +3525,7 @@ class MikrotikRepository(
                         }
                         val updated = _cards.value.firstOrNull { it.id == cardId }
                         if (updated != null) {
-                            try { appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updated)) } catch (_: Exception) {}
+                            upsertLocalCardPreservingTimestamp(updated)
                         }
                         return@withContext Result.success(true)
                     }
@@ -3523,7 +3539,7 @@ class MikrotikRepository(
             }
             val updated = _cards.value.firstOrNull { it.id == cardId }
             if (updated != null) {
-                try { appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updated)) } catch (_: Exception) {}
+                upsertLocalCardPreservingTimestamp(updated)
             }
             Result.success(true)
         }
@@ -4336,9 +4352,7 @@ class MikrotikRepository(
         _cards.value = _cards.value.map {
             if (it.id == card.id || it.name == card.name) activated else it
         }
-        try {
-            appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(activated))
-        } catch (_: Exception) {}
+        upsertLocalCardPreservingTimestamp(activated)
         return Result.success(true)
     }
 

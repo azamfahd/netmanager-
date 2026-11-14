@@ -150,6 +150,7 @@ fun VoucherPrintScreen(
     var customImageUri by remember { mutableStateOf<Uri?>(null) }
     var networkName by remember { mutableStateOf("سكود نت") }
     var contactPhone by remember { mutableStateOf("777000111") }
+    var customCodeColorArgb by remember { mutableIntStateOf(android.graphics.Color.rgb(13, 27, 42)) }
 
     // Pagination
     var currentPageIndex by remember { mutableIntStateOf(0) }
@@ -166,8 +167,34 @@ fun VoucherPrintScreen(
         if (uri != null) {
             customImageUri = uri
             templateType = CardTemplateType.CUSTOM_IMAGE
-            Toast.makeText(context, "تم اختيار صورة تصميم الكرت بنجاح", Toast.LENGTH_SHORT).show()
+            // Delete previous template styling, offsets & fields so only the card code remains on the custom image
+            offsetX = 0f
+            offsetY = 0f
+            networkName = ""
+            contactPhone = ""
+            Toast.makeText(
+                context,
+                "تم اعتماد الصورة وحذف التصميم والمعلومات السابقة — سيُطبع رقم الكرت فقط",
+                Toast.LENGTH_SHORT
+            ).show()
         }
+    }
+
+    val switchTemplateType: (CardTemplateType) -> Unit = { newType ->
+        templateType = newType
+        if (newType != CardTemplateType.CUSTOM_IMAGE) {
+            if (networkName.isBlank()) networkName = "سكود نت"
+            if (contactPhone.isBlank()) contactPhone = "777000111"
+        }
+    }
+
+    val clearCustomImage: () -> Unit = {
+        customImageUri = null
+        templateType = CardTemplateType.SCOUD_BLUE
+        offsetX = 0f
+        offsetY = 0f
+        if (networkName.isBlank()) networkName = "سكود نت"
+        if (contactPhone.isBlank()) contactPhone = "777000111"
     }
 
     val currentConfig = CardDesignConfig(
@@ -181,7 +208,8 @@ fun VoucherPrintScreen(
         columns = columns,
         rows = rows,
         cardWidthMm = cardWidthMm,
-        cardHeightMm = cardHeightMm
+        cardHeightMm = cardHeightMm,
+        customCodeColorArgb = customCodeColorArgb
     )
 
     // Get cards for current page
@@ -404,11 +432,13 @@ fun VoucherPrintScreen(
                             pageCards = pageCards,
                             columns = columns,
                             rows = rows,
+                            cardHeightMm = cardHeightMm,
                             offsetX = offsetX,
                             offsetY = offsetY,
                             fontSizeSp = fontSizeSp,
                             templateType = templateType,
                             customImageUri = customImageUri,
+                            customCodeColorArgb = customCodeColorArgb,
                             networkName = networkName,
                             contactPhone = contactPhone,
                             safePageIndex = safePageIndex,
@@ -445,17 +475,16 @@ fun VoucherPrintScreen(
                             cardsPerPage = cardsPerPage,
                             totalPages = totalPages,
                             templateType = templateType,
-                            onTemplateTypeChange = { templateType = it },
+                            onTemplateTypeChange = switchTemplateType,
                             customImageUri = customImageUri,
+                            customCodeColorArgb = customCodeColorArgb,
+                            onCustomCodeColorChange = { customCodeColorArgb = it },
                             onSelectImageClick = {
                                 photoPickerLauncher.launch(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                 )
                             },
-                            onClearCustomImage = {
-                                customImageUri = null
-                                templateType = CardTemplateType.SCOUD_BLUE
-                            },
+                            onClearCustomImage = clearCustomImage,
                             networkName = networkName,
                             onNetworkNameChange = { networkName = it },
                             contactPhone = contactPhone,
@@ -502,11 +531,13 @@ fun VoucherPrintScreen(
                             pageCards = pageCards,
                             columns = columns,
                             rows = rows,
+                            cardHeightMm = cardHeightMm,
                             offsetX = offsetX,
                             offsetY = offsetY,
                             fontSizeSp = fontSizeSp,
                             templateType = templateType,
                             customImageUri = customImageUri,
+                            customCodeColorArgb = customCodeColorArgb,
                             networkName = networkName,
                             contactPhone = contactPhone,
                             safePageIndex = safePageIndex,
@@ -593,17 +624,16 @@ fun VoucherPrintScreen(
                                         cardsPerPage = cardsPerPage,
                                         totalPages = totalPages,
                                         templateType = templateType,
-                                        onTemplateTypeChange = { templateType = it },
+                                        onTemplateTypeChange = switchTemplateType,
                                         customImageUri = customImageUri,
+                                        customCodeColorArgb = customCodeColorArgb,
+                                        onCustomCodeColorChange = { customCodeColorArgb = it },
                                         onSelectImageClick = {
                                             photoPickerLauncher.launch(
                                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                             )
                                         },
-                                        onClearCustomImage = {
-                                            customImageUri = null
-                                            templateType = CardTemplateType.SCOUD_BLUE
-                                        },
+                                        onClearCustomImage = clearCustomImage,
                                         networkName = networkName,
                                         onNetworkNameChange = { networkName = it },
                                         contactPhone = contactPhone,
@@ -654,11 +684,13 @@ fun SheetPreviewArea(
     pageCards: List<HotspotCard>,
     columns: Int,
     rows: Int,
+    cardHeightMm: Float,
     offsetX: Float,
     offsetY: Float,
     fontSizeSp: Float,
     templateType: CardTemplateType,
     customImageUri: Uri?,
+    customCodeColorArgb: Int,
     networkName: String,
     contactPhone: String,
     safePageIndex: Int,
@@ -667,9 +699,10 @@ fun SheetPreviewArea(
     onNextPage: () -> Unit,
     context: Context
 ) {
-    val customBitmap = remember(customImageUri) {
+    val customBitmap = remember(customImageUri?.toString()) {
         VoucherPrintUtils.loadBitmapFromUri(context, customImageUri)
     }
+    val cellHeightDp = (42f * (cardHeightMm / 15f)).coerceIn(30f, 88f).dp
 
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -745,10 +778,14 @@ fun SheetPreviewArea(
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(42.dp)
-                                    .border(0.8.dp, Color(0xFFB0C4DE), RoundedCornerShape(3.dp))
+                                    .height(cellHeightDp)
+                                    .border(
+                                        width = if (templateType == CardTemplateType.CUSTOM_IMAGE) 0.5.dp else 0.8.dp,
+                                        color = if (templateType == CardTemplateType.CUSTOM_IMAGE) Color(0xFFD8E0E8) else Color(0xFFB0C4DE),
+                                        shape = RoundedCornerShape(if (templateType == CardTemplateType.CUSTOM_IMAGE) 1.dp else 3.dp)
+                                    )
                                     .background(Color.White)
-                                    .padding(1.dp)
+                                    .padding(if (templateType == CardTemplateType.CUSTOM_IMAGE) 0.dp else 1.dp)
                             ) {
                                 if (card != null) {
                                     SingleCardRender(
@@ -758,6 +795,7 @@ fun SheetPreviewArea(
                                         fontSizeSp = fontSizeSp,
                                         templateType = templateType,
                                         customBitmap = customBitmap,
+                                        customCodeColorArgb = customCodeColorArgb,
                                         networkName = networkName,
                                         contactPhone = contactPhone
                                     )
@@ -782,6 +820,7 @@ fun SingleCardRender(
     fontSizeSp: Float,
     templateType: CardTemplateType,
     customBitmap: Bitmap?,
+    customCodeColorArgb: Int,
     networkName: String,
     contactPhone: String
 ) {
@@ -795,33 +834,36 @@ fun SingleCardRender(
         else -> Color(0xFF0277BD)
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // If user uploaded a custom background image
-        if (customBitmap != null && templateType == CardTemplateType.CUSTOM_IMAGE) {
-            Image(
-                bitmap = customBitmap.asImageBitmap(),
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.FillBounds
-            )
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        // Custom Image Mode: strictly clear previous design & info, render ONLY image + card code
+        if (templateType == CardTemplateType.CUSTOM_IMAGE) {
+            if (customBitmap != null && !customBitmap.isRecycled) {
+                Image(
+                    bitmap = customBitmap.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.FillBounds
+                )
+            }
+            val offsetXPx = ((offsetX / 100f) * constraints.maxWidth * 0.45f).roundToInt()
+            val offsetYPx = ((offsetY / 50f) * constraints.maxHeight * 0.45f).roundToInt()
+            val scaledCodeFontSp = (maxHeight.value * 0.22f * (fontSizeSp / 14f)).coerceAtLeast(5f)
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .offset {
-                        IntOffset(
-                            x = (offsetX * 0.4f).roundToInt(),
-                            y = (offsetY * 0.2f).roundToInt()
-                        )
-                    },
+                    .offset { IntOffset(x = offsetXPx, y = offsetYPx) },
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = card.name,
-                    fontSize = (fontSizeSp * 0.6f).sp,
+                    fontSize = scaledCodeFontSp.sp,
                     fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace,
-                    color = Color(0xFF0D1B2A),
-                    textAlign = TextAlign.Center
+                    color = Color(customCodeColorArgb),
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         } else {
@@ -948,6 +990,8 @@ fun CustomizationControlPanel(
     templateType: CardTemplateType,
     onTemplateTypeChange: (CardTemplateType) -> Unit,
     customImageUri: Uri?,
+    customCodeColorArgb: Int,
+    onCustomCodeColorChange: (Int) -> Unit,
     onSelectImageClick: () -> Unit,
     onClearCustomImage: () -> Unit,
     networkName: String,
@@ -1195,19 +1239,19 @@ fun CustomizationControlPanel(
             ) {
                 Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("اختيار الملف", fontWeight = FontWeight.Bold)
+                Text(if (customImageUri != null) "تغيير الصورة" else "اختيار صورة", fontWeight = FontWeight.Bold)
             }
 
             Text(
-                text = if (customImageUri != null) "تم اختيار صورة" else "لم يتم اختيار ملف",
-                color = Color(0xFFB0BEC5),
+                text = if (customImageUri != null) "صورة مخصصة نشطة" else "لم يتم اختيار صورة",
+                color = if (templateType == CardTemplateType.CUSTOM_IMAGE) Color(0xFF81D4FA) else Color(0xFFB0BEC5),
                 fontSize = 12.sp,
                 modifier = Modifier.weight(1f)
             )
 
             if (customImageUri != null) {
                 IconButton(onClick = onClearCustomImage) {
-                    Icon(Icons.Default.Close, contentDescription = "مسح الصورة", tint = Color.Red)
+                    Icon(Icons.Default.Close, contentDescription = "مسح الصورة", tint = Color(0xFFFF8A80))
                 }
             }
         }
@@ -1238,36 +1282,108 @@ fun CustomizationControlPanel(
             }
         }
 
-        // Network Name & Contact Text Fields
-        OutlinedTextField(
-            value = networkName,
-            onValueChange = onNetworkNameChange,
-            label = { Text("اسم الشبكة في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                focusedBorderColor = Color(0xFF0288D1),
-                unfocusedBorderColor = Color(0xFF2E5370)
-            ),
-            shape = RoundedCornerShape(8.dp),
-            modifier = Modifier.fillMaxWidth()
-        )
+        if (templateType == CardTemplateType.CUSTOM_IMAGE) {
+            // Custom Image Mode Info & Code Color Selector (old template details are stripped)
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xFF15334E),
+                border = BorderStroke(1.dp, Color(0xFF0288D1).copy(alpha = 0.6f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "وضع الصورة المخصصة: تم حذف التصميم والمعلومات السابقة، ويُطبع رقم الكرت فقط.",
+                        color = Color(0xFF81D4FA),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "لون رقم الكرت :",
+                        color = Color(0xFFB0BEC5),
+                        fontSize = 12.sp
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf(
+                            android.graphics.Color.rgb(13, 27, 42) to "كحلي",
+                            android.graphics.Color.BLACK to "أسود",
+                            android.graphics.Color.WHITE to "أبيض",
+                            android.graphics.Color.rgb(198, 40, 40) to "أحمر",
+                            android.graphics.Color.rgb(245, 158, 11) to "ذهبي"
+                        ).forEach { (colorInt, label) ->
+                            val isSelected = customCodeColorArgb == colorInt
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onCustomCodeColorChange(colorInt) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(colorInt))
+                                        .border(
+                                            width = if (isSelected) 2.5.dp else 1.dp,
+                                            color = if (isSelected) Color(0xFF4FC3F7) else Color.White.copy(alpha = 0.4f),
+                                            shape = CircleShape
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = label,
+                                            tint = if (colorInt == android.graphics.Color.WHITE || colorInt == android.graphics.Color.rgb(245, 158, 11)) Color.Black else Color.White,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Network Name & Contact Text Fields (Built-in templates only)
+            OutlinedTextField(
+                value = networkName,
+                onValueChange = onNetworkNameChange,
+                label = { Text("اسم الشبكة في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedBorderColor = Color(0xFF0288D1),
+                    unfocusedBorderColor = Color(0xFF2E5370)
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
 
-        OutlinedTextField(
-            value = contactPhone,
-            onValueChange = onContactPhoneChange,
-            label = { Text("رقم التواصل في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                focusedBorderColor = Color(0xFF0288D1),
-                unfocusedBorderColor = Color(0xFF2E5370)
-            ),
-            shape = RoundedCornerShape(8.dp),
-            modifier = Modifier.fillMaxWidth()
-        )
+            OutlinedTextField(
+                value = contactPhone,
+                onValueChange = onContactPhoneChange,
+                label = { Text("رقم التواصل في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedBorderColor = Color(0xFF0288D1),
+                    unfocusedBorderColor = Color(0xFF2E5370)
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
 
         Spacer(modifier = Modifier.height(6.dp))
 

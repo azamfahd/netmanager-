@@ -41,6 +41,7 @@ import com.example.data.model.DetailedPackageProfitStat
 import com.example.data.model.MonthlyPackageSales
 import com.example.data.model.DailySalesPoint
 import com.example.data.util.AppUpdateManager
+import com.example.data.util.FinanceAnalyticsEngine
 import com.example.data.network.MikrotikRepository
 import com.example.data.network.NetworkUtils
 import kotlinx.coroutines.Job
@@ -56,6 +57,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
@@ -364,21 +366,11 @@ class MainViewModel(
     }
 
     fun savePackagePricing(profileName: String, salePrice: Double, costPrice: Double) {
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                database.appDao().insertPackagePricing(
-                    com.example.data.local.PackagePricingEntity(
-                        profileName = profileName,
-                        salePrice = salePrice,
-                        costPrice = costPrice,
-                        updatedAt = System.currentTimeMillis()
-                    )
-                )
-                _toastEvent.emit("✅ تم حفظ أسعار الباقة $profileName بنجاح")
-            } catch (e: Exception) {
-                _toastEvent.emit("❌ فشل حفظ الأسعار: ${e.message}")
-            }
-        }
+        updatePackageCostAndPrice(
+            profileName = profileName,
+            costPrice = costPrice,
+            salePrice = salePrice
+        )
     }
 
     fun getSubscriberProfileFlow(username: String): kotlinx.coroutines.flow.Flow<com.example.data.model.SubscriberFullProfile> {
@@ -719,347 +711,96 @@ class MainViewModel(
         }
     }
 
-    val detailedPackageProfitStats: StateFlow<List<com.example.data.model.DetailedPackageProfitStat>> = combine(
-        cards, profiles, packagePricings, database.appDao().getAllCardAssignments(), _selectedTimeFilter
-    ) { cardList, profileList, pricingList, assignmentList, timeFilter ->
-        val now = System.currentTimeMillis()
-        val cal = java.util.Calendar.getInstance()
-        
-        // Start of Today
-        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-        cal.set(java.util.Calendar.MINUTE, 0)
-        cal.set(java.util.Calendar.SECOND, 0)
-        cal.set(java.util.Calendar.MILLISECOND, 0)
-        val startOfToday = cal.timeInMillis
-
-        // Start of Week (last 7 days)
-        val startOfWeek = startOfToday - (6 * 24 * 60 * 60 * 1000L)
-
-        // Start of Current Month
-        cal.timeInMillis = now
-        cal.set(java.util.Calendar.DAY_OF_MONTH, 1)
-        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-        cal.set(java.util.Calendar.MINUTE, 0)
-        cal.set(java.util.Calendar.SECOND, 0)
-        cal.set(java.util.Calendar.MILLISECOND, 0)
-        val startOfMonth = cal.timeInMillis
-
-        // Ensure only genuine profiles from the router or actual router cards are analyzed
-        val allProfileNames = if (profileList.isNotEmpty()) {
-            profileList.map { it.name }.filter { it.isNotBlank() }.distinct()
-        } else if (cardList.isNotEmpty()) {
-            cardList.map { it.profile }.filter { it.isNotBlank() }.distinct()
-        } else {
+    private val localCardsFlow = database.appDao().getAllLocalCardsFlow()
+    private val archivedSessionsFlow = database.appDao().getAllArchivedSessions()
+    private val initialMonthlyProfitRecordsFlow = flow {
+        val saved = try {
+            withContext(Dispatchers.IO) {
+                database.appDao().getAllMonthlyProfitRecordsSync()
+            }
+        } catch (_: Exception) {
             emptyList()
         }
+        emit(saved)
+    }
 
-        val rawStats = allProfileNames.map { profName ->
-            val profCards = cardList.filter { it.profile.equals(profName, ignoreCase = true) }
-            val profAssignments = assignmentList.filter { it.profileName.equals(profName, ignoreCase = true) }
-            val matchingProfile = profileList.find { it.name.equals(profName, ignoreCase = true) }
-            val savedPricing = pricingList.find { it.profileName.equals(profName, ignoreCase = true) }
-            val firstCardWithPrice = profCards.find { it.price.any { ch -> ch.isDigit() } }
+    private data class FinancePrimaryInputs(
+        val cards: List<HotspotCard>,
+        val profiles: List<HotspotProfile>,
+        val pricings: List<com.example.data.local.PackagePricingEntity>,
+        val assignments: List<PosCardAssignmentEntity>,
+        val batches: List<BatchHistoryEntity>
+    )
 
-            // Determine Sale and Cost Price (strictly from user custom pricing or real router metadata)
-            val salePrice = savedPricing?.salePrice
-                ?: matchingProfile?.priceNumber?.takeIf { it > 0 }
-                ?: matchingProfile?.price?.filter { it.isDigit() }?.toDoubleOrNull()?.takeIf { it > 0 }
-                ?: firstCardWithPrice?.price?.filter { it.isDigit() }?.toDoubleOrNull()?.takeIf { it > 0 }
-                ?: 0.0
+    private data class FinanceHistoryInputs(
+        val localCards: List<com.example.data.local.LocalCardEntity>,
+        val loginHistory: List<com.example.data.local.UserLoginHistoryEntity>,
+        val archivedSessions: List<com.example.data.local.SessionArchiveEntity>,
+        val savedMonthlyRecords: List<com.example.data.local.MonthlyProfitRecordEntity>
+    )
 
-            val costPrice = savedPricing?.costPrice
-                ?: matchingProfile?.costPrice?.takeIf { it > 0 }
-                ?: 0.0
+    private val financePrimaryInputsFlow = combine(
+        cards,
+        profiles,
+        packagePricings,
+        database.appDao().getAllCardAssignments(),
+        batchHistory
+    ) { cardList, profileList, pricingList, assignmentList, batchList ->
+        FinancePrimaryInputs(cardList, profileList, pricingList, assignmentList, batchList)
+    }
 
-            val profitPerCard = (salePrice - costPrice).coerceAtLeast(0.0)
-            val marginPercent = if (salePrice > 0) ((profitPerCard / salePrice) * 100.0) else 0.0
+    private val financeHistoryInputsFlow = combine(
+        localCardsFlow,
+        allLoginHistory,
+        archivedSessionsFlow,
+        initialMonthlyProfitRecordsFlow
+    ) { localCardList, loginList, sessionList, savedMonthlyList ->
+        FinanceHistoryInputs(localCardList, loginList, sessionList, savedMonthlyList)
+    }
 
-            val totalGenerated = maxOf(profCards.size, profAssignments.size)
-            val activeCount = profCards.count { it.isActive }
-            val unusedCount = profCards.count { it.isUnused }
-            val expiredCount = profCards.count { it.isExpired }
-
-            val soldInTimeWindow = when (timeFilter) {
-                com.example.data.model.TimeFilterRange.ALL -> {
-                    val fromCards = profCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L || it.bytesOut > 0L }
-                    val fromAssignments = profAssignments.count { it.isSold }
-                    maxOf(fromCards, fromAssignments)
-                }
-                com.example.data.model.TimeFilterRange.TODAY -> {
-                    val fromAssignments = profAssignments.count { it.isSold && it.soldAt >= startOfToday }
-                    maxOf(fromAssignments, activeCount)
-                }
-                com.example.data.model.TimeFilterRange.WEEK -> {
-                    val fromAssignments = profAssignments.count { it.isSold && it.soldAt >= startOfWeek }
-                    val fromCards = profCards.count { it.isActive || ((it.uptime.isNotBlank() && it.uptime != "0s") && !it.isExpired) }
-                    maxOf(fromAssignments, fromCards)
-                }
-                com.example.data.model.TimeFilterRange.MONTH -> {
-                    val fromAssignments = profAssignments.count { it.isSold && it.soldAt >= startOfMonth }
-                    val fromCards = profCards.count { it.isActive || (it.uptime.isNotBlank() && it.uptime != "0s") }
-                    maxOf(fromAssignments, fromCards)
-                }
-            }
-
-            val totalRev = soldInTimeWindow * salePrice
-            val totalCost = soldInTimeWindow * costPrice
-            val netProfit = (totalRev - totalCost).coerceAtLeast(0.0)
-
-            com.example.data.model.DetailedPackageProfitStat(
-                profileName = profName,
-                costPrice = costPrice,
-                salePrice = salePrice,
-                profitPerCard = profitPerCard,
-                profitMarginPercent = marginPercent,
-                totalCardsGenerated = totalGenerated,
-                soldCardsCount = soldInTimeWindow,
-                activeCardsCount = activeCount,
-                unusedCardsCount = unusedCount,
-                expiredCardsCount = expiredCount,
-                totalRevenue = totalRev,
-                totalCost = totalCost,
-                netProfit = netProfit,
-                profitSharePercent = 0f,
-                salesSharePercent = 0f
-            )
-        }
-
-        val totalNetworkProfit = rawStats.sumOf { it.netProfit }.coerceAtLeast(1.0)
-        val totalNetworkSold = rawStats.sumOf { it.soldCardsCount }.coerceAtLeast(1)
-
-        rawStats.map { stat ->
-            stat.copy(
-                profitSharePercent = ((stat.netProfit / totalNetworkProfit) * 100f).toFloat().coerceIn(0f, 100f),
-                salesSharePercent = ((stat.soldCardsCount.toFloat() / totalNetworkSold.toFloat()) * 100f).coerceIn(0f, 100f)
-            )
-        }.sortedWith(compareByDescending<com.example.data.model.DetailedPackageProfitStat> { it.netProfit }.thenByDescending { it.soldCardsCount })
+    val detailedPackageProfitStats: StateFlow<List<com.example.data.model.DetailedPackageProfitStat>> = combine(
+        financePrimaryInputsFlow,
+        financeHistoryInputsFlow,
+        _selectedTimeFilter
+    ) { primary, history, timeFilter ->
+        FinanceAnalyticsEngine.computeDetailedPackageProfitStats(
+            cardList = primary.cards,
+            profileList = primary.profiles,
+            pricingList = primary.pricings,
+            assignmentList = primary.assignments,
+            timeFilter = timeFilter,
+            localCards = history.localCards,
+            loginHistory = history.loginHistory,
+            archivedSessions = history.archivedSessions,
+            batches = primary.batches
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val revenueAnalytics: StateFlow<com.example.data.model.RevenueAnalyticsSummary> = combine(
         detailedPackageProfitStats, cards, _selectedTimeFilter
     ) { stats, allCards, timeFilter ->
-        val grossSales = stats.sumOf { it.totalRevenue }
-        val totalCost = stats.sumOf { it.totalCost }
-        val netProfit = stats.sumOf { it.netProfit }
-        val totalGenerated = maxOf(stats.sumOf { it.totalCardsGenerated }, allCards.size)
-        var activeCount = 0
-        var unusedCount = 0
-        var expiredCount = 0
-        for (c in allCards) {
-            if (c.isActive) activeCount++
-            if (c.isUnused) unusedCount++
-            if (c.isExpired) expiredCount++
-        }
-
-        val activeRev = stats.sumOf { it.activeCardsCount * it.salePrice }
-        val inventoryVal = stats.sumOf { it.unusedCardsCount * it.salePrice }
-        val avgPrice = if (stats.isNotEmpty()) stats.map { it.salePrice }.average() else 0.0
-        val avgMargin = if (grossSales > 0) ((netProfit / grossSales) * 100.0) else 0.0
-
-        val topSelling = stats.filter { it.soldCardsCount > 0 }.maxByOrNull { it.soldCardsCount }
-        val topProfitable = stats.filter { it.netProfit > 0 }.maxByOrNull { it.netProfit }
-
-        com.example.data.model.RevenueAnalyticsSummary(
-            totalEstimatedRevenue = grossSales,
-            activeRevenue = activeRev,
-            availableInventoryValue = inventoryVal,
-            totalCardsCount = totalGenerated,
-            activeCardsCount = activeCount,
-            unusedCardsCount = unusedCount,
-            expiredCardsCount = expiredCount,
-            topSellingPackage = topSelling?.profileName ?: "لا توجد مبيعات بعد",
-            topSellingPackageCount = topSelling?.soldCardsCount ?: 0,
-            averageCardPrice = avgPrice,
-            totalCost = totalCost,
-            totalNetProfit = netProfit,
-            averageProfitMarginPercent = avgMargin,
-            topProfitablePackage = topProfitable?.profileName ?: "لا توجد أرباح بعد",
-            topProfitablePackageProfit = topProfitable?.netProfit ?: 0.0,
-            selectedTimeFilter = timeFilter
+        FinanceAnalyticsEngine.computeRevenueAnalyticsSummary(
+            stats = stats,
+            allCards = allCards,
+            timeFilter = timeFilter
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.RevenueAnalyticsSummary())
 
     val monthlySalesList: StateFlow<List<com.example.data.model.MonthlySalesSummary>> = combine(
-        cards, detailedPackageProfitStats, database.appDao().getAllCardAssignments(), batchHistory
-    ) { allCards, packageStats, assignments, batches ->
-        val now = System.currentTimeMillis()
-        val monthNamesAr = listOf(
-            "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
-            "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"
+        financePrimaryInputsFlow,
+        financeHistoryInputsFlow
+    ) { primary, history ->
+        FinanceAnalyticsEngine.computeMonthlySalesList(
+            allCards = primary.cards,
+            localCards = history.localCards,
+            profiles = primary.profiles,
+            pricings = primary.pricings,
+            assignments = primary.assignments,
+            batches = primary.batches,
+            loginHistory = history.loginHistory,
+            archivedSessions = history.archivedSessions,
+            savedMonthlyRecords = history.savedMonthlyRecords
         )
-
-        val rawMonthsList = mutableListOf<com.example.data.model.MonthlySalesSummary>()
-
-        for (monthOffset in 0..5) {
-            val mCal = java.util.Calendar.getInstance()
-            mCal.timeInMillis = now
-            mCal.add(java.util.Calendar.MONTH, -monthOffset)
-            val monthIndex = mCal.get(java.util.Calendar.MONTH)
-            val year = mCal.get(java.util.Calendar.YEAR)
-            val monthKey = "%04d-%02d".format(year, monthIndex + 1)
-            val monthLabel = "${monthNamesAr[monthIndex]} $year"
-            val isCurrent = monthOffset == 0
-
-            mCal.set(java.util.Calendar.DAY_OF_MONTH, 1)
-            mCal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-            mCal.set(java.util.Calendar.MINUTE, 0)
-            mCal.set(java.util.Calendar.SECOND, 0)
-            mCal.set(java.util.Calendar.MILLISECOND, 0)
-            val startOfM = mCal.timeInMillis
-
-            val maxDay = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-            mCal.set(java.util.Calendar.DAY_OF_MONTH, maxDay)
-            mCal.set(java.util.Calendar.HOUR_OF_DAY, 23)
-            mCal.set(java.util.Calendar.MINUTE, 59)
-            mCal.set(java.util.Calendar.SECOND, 59)
-            mCal.set(java.util.Calendar.MILLISECOND, 999)
-            val endOfM = mCal.timeInMillis
-
-            val monthAssignments = assignments.filter { it.assignedAt in startOfM..endOfM || (isCurrent && it.assignedAt <= endOfM) }
-            val soldInMonth = monthAssignments.count { it.isSold }
-
-            val avgCardPrice = if (packageStats.isNotEmpty()) packageStats.map { it.salePrice }.average().takeIf { it > 0 } ?: 0.0 else 0.0
-            val avgCostPrice = if (packageStats.isNotEmpty()) packageStats.map { it.costPrice }.average().takeIf { it > 0 } ?: 0.0 else 0.0
-
-            val totalGen = if (isCurrent) {
-                maxOf(allCards.size, monthAssignments.size)
-            } else {
-                val historicalBatches = batches.filter { it.createdAt in startOfM..endOfM }
-                if (historicalBatches.isNotEmpty()) {
-                    historicalBatches.sumOf { it.cardCount }
-                } else {
-                    0 // No heuristic fallbacks
-                }
-            }
-
-            val totalSold = if (isCurrent) {
-                val activeOrExpired = allCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L }
-                maxOf(activeOrExpired, soldInMonth)
-            } else {
-                monthAssignments.count { it.isSold } // Strictly from local DB history
-            }
-
-            val totalUnsold = (totalGen - totalSold).coerceAtLeast(0)
-            val revenue = totalSold * avgCardPrice
-            val cost = totalSold * avgCostPrice
-            val profit = (revenue - cost).coerceAtLeast(0.0)
-            val potentialUnsold = totalUnsold * avgCardPrice
-            val salesPct = if (totalGen > 0) ((totalSold.toFloat() / totalGen.toFloat()) * 100f).coerceIn(0f, 100f) else 0f
-            val targetRev = totalGen * avgCardPrice
-            val deficit = (targetRev - revenue).coerceAtLeast(0.0)
-
-            // Package breakdown for this month
-            val pkgBreakdown = if (packageStats.isNotEmpty()) {
-                packageStats.map { pkg ->
-                    val pkgSold = if (isCurrent) {
-                        allCards.count { it.profile.equals(pkg.profileName, ignoreCase = true) && (it.isActive || it.isExpired || it.bytesIn > 0L) }
-                    } else {
-                        val totalSalesWeight = maxOf(1, packageStats.sumOf { p: DetailedPackageProfitStat -> p.soldCardsCount })
-                        (totalSold * (pkg.soldCardsCount.toFloat() / totalSalesWeight)).toInt()
-                    }
-                    val pkgRev = pkgSold * pkg.salePrice
-                    val pkgProfit = pkgSold * pkg.profitPerCard
-                    val share = if (revenue > 0) ((pkgRev / revenue) * 100f).toFloat().coerceIn(0f, 100f) else 0f
-                    com.example.data.model.MonthlyPackageSales(
-                        packageName = pkg.profileName,
-                        cardsSold = pkgSold,
-                        totalRevenue = pkgRev,
-                        netProfit = pkgProfit,
-                        sharePercentage = share
-                    )
-                }.sortedByDescending { it.netProfit }
-            } else {
-                emptyList()
-            }
-
-            // Daily distribution - Improved: Use actual sales data from local DB
-            val dailyBreakdown = mutableListOf<com.example.data.model.DailySalesPoint>()
-            val daysInMonth = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-            
-            // Map assignments to days of the month for this specific month
-            val salesByDay = monthAssignments.filter { it.isSold && it.soldAt > 0L }.groupBy {
-                val cal = java.util.Calendar.getInstance().apply { timeInMillis = it.soldAt }
-                cal.get(java.util.Calendar.DAY_OF_MONTH)
-            }
-
-            for (day in 1..daysInMonth) {
-                val daySales = salesByDay[day] ?: emptyList()
-                val daySold = daySales.size
-                
-                // If it's a historical month with no DB assignments but we have a totalSold count,
-                // distribute the totalSold count more realistically or keep it simple.
-                // For accuracy, we prefer showing 0 if no records exist in local DB.
-                
-                if (daySold > 0 || (isCurrent && day <= java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_MONTH))) {
-                    val dayRev = daySales.sumOf { it.priceAmount }.takeIf { it > 0 } ?: (daySold * avgCardPrice)
-                    val dayCost = daySold * avgCostPrice
-                    dailyBreakdown.add(
-                        com.example.data.model.DailySalesPoint(
-                            dayNumber = day,
-                            dayLabel = "$day ${monthNamesAr[monthIndex]}",
-                            cardsSold = daySold,
-                            revenue = dayRev,
-                            profit = (dayRev - dayCost).coerceAtLeast(0.0)
-                        )
-                    )
-                }
-            }
-
-            rawMonthsList.add(
-                com.example.data.model.MonthlySalesSummary(
-                    monthKey = monthKey,
-                    monthName = monthLabel,
-                    totalCardsGenerated = totalGen,
-                    totalCardsSold = totalSold,
-                    totalCardsUnsold = totalUnsold,
-                    totalRevenue = revenue,
-                    totalCost = cost,
-                    netProfit = profit,
-                    potentialUnsoldValue = potentialUnsold,
-                    salesPercentage = salesPct,
-                    targetDeficit = deficit,
-                    isCurrentMonth = isCurrent,
-                    packageBreakdown = pkgBreakdown,
-                    dailyBreakdown = dailyBreakdown
-                )
-            )
-        }
-
-        // Calculate growth rate against previous chronological month
-        val finalMonths = rawMonthsList.mapIndexed { index, item ->
-            val prevMonth = rawMonthsList.getOrNull(index + 1)
-            val growth = if (prevMonth != null && prevMonth.netProfit > 0) {
-                ((item.netProfit - prevMonth.netProfit) / prevMonth.netProfit) * 100.0
-            } else {
-                0.0
-            }
-            item.copy(growthRatePercent = growth)
-        }
-
-        // Persist computed records to Room SQLite database in background
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val entities = finalMonths.map { m ->
-                    val topPkg = m.packageBreakdown.firstOrNull()?.packageName ?: ""
-                    com.example.data.local.MonthlyProfitRecordEntity(
-                        monthKey = m.monthKey,
-                        monthNameAr = m.monthName,
-                        year = m.monthKey.substringBefore("-").toIntOrNull() ?: 2026,
-                        month = m.monthKey.substringAfter("-").toIntOrNull() ?: 1,
-                        totalRevenue = m.totalRevenue,
-                        totalCost = m.totalCost,
-                        netProfit = m.netProfit,
-                        soldCardsCount = m.totalCardsSold,
-                        totalCardsCount = m.totalCardsGenerated,
-                        topSellingProfile = topPkg,
-                        lastUpdatedTimestamp = now
-                    )
-                }
-                database.appDao().insertOrUpdateMonthlyProfitRecords(entities)
-            } catch (_: Exception) {}
-        }
-
-        finalMonths
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val packageConsumptionStats: StateFlow<List<com.example.data.model.PackageConsumptionStat>> = combine(
@@ -1213,10 +954,16 @@ class MainViewModel(
                 )
             }
 
-            // Clean up any predefined template names from package_pricing table to guarantee no fake packages appear
-            com.example.data.model.PREDEFINED_PACKAGE_TEMPLATES.forEach { tpl ->
-                val profName = tpl.title.split("(").first().trim()
-                database.appDao().deletePackagePricing(profName)
+            // Clean up legacy template-only rows only if no live router profile/card uses that name
+            val activeProfileNames = (profiles.value.map { it.name.trim().lowercase() } +
+                cards.value.map { it.profile.trim().lowercase() }).toSet()
+            if (activeProfileNames.isNotEmpty()) {
+                com.example.data.model.PREDEFINED_PACKAGE_TEMPLATES.forEach { tpl ->
+                    val profName = tpl.title.split("(").first().trim()
+                    if (!activeProfileNames.contains(profName.lowercase())) {
+                        database.appDao().deletePackagePricing(profName)
+                    }
+                }
             }
         } catch (_: Exception) {}
     }
@@ -2229,11 +1976,7 @@ class MainViewModel(
             // 1. Instant optimistic update
             val resetCard = card.copy(uptime = "0s", bytesIn = 0L, bytesOut = 0L, disabled = false)
             repository.updateLocalCard(resetCard)
-            try {
-                database.appDao().insertOrUpdateLocalCard(
-                    com.example.data.local.LocalCardEntity.fromHotspotCard(resetCard)
-                )
-            } catch (_: Exception) {}
+            repository.upsertLocalCardPreservingTimestamp(resetCard)
 
             // 2. Execute on router
             val result = repository.reactivateCard(card)
@@ -2254,11 +1997,7 @@ class MainViewModel(
             pauseAutoRefreshFor(6000)
             // 1. Instant optimistic update
             repository.updateLocalCard(updatedCard)
-            try {
-                database.appDao().insertOrUpdateLocalCard(
-                    com.example.data.local.LocalCardEntity.fromHotspotCard(updatedCard)
-                )
-            } catch (_: Exception) {}
+            repository.upsertLocalCardPreservingTimestamp(updatedCard)
 
             // 2. Execute on router
             val result = repository.updateCard(updatedCard)
@@ -2285,11 +2024,7 @@ class MainViewModel(
             if (targetCard != null) {
                 val updated = targetCard.copy(disabled = targetDisabled)
                 repository.updateLocalCard(updated)
-                try {
-                    database.appDao().insertOrUpdateLocalCard(
-                        com.example.data.local.LocalCardEntity.fromHotspotCard(updated)
-                    )
-                } catch (_: Exception) {}
+                repository.upsertLocalCardPreservingTimestamp(updated)
             }
 
             // 2. Execute on router
@@ -2360,7 +2095,7 @@ class MainViewModel(
 
                     // If assigned to a POS Agent, save assignments
                     if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
-                        val priceNum = config.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                        val priceNum = parseBatchPriceValue(config.price).takeIf { it > 0.0 } ?: 200.0
                         val assignments = cards.map { card ->
                             val assignAt = System.currentTimeMillis()
                             val assignmentId = "assign_${card.name}_${assignAt}"
@@ -2425,7 +2160,7 @@ class MainViewModel(
                     "الباقة: ${card.profile}, كلمة المرور: ${card.password}, النظام: ${card.systemLabelAr}"
                 )
                 if (posAgentId > 0L && posAgentName.isNotBlank()) {
-                    val priceNum = card.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                    val priceNum = parseBatchPriceValue(card.price).takeIf { it > 0.0 } ?: 200.0
                     val assignment = PosCardAssignmentEntity(
                         agentId = posAgentId,
                         agentName = posAgentName,
@@ -2538,7 +2273,7 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             val assignments = cardsToAssign.map { card ->
-                val priceNum = card.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                val priceNum = parseBatchPriceValue(card.price).takeIf { it > 0.0 } ?: 200.0
                 PosCardAssignmentEntity(
                     agentId = agentId,
                     agentName = agentName,
@@ -2620,11 +2355,7 @@ class MainViewModel(
             // 1. Instant optimistic update in memory and local DB
             val activated = card.copy(disabled = false)
             repository.updateLocalCard(activated)
-            try {
-                database.appDao().insertOrUpdateLocalCard(
-                    com.example.data.local.LocalCardEntity.fromHotspotCard(activated)
-                )
-            } catch (_: Exception) {}
+            repository.upsertLocalCardPreservingTimestamp(activated)
 
             // 2. Execute on router in background
             val res = repository.verifyAndActivateCard(card)
@@ -2968,6 +2699,35 @@ class MainViewModel(
             }
         }
 
+        // Monthly Profit Records Persistence Collector (loop-free, persists totalBytesConsumed too)
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            monthlySalesList
+                .collectLatest { months ->
+                    if (months.isEmpty()) return@collectLatest
+                    try {
+                        val ts = System.currentTimeMillis()
+                        val entities = months.map { m ->
+                            val topPkg = m.packageBreakdown.firstOrNull()?.packageName ?: ""
+                            com.example.data.local.MonthlyProfitRecordEntity(
+                                monthKey = m.monthKey,
+                                monthNameAr = m.monthName,
+                                year = m.monthKey.substringBefore("-").toIntOrNull() ?: 2026,
+                                month = m.monthKey.substringAfter("-").toIntOrNull() ?: 1,
+                                totalRevenue = m.totalRevenue,
+                                totalCost = m.totalCost,
+                                netProfit = m.netProfit,
+                                soldCardsCount = m.totalCardsSold,
+                                totalCardsCount = m.totalCardsGenerated,
+                                topSellingProfile = topPkg,
+                                totalBytesConsumed = m.totalBytesConsumed,
+                                lastUpdatedTimestamp = ts
+                            )
+                        }
+                        database.appDao().insertOrUpdateMonthlyProfitRecords(entities)
+                    } catch (_: Exception) {}
+                }
+        }
+
         viewModelScope.launch {
             delay(2500)
             checkForUpdates(isManual = false)
@@ -3156,9 +2916,7 @@ class MainViewModel(
 
     companion object {
         internal fun parseBatchPriceValue(priceStr: String): Double {
-            if (priceStr.isBlank()) return 0.0
-            val cleaned = priceStr.replace(",", "").filter { it.isDigit() || it == '.' }
-            return cleaned.toDoubleOrNull() ?: 0.0
+            return FinanceAnalyticsEngine.parsePriceValue(priceStr)
         }
 
         internal fun partitionCardsIntoIndependentBatches(

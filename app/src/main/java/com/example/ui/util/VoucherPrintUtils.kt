@@ -49,7 +49,8 @@ data class CardDesignConfig(
     val columns: Int = 4,
     val rows: Int = 15,
     val cardWidthMm: Float = 50f,
-    val cardHeightMm: Float = 18f
+    val cardHeightMm: Float = 18f,
+    val customCodeColorArgb: Int = Color.rgb(13, 27, 42)
 ) {
     val safeColumns: Int get() = columns.coerceAtLeast(1)
     val safeRows: Int get() = rows.coerceAtLeast(1)
@@ -76,7 +77,10 @@ object VoucherPrintUtils {
                     sampleSize *= 2
                 }
             }
-            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            val decodeOpts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 BitmapFactory.decodeStream(stream, null, decodeOpts)
             }
@@ -107,16 +111,23 @@ object VoucherPrintUtils {
         val cardW = printableWidth / safeCols
         val cardH = printableHeight / safeRows
 
+        val isCustomImageMode = config.templateType == CardTemplateType.CUSTOM_IMAGE
+
         val paintBg = Paint().apply {
             isAntiAlias = true
             style = Paint.Style.FILL
             color = Color.WHITE
         }
+        val paintBitmap = Paint().apply {
+            isAntiAlias = true
+            isFilterBitmap = true
+            isDither = true
+        }
         val paintBorder = Paint().apply {
             isAntiAlias = true
             style = Paint.Style.STROKE
-            strokeWidth = 1.2f
-            color = Color.rgb(200, 215, 230)
+            strokeWidth = if (isCustomImageMode) 0.6f else 1.2f
+            color = if (isCustomImageMode) Color.rgb(225, 232, 238) else Color.rgb(200, 215, 230)
         }
         val paintTextHeader = Paint().apply {
             isAntiAlias = true
@@ -127,7 +138,7 @@ object VoucherPrintUtils {
         }
         val paintCodeValue = Paint().apply {
             isAntiAlias = true
-            color = Color.rgb(10, 20, 30)
+            color = if (isCustomImageMode) config.customCodeColorArgb else Color.rgb(10, 20, 30)
             textSize = cardH * 0.22f * (config.fontSizeSp / 14f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
@@ -181,13 +192,25 @@ object VoucherPrintUtils {
                 val bottom = top + cardH - 2f
                 val cardRect = RectF(left, top, right, bottom)
 
-                // 1. Draw card background
-                canvas.drawRoundRect(cardRect, 4f, 4f, paintBg)
+                if (isCustomImageMode) {
+                    // Custom Gallery Image Mode:
+                    // Completely strip old template decorations/texts/badges and keep ONLY the image + card number
+                    canvas.drawRect(cardRect, paintBg)
+                    if (customBgBitmap != null && !customBgBitmap.isRecycled) {
+                        val srcRect = Rect(0, 0, customBgBitmap.width, customBgBitmap.height)
+                        canvas.drawBitmap(customBgBitmap, srcRect, cardRect, paintBitmap)
+                    }
+                    canvas.drawRect(cardRect, paintBorder)
 
-                if (customBgBitmap != null && !customBgBitmap.isRecycled && config.templateType == CardTemplateType.CUSTOM_IMAGE) {
-                    val srcRect = Rect(0, 0, customBgBitmap.width, customBgBitmap.height)
-                    canvas.drawBitmap(customBgBitmap, srcRect, cardRect, null)
+                    val centerX = cardRect.centerX() + (config.offsetXPercent * cardRect.width() * 0.45f)
+                    val centerY = cardRect.centerY() + (config.offsetYPercent * cardRect.height() * 0.45f)
+                    val fm = paintCodeValue.fontMetrics
+                    val baselineY = centerY - (fm.ascent + fm.descent) / 2f
+                    canvas.drawText(card.name, centerX, baselineY, paintCodeValue)
                 } else {
+                    // Built-in Template Mode
+                    canvas.drawRoundRect(cardRect, 4f, 4f, paintBg)
+
                     val badgeWidth = cardW * 0.20f
                     val badgeRect = RectF(right - badgeWidth, top, right, bottom)
                     canvas.drawRoundRect(badgeRect, 2f, 2f, paintPriceBadgeBg)
@@ -198,30 +221,28 @@ object VoucherPrintUtils {
 
                     val leftBarRect = RectF(left, top, left + 4f, bottom)
                     canvas.drawRect(leftBarRect, paintPriceBadgeBg)
+
+                    canvas.drawRoundRect(cardRect, 4f, 4f, paintBorder)
+
+                    val contentCenterX = left + (cardW * 0.40f) + (config.offsetXPercent * cardW * 0.2f)
+
+                    val timeLimit = if (card.limitUptime.isNotBlank()) card.limitUptime else "24 ساعة"
+                    val quotaMb = if (card.limitBytesTotal > 0) "${card.limitBytesTotal / (1024 * 1024)} ميجا" else "1024 ميجا"
+                    val headerStr = "$timeLimit . $quotaMb"
+                    canvas.drawText(headerStr, contentCenterX, top + cardH * 0.24f, paintTextHeader)
+
+                    val codeY = top + cardH * 0.58f + (config.offsetYPercent * cardH * 0.2f)
+                    canvas.drawText("رمز الدخول: ${card.name}", contentCenterX, codeY, paintCodeValue)
+
+                    val linePaint = Paint().apply {
+                        color = Color.rgb(210, 220, 230)
+                        strokeWidth = 1f
+                    }
+                    canvas.drawLine(left + 10f, top + cardH * 0.68f, right - (cardW * 0.25f), top + cardH * 0.68f, linePaint)
+
+                    val footerStr = "${config.networkName} | ت: ${config.contactPhone}"
+                    canvas.drawText(footerStr, contentCenterX, top + cardH * 0.88f, paintFooter)
                 }
-
-                // 2. Draw border
-                canvas.drawRoundRect(cardRect, 4f, 4f, paintBorder)
-
-                // 3. Card Texts
-                val contentCenterX = left + (cardW * 0.40f) + (config.offsetXPercent * cardW * 0.2f)
-
-                val timeLimit = if (card.limitUptime.isNotBlank()) card.limitUptime else "24 ساعة"
-                val quotaMb = if (card.limitBytesTotal > 0) "${card.limitBytesTotal / (1024 * 1024)} ميجا" else "1024 ميجا"
-                val headerStr = "$timeLimit . $quotaMb"
-                canvas.drawText(headerStr, contentCenterX, top + cardH * 0.24f, paintTextHeader)
-
-                val codeY = top + cardH * 0.58f + (config.offsetYPercent * cardH * 0.2f)
-                canvas.drawText("رمز الدخول: ${card.name}", contentCenterX, codeY, paintCodeValue)
-
-                val linePaint = Paint().apply {
-                    color = Color.rgb(210, 220, 230)
-                    strokeWidth = 1f
-                }
-                canvas.drawLine(left + 10f, top + cardH * 0.68f, right - (cardW * 0.25f), top + cardH * 0.68f, linePaint)
-
-                val footerStr = "${config.networkName} | ت: ${config.contactPhone}"
-                canvas.drawText(footerStr, contentCenterX, top + cardH * 0.88f, paintFooter)
             }
         }
     }
