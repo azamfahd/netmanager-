@@ -40,19 +40,11 @@ import com.example.data.model.UpdateDownloadState
 import com.example.data.model.DetailedPackageProfitStat
 import com.example.data.model.MonthlyPackageSales
 import com.example.data.model.DailySalesPoint
-import com.example.data.model.FinanceCloudSyncStatus
-import com.example.data.model.FinanceCloudValidator
-import com.example.data.model.ValidatedMonthlyFetchResult
 import com.example.data.util.AppUpdateManager
 import com.example.data.util.FinanceAnalyticsEngine
-import com.example.data.network.FinanceFirestoreRepository
 import com.example.data.network.MikrotikRepository
 import com.example.data.network.NetworkUtils
-import com.example.data.network.OperationType
-import com.example.data.network.handleFirestoreError
-import com.google.firebase.auth.FirebaseAuth
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -63,11 +55,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -304,32 +293,8 @@ class MainViewModel(
     val systemEventLogs: StateFlow<List<com.example.data.local.SystemEventLogEntity>> = database.appDao().getAllSystemEventLogs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    private val financeFirestoreRepository = FinanceFirestoreRepository(db)
-
-    private val _financeCloudSyncStatus = MutableStateFlow<FinanceCloudSyncStatus>(
-        if (getUserId() != null) FinanceCloudSyncStatus.Syncing else FinanceCloudSyncStatus.SignedOut
-    )
-    val financeCloudSyncStatus: StateFlow<FinanceCloudSyncStatus> = _financeCloudSyncStatus.asStateFlow()
-
     private fun getUserId(): String? {
-        return runCatching { Firebase.auth.currentUser?.uid }.getOrNull()
-    }
-
-    private fun authStateFlow(): kotlinx.coroutines.flow.Flow<String?> = callbackFlow {
-        val firebaseAuth = runCatching { Firebase.auth }.getOrNull()
-        if (firebaseAuth == null) {
-            trySend(null)
-            awaitClose {}
-            return@callbackFlow
-        }
-        trySend(firebaseAuth.currentUser?.uid)
-        val listener = FirebaseAuth.AuthStateListener { auth ->
-            trySend(auth.currentUser?.uid)
-        }
-        firebaseAuth.addAuthStateListener(listener)
-        awaitClose {
-            firebaseAuth.removeAuthStateListener(listener)
-        }
+        return Firebase.auth.currentUser?.uid
     }
 
     @Volatile
@@ -341,19 +306,14 @@ class MainViewModel(
 
     private fun syncToCloud(collectionName: String, docId: String, data: Map<String, Any?>) {
         val uid = getUserId() ?: return
-        val safeDocId = FinanceCloudValidator.sanitizeFirestoreDocId(docId)
-        val path = "users/$uid/$collectionName/$safeDocId"
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                db.collection("users").document(uid).collection(collectionName).document(safeDocId)
+                db.collection("users").document(uid).collection(collectionName).document(docId)
                     .set(data, SetOptions.merge())
                     .addOnFailureListener { e ->
-                        handleFirestoreError(e, OperationType.WRITE, path)
                         logApplicationError("Cloud Sync", "فشل المزامنة لـ $collectionName: ${e.message}")
                     }
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.WRITE, path)
-            }
+            } catch (_: Exception) {}
         }
     }
 
@@ -738,120 +698,29 @@ class MainViewModel(
 
     fun updatePackageCostAndPrice(profileName: String, costPrice: Double, salePrice: Double) {
         viewModelScope.launch {
-            val cleanCost = if (costPrice.isFinite()) costPrice.coerceAtLeast(0.0) else 0.0
-            val cleanSale = if (salePrice.isFinite()) salePrice.coerceAtLeast(0.0) else 0.0
             val timestamp = System.currentTimeMillis()
             database.appDao().insertPackagePricing(
                 com.example.data.local.PackagePricingEntity(
                     profileName = profileName,
-                    costPrice = cleanCost,
-                    salePrice = cleanSale,
+                    costPrice = costPrice.coerceAtLeast(0.0),
+                    salePrice = salePrice.coerceAtLeast(0.0),
                     updatedAt = timestamp
                 )
             )
-
-            // Validated Cloud Sync using sanitized docId
-            financeFirestoreRepository.saveValidatedPackagePricing(
-                profileName = profileName,
-                costPrice = cleanCost,
-                salePrice = cleanSale
-            ).onFailure { err ->
-                logApplicationError("Cloud Pricing Sync", "تعذرت مزامنة سعر الباقة ($profileName): ${err.message}")
-            }
+            
+            // Sync to Cloud
+            syncToCloud("packagePricing", profileName, mapOf(
+                "profileName" to profileName,
+                "costPrice" to costPrice,
+                "salePrice" to salePrice,
+                "updatedAt" to com.google.firebase.Timestamp(java.util.Date(timestamp))
+            ))
             _toastEvent.emit("تم حفظ وتحديث سعر التكلفة والبيع لباقة ($profileName) بنجاح")
-        }
-    }
-
-    fun syncFinanceWithCloud() {
-        val uid = getUserId()
-        if (uid.isNullOrBlank()) {
-            _financeCloudSyncStatus.value = FinanceCloudSyncStatus.SignedOut
-            viewModelScope.launch {
-                _toastEvent.emit("يرجى تسجيل الدخول بحساب Google أولاً لمزامنة السجل المالي السحابي")
-            }
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Syncing
-            try {
-                syncPackagePricingsFromCloud(uid)
-                val fetchRes = financeFirestoreRepository.fetchMonthlyProfitsSequentially(uid)
-                val fetched = fetchRes.getOrElse { err ->
-                    _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(err.message ?: "خطأ في الجلب السحابي")
-                    _toastEvent.emit("تعذر جلب السجل المالي السحابي: ${err.message}")
-                    return@launch
-                }
-                applyValidatedCloudMonthlyFetch(fetched)
-
-                val pushReport = financeFirestoreRepository.upsertMonthlyProfitsValidated(monthlySalesList.value)
-                    .getOrElse { err ->
-                        _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(err.message ?: "خطأ في الحفظ السحابي")
-                        _toastEvent.emit("تعذر رفع تحديثات الأرباح للسحابة: ${err.message}")
-                        return@launch
-                    }
-
-                val postFetch = financeFirestoreRepository.fetchMonthlyProfitsSequentially(uid).getOrNull() ?: fetched
-                applyValidatedCloudMonthlyFetch(postFetch)
-                _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Synced(
-                    syncedMonthsCount = postFetch.entities.size,
-                    skippedInvalidCount = postFetch.rejectedDocsCount + pushReport.rejectedValidationCount
-                )
-                _toastEvent.emit(
-                    "تمت المزامنة المالية المتسلسلة: ${postFetch.entities.size} شهر موثق" +
-                        if (pushReport.totalWrittenCount > 0) " (تم رفع ${pushReport.totalWrittenCount} تحديث)" else ""
-                )
-            } catch (e: Exception) {
-                _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(e.message ?: "خطأ غير متوقع")
-                _toastEvent.emit("حدث خطأ أثناء مزامنة السحابة: ${e.message}")
-            }
-        }
-    }
-
-    private suspend fun syncPackagePricingsFromCloud(uid: String) {
-        val cloudPricings = financeFirestoreRepository.fetchPackagePricings(uid).getOrNull() ?: return
-        if (cloudPricings.isEmpty()) return
-        val localByName = database.appDao().getAllPackagePricingsSync().associateBy { it.profileName }
-        for (remote in cloudPricings) {
-            val local = localByName[remote.profileName]
-            if (local == null || remote.updatedAt > local.updatedAt) {
-                database.appDao().insertPackagePricing(remote)
-            }
-        }
-    }
-
-    private suspend fun applyValidatedCloudMonthlyFetch(fetchResult: ValidatedMonthlyFetchResult) {
-        if (fetchResult.breakdownsByMonth != _cloudPackageBreakdowns.value) {
-            _cloudPackageBreakdowns.value = fetchResult.breakdownsByMonth
-        }
-        if (fetchResult.entities != _cloudMonthlyRecordsFlow.value) {
-            _cloudMonthlyRecordsFlow.value = fetchResult.entities
-        }
-        if (fetchResult.entities.isNotEmpty()) {
-            try {
-                val existingByKey = database.appDao().getAllMonthlyProfitRecordsSync().associateBy { it.monthKey }
-                val toUpsert = fetchResult.entities.filter { cloud ->
-                    val cloudHasData = cloud.totalRevenue > 0.0 || cloud.soldCardsCount > 0 || cloud.totalCardsCount > 0 || cloud.totalBytesConsumed > 0L
-                    val local = existingByKey[cloud.monthKey]
-                    val localHasData = local != null && (local.totalRevenue > 0.0 || local.soldCardsCount > 0 || local.totalCardsCount > 0 || local.totalBytesConsumed > 0L)
-                    if (!cloudHasData && localHasData) {
-                        false
-                    } else if (local == null) {
-                        cloudHasData
-                    } else {
-                        cloudHasData && !localHasData
-                    }
-                }
-                if (toUpsert.isNotEmpty()) {
-                    database.appDao().insertOrUpdateMonthlyProfitRecords(toUpsert)
-                }
-            } catch (_: Exception) {}
         }
     }
 
     private val localCardsFlow = database.appDao().getAllLocalCardsFlow()
     private val archivedSessionsFlow = database.appDao().getAllArchivedSessions()
-    private val _cloudMonthlyRecordsFlow = MutableStateFlow<List<com.example.data.local.MonthlyProfitRecordEntity>>(emptyList())
-    private val _cloudPackageBreakdowns = MutableStateFlow<Map<String, List<MonthlyPackageSales>>>(emptyMap())
     private val initialMonthlyProfitRecordsFlow = flow {
         val saved = try {
             withContext(Dispatchers.IO) {
@@ -861,25 +730,6 @@ class MainViewModel(
             emptyList()
         }
         emit(saved)
-    }
-
-    private val mergedSavedMonthlyRecordsFlow = combine(
-        initialMonthlyProfitRecordsFlow,
-        _cloudMonthlyRecordsFlow
-    ) { initialRoom, cloudRecords ->
-        val merged = initialRoom.associateBy { it.monthKey }.toMutableMap()
-        for (cloud in cloudRecords) {
-            val cloudHasData = cloud.totalRevenue > 0.0 || cloud.soldCardsCount > 0 || cloud.totalCardsCount > 0 || cloud.totalBytesConsumed > 0L
-            val existing = merged[cloud.monthKey]
-            val existingHasData = existing != null && (existing.totalRevenue > 0.0 || existing.soldCardsCount > 0 || existing.totalCardsCount > 0 || existing.totalBytesConsumed > 0L)
-            if (existing == null || (cloudHasData && (!existingHasData || cloud.lastUpdatedTimestamp >= existing.lastUpdatedTimestamp))) {
-                merged[cloud.monthKey] = cloud
-            }
-        }
-        merged.values.sortedWith(
-            compareByDescending<com.example.data.local.MonthlyProfitRecordEntity> { it.year }
-                .thenByDescending { it.month }
-        )
     }
 
     private data class FinancePrimaryInputs(
@@ -894,8 +744,7 @@ class MainViewModel(
         val localCards: List<com.example.data.local.LocalCardEntity>,
         val loginHistory: List<com.example.data.local.UserLoginHistoryEntity>,
         val archivedSessions: List<com.example.data.local.SessionArchiveEntity>,
-        val savedMonthlyRecords: List<com.example.data.local.MonthlyProfitRecordEntity>,
-        val savedPackageBreakdowns: Map<String, List<MonthlyPackageSales>>
+        val savedMonthlyRecords: List<com.example.data.local.MonthlyProfitRecordEntity>
     )
 
     private val financePrimaryInputsFlow = combine(
@@ -912,10 +761,9 @@ class MainViewModel(
         localCardsFlow,
         allLoginHistory,
         archivedSessionsFlow,
-        mergedSavedMonthlyRecordsFlow,
-        _cloudPackageBreakdowns
-    ) { localCardList, loginList, sessionList, savedMonthlyList, cloudBreakdowns ->
-        FinanceHistoryInputs(localCardList, loginList, sessionList, savedMonthlyList, cloudBreakdowns)
+        initialMonthlyProfitRecordsFlow
+    ) { localCardList, loginList, sessionList, savedMonthlyList ->
+        FinanceHistoryInputs(localCardList, loginList, sessionList, savedMonthlyList)
     }
 
     val detailedPackageProfitStats: StateFlow<List<com.example.data.model.DetailedPackageProfitStat>> = combine(
@@ -961,8 +809,7 @@ class MainViewModel(
             batches = primary.batches,
             loginHistory = history.loginHistory,
             archivedSessions = history.archivedSessions,
-            savedMonthlyRecords = history.savedMonthlyRecords,
-            savedPackageBreakdownsByMonth = history.savedPackageBreakdowns
+            savedMonthlyRecords = history.savedMonthlyRecords
         )
     }.flowOn(kotlinx.coroutines.Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -1999,7 +1846,7 @@ class MainViewModel(
 
     fun refreshData() {
         viewModelScope.launch {
-            repository.refreshData(forceHistorySync = true)
+            repository.refreshData()
         }
     }
 
@@ -2009,7 +1856,7 @@ class MainViewModel(
             if (currentConn is ConnectionState.Connected) {
                 _connectionState.value = currentConn.copy(isSyncing = true)
                 _toastEvent.emit("جاري محاولة الاتصال بالراوتر ومزامنة البيانات...")
-                val res = repository.refreshData(forceHistorySync = true)
+                val res = repository.refreshData()
                 val latestConn = _connectionState.value as? ConnectionState.Connected ?: return@launch
                 if (res.isSuccess) {
                     consecutiveRefreshFailures = 0
@@ -2901,45 +2748,7 @@ class MainViewModel(
             }
         }
 
-        // Auth-Gated Sequential Firestore Finance Sync & Real-Time Observer
-        viewModelScope.launch(Dispatchers.IO) {
-            authStateFlow()
-                .distinctUntilChanged()
-                .collectLatest { uid ->
-                    if (uid.isNullOrBlank()) {
-                        _financeCloudSyncStatus.value = FinanceCloudSyncStatus.SignedOut
-                        return@collectLatest
-                    }
-                    _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Syncing
-                    syncPackagePricingsFromCloud(uid)
-
-                    val initialFetch = financeFirestoreRepository.fetchMonthlyProfitsSequentially(uid)
-                    initialFetch.onSuccess { res ->
-                        applyValidatedCloudMonthlyFetch(res)
-                    }
-
-                    val currentLocal = monthlySalesList.value
-                    if (currentLocal.isNotEmpty()) {
-                        financeFirestoreRepository.upsertMonthlyProfitsValidated(currentLocal)
-                    }
-
-                    financeFirestoreRepository.observeMonthlyProfits(uid)
-                        .catch { err ->
-                            _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(
-                                err.message ?: "تعذرت قراءة الأرباح السحابية"
-                            )
-                        }
-                        .collectLatest { liveFetch ->
-                            applyValidatedCloudMonthlyFetch(liveFetch)
-                            _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Synced(
-                                syncedMonthsCount = liveFetch.entities.size,
-                                skippedInvalidCount = liveFetch.rejectedDocsCount
-                            )
-                        }
-                }
-        }
-
-        // Monthly Profit Records Persistence Collector (Room + Validated Cloud Upsert, loop-free & zero-clobber guarded)
+        // Monthly Profit Records Persistence Collector (loop-free, never clobbers non-zero history with zeros)
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             monthlySalesList
                 .collectLatest { months ->
@@ -2954,60 +2763,25 @@ class MainViewModel(
                             if (isZero && prevHasData) {
                                 null
                             } else {
-                                val yearInt = m.monthKey.substringBefore("-").toIntOrNull() ?: 2026
-                                val monthInt = m.monthKey.substringAfter("-").toIntOrNull() ?: 1
                                 val topPkg = m.packageBreakdown.firstOrNull()?.packageName ?: ""
-                                val unchanged = prev != null &&
-                                    prev.monthNameAr == m.monthName &&
-                                    kotlin.math.abs(prev.totalRevenue - m.totalRevenue) < 0.001 &&
-                                    kotlin.math.abs(prev.totalCost - m.totalCost) < 0.001 &&
-                                    kotlin.math.abs(prev.netProfit - m.netProfit) < 0.001 &&
-                                    prev.soldCardsCount == m.totalCardsSold &&
-                                    prev.totalCardsCount == m.totalCardsGenerated &&
-                                    prev.topSellingProfile == topPkg &&
-                                    prev.totalBytesConsumed == m.totalBytesConsumed
-                                if (unchanged) {
-                                    null
-                                } else {
-                                    com.example.data.local.MonthlyProfitRecordEntity(
-                                        monthKey = m.monthKey,
-                                        monthNameAr = m.monthName,
-                                        year = yearInt,
-                                        month = monthInt,
-                                        totalRevenue = m.totalRevenue,
-                                        totalCost = m.totalCost,
-                                        netProfit = m.netProfit,
-                                        soldCardsCount = m.totalCardsSold,
-                                        totalCardsCount = m.totalCardsGenerated,
-                                        topSellingProfile = topPkg,
-                                        totalBytesConsumed = m.totalBytesConsumed,
-                                        lastUpdatedTimestamp = ts
-                                    )
-                                }
+                                com.example.data.local.MonthlyProfitRecordEntity(
+                                    monthKey = m.monthKey,
+                                    monthNameAr = m.monthName,
+                                    year = m.monthKey.substringBefore("-").toIntOrNull() ?: 2026,
+                                    month = m.monthKey.substringAfter("-").toIntOrNull() ?: 1,
+                                    totalRevenue = m.totalRevenue,
+                                    totalCost = m.totalCost,
+                                    netProfit = m.netProfit,
+                                    soldCardsCount = m.totalCardsSold,
+                                    totalCardsCount = m.totalCardsGenerated,
+                                    topSellingProfile = topPkg,
+                                    totalBytesConsumed = m.totalBytesConsumed,
+                                    lastUpdatedTimestamp = ts
+                                )
                             }
                         }
                         if (entities.isNotEmpty()) {
                             database.appDao().insertOrUpdateMonthlyProfitRecords(entities)
-                        }
-
-                        if (!getUserId().isNullOrBlank()) {
-                            financeFirestoreRepository.upsertMonthlyProfitsValidated(months)
-                                .onSuccess { report ->
-                                    if (report.totalWrittenCount > 0) {
-                                        val meaningfulCount = months.count {
-                                            it.totalRevenue > 0.0 || it.totalCardsSold > 0 || it.totalCardsGenerated > 0 || it.totalBytesConsumed > 0L
-                                        }
-                                        _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Synced(
-                                            syncedMonthsCount = meaningfulCount,
-                                            skippedInvalidCount = report.rejectedValidationCount
-                                        )
-                                    }
-                                }
-                                .onFailure { err ->
-                                    _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(
-                                        err.message ?: "تعذرت مزامنة الأرباح السحابية"
-                                    )
-                                }
                         }
                     } catch (_: Exception) {}
                 }

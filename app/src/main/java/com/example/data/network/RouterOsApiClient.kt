@@ -2340,34 +2340,10 @@ class RouterOsApiClient {
             try {
                 // Try v7 user-manager first
                 var sentences = executeSentence(listOf("/user-manager/user/print"))
-                val isV7Um = sentences.any { it.firstOrNull() == "!re" }
-                if (!isV7Um) {
+                if (sentences.none { it.firstOrNull() == "!re" }) {
                     // Try v6 /tool/user-manager/user
                     sentences = executeSentence(listOf("/tool/user-manager/user/print"))
                 }
-
-                // In RouterOS v7, active/assigned profiles & subscription timestamps often live in /user-manager/user-profile
-                val userProfileMap = mutableMapOf<String, Pair<String, String>>()
-                try {
-                    val upSentences = executeSentence(
-                        listOf(if (isV7Um) "/user-manager/user-profile/print" else "/tool/user-manager/user-profile/print")
-                    )
-                    for (ups in upSentences) {
-                        if (ups.firstOrNull() == "!re") {
-                            val upMap = parseSentenceToMap(ups)
-                            val uName = (upMap["user"] ?: upMap["username"] ?: "").trim()
-                            val pName = (upMap["profile"] ?: "").trim()
-                            val endRaw = (upMap["end-time"] ?: upMap["till-time"] ?: "").trim()
-                            val state = (upMap["state"] ?: "").lowercase()
-                            if (uName.isNotBlank() && pName.isNotBlank()) {
-                                val existing = userProfileMap[uName.lowercase()]
-                                if (existing == null || state == "running-active" || state == "running") {
-                                    userProfileMap[uName.lowercase()] = pName to endRaw
-                                }
-                            }
-                        }
-                    }
-                } catch (_: Exception) {}
 
                 val list = mutableListOf<HotspotCard>()
                 for (s in sentences) {
@@ -2376,34 +2352,30 @@ class RouterOsApiClient {
                         val name = map["name"] ?: map["username"] ?: ""
                         if (name.isNotBlank()) {
                             val comment = map["comment"] ?: ""
-                            val upEntry = userProfileMap[name.trim().lowercase()]
                             val profile = map["actual-profile"]?.takeIf { it.isNotBlank() }
                                 ?: map["profile"]?.takeIf { it.isNotBlank() }
-                                ?: upEntry?.first?.takeIf { it.isNotBlank() }
                                 ?: "UserManager"
                             val price = extractPriceFromText(comment, profile, name)
-
+                            
                             // MikroTik User Manager v6/v7:
                             // download-used = Router to Client (Download) -> bytesOut
                             // upload-used = Client to Router (Upload) -> bytesIn
                             val downUsed = map["download-used"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                             val upUsed = map["upload-used"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
-
+                            
                             val downLimit = map["download-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                             val totalLimit = map["total-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                             val transLimit = map["transfer-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
-
+                            
                             val bestLimit = if (totalLimit > 0L) totalLimit else if (transLimit > 0L) transLimit else downLimit
                             val dateHint = listOfNotNull(
                                 map["creation-time"],
                                 map["start-time"],
                                 map["started"],
-                                comment.takeIf { it.isNotBlank() },
                                 map["last-seen"],
                                 map["last-logged-in"],
                                 map["till-time"],
-                                map["end-time"],
-                                upEntry?.second?.takeIf { it.isNotBlank() }
+                                comment
                             ).firstNotNullOfOrNull { raw ->
                                 com.example.data.network.NetworkUtils.parseRouterDateToEpoch(raw)
                             } ?: 0L

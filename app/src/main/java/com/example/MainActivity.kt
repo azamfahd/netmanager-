@@ -54,8 +54,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         val db = try {
-            val databaseId = applicationContext.getString(R.string.firestore_database_id)
-            FirebaseFirestore.getInstance(databaseId)
+            FirebaseFirestore.getInstance()
         } catch (dbEx: Exception) {
             android.util.Log.e("MainActivity", "CRITICAL: Could not get Firestore instance: ${dbEx.message}")
             throw dbEx

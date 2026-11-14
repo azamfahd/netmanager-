@@ -1,5 +1,3 @@
-import java.time.Duration
-
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
@@ -131,12 +129,4 @@ dependencies {
   implementation(libs.androidx.credentials)
   implementation(libs.androidx.credentials.play.services)
   implementation(libs.googleid)
-}
-
-tasks.withType<Test> {
-  failFast = true
-  timeout.set(Duration.ofMinutes(2))
-  testLogging {
-    events("passed", "failed", "skipped")
-  }
 }

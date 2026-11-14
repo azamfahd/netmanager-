@@ -10,11 +10,9 @@ import com.example.data.local.UserLoginHistoryEntity
 import com.example.data.model.HotspotCard
 import com.example.data.model.HotspotProfile
 import com.example.data.model.TimeFilterRange
-import com.example.data.network.NetworkUtils
 import com.example.data.util.FinanceAnalyticsEngine
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Calendar
@@ -383,114 +381,5 @@ class FinanceAnalyticsEngineUnitTest {
         val nov26 = months.first { it.monthKey == "2026-11" }
         assertEquals(0, nov26.totalCardsSold)
         assertEquals(0.0, nov26.totalRevenue, 0.01)
-    }
-
-    @Test
-    fun parseRouterDateToEpochSkipsInvalidLeadingNumbers() {
-        val now = epochOf(2026, 11, 14, 12)
-
-        val isoAfterNumericPrefix = NetworkUtils.parseRouterDateToEpoch("batch-1000-2025-10-15", now)
-        assertNotNull(isoAfterNumericPrefix)
-        val cal1 = Calendar.getInstance().apply { timeInMillis = isoAfterNumericPrefix!! }
-        assertEquals(2025, cal1.get(Calendar.YEAR))
-        assertEquals(Calendar.OCTOBER, cal1.get(Calendar.MONTH))
-        assertEquals(15, cal1.get(Calendar.DAY_OF_MONTH))
-
-        val mikhmonAfterInvalid = NetworkUtils.parseRouterDateToEpoch("id-99/99/99 vc-120-08.22.26", now)
-        assertNotNull(mikhmonAfterInvalid)
-        val cal2 = Calendar.getInstance().apply { timeInMillis = mikhmonAfterInvalid!! }
-        assertEquals(2026, cal2.get(Calendar.YEAR))
-        assertEquals(Calendar.AUGUST, cal2.get(Calendar.MONTH))
-        assertEquals(22, cal2.get(Calendar.DAY_OF_MONTH))
-    }
-
-    @Test
-    fun cloudValidatorRejectsCorruptRecordsAndSanitizesIdsWhileEngineRestoresBreakdowns() {
-        val sanitizedArabic = com.example.data.model.FinanceCloudValidator.sanitizeFirestoreDocId("باقة / 500 يومي")
-        assertTrue(Regex("^[a-zA-Z0-9_\\-]{1,128}$").matches(sanitizedArabic))
-        val sanitizedAscii = com.example.data.model.FinanceCloudValidator.sanitizeFirestoreDocId("500-Day")
-        assertEquals("500-Day", sanitizedAscii)
-
-        val validCandidate = com.example.data.model.FinanceCloudValidator.validateMonthlySummaryForUpload(
-            com.example.data.model.MonthlySalesSummary(
-                monthKey = "2025-11",
-                monthName = "نوفمبر 2025",
-                totalCardsGenerated = 20,
-                totalCardsSold = 15,
-                totalRevenue = 7500.0,
-                totalCost = 3000.0,
-                netProfit = 4500.0,
-                totalBytesConsumed = 2_000_000L
-            ),
-            userId = "user_abc"
-        )
-        assertNotNull(validCandidate)
-        assertEquals(2025L * 12L + 11L, validCandidate!!.yearMonthSerial)
-
-        val corruptNegative = com.example.data.model.FinanceCloudValidator.validateMonthlySummaryForUpload(
-            com.example.data.model.MonthlySalesSummary(
-                monthKey = "2025-11",
-                monthName = "نوفمبر 2025",
-                totalRevenue = 500.0,
-                totalCost = 600.0,
-                netProfit = -100.0
-            ),
-            userId = "user_abc"
-        )
-        assertEquals(null, corruptNegative)
-
-        val now = epochOf(2026, 11, 14, 12)
-        val restoredBreakdowns = mapOf(
-            "2025-06" to listOf(
-                com.example.data.model.MonthlyPackageSales("500-Day", cardsSold = 10, totalRevenue = 5000.0, netProfit = 3000.0, sharePercentage = 62.5f),
-                com.example.data.model.MonthlyPackageSales("300-Hour", cardsSold = 10, totalRevenue = 3000.0, netProfit = 1500.0, sharePercentage = 37.5f)
-            )
-        )
-        val savedRecords = listOf(
-            MonthlyProfitRecordEntity(
-                monthKey = "2025-06",
-                monthNameAr = "يونيو 2025",
-                year = 2025,
-                month = 6,
-                totalRevenue = 8000.0,
-                totalCost = 3500.0,
-                netProfit = 4500.0,
-                soldCardsCount = 20,
-                totalCardsCount = 25,
-                topSellingProfile = "500-Day",
-                totalBytesConsumed = 10_000_000L
-            ),
-            // Corrupted negative SQLite record must be ignored completely
-            MonthlyProfitRecordEntity(
-                monthKey = "2025-04",
-                monthNameAr = "أبريل 2025",
-                year = 2025,
-                month = 4,
-                totalRevenue = -50.0,
-                totalCost = 0.0,
-                netProfit = -50.0,
-                soldCardsCount = 1,
-                totalCardsCount = 1
-            )
-        )
-
-        val months = FinanceAnalyticsEngine.computeMonthlySalesList(
-            allCards = emptyList(),
-            localCards = emptyList(),
-            profiles = emptyList(),
-            pricings = emptyList(),
-            assignments = emptyList(),
-            batches = emptyList(),
-            loginHistory = emptyList(),
-            archivedSessions = emptyList(),
-            savedMonthlyRecords = savedRecords,
-            nowMillis = now,
-            savedPackageBreakdownsByMonth = restoredBreakdowns
-        )
-
-        assertTrue("Corrupt 2025-04 record must be excluded", months.none { it.monthKey == "2025-04" })
-        val june25 = months.first { it.monthKey == "2025-06" }
-        assertEquals(2, june25.packageBreakdown.size)
-        assertEquals("300-Hour", june25.packageBreakdown[1].packageName)
     }
 }

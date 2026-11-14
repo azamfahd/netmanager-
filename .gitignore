@@ -20,4 +20,3 @@ debug.keystore
 *.keystore
 *.keystore.base64
 app/google-services.json
-*-debug.log
