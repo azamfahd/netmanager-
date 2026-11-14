@@ -155,7 +155,8 @@ data class HotspotCard(
     val disabled: Boolean = false,
     val price: String = "",
     val posAgent: String = "",
-    val cardType: String = "hotspot" // "hotspot" or "usermanager"
+    val cardType: String = "hotspot", // "hotspot" or "usermanager"
+    val createdAtHint: Long = 0L
 ) {
     val isUserManagerCard: Boolean
         get() = cardType.contains("usermanager", ignoreCase = true) || id.startsWith("um", ignoreCase = true) || id.startsWith("tum", ignoreCase = true)

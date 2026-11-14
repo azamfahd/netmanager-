@@ -84,7 +84,11 @@ object FinanceAnalyticsEngine {
         return match.value.toDoubleOrNull() ?: 0.0
     }
 
-    fun extractTimestampFromCardMetadata(card: HotspotCard, nowMillis: Long): Long? {
+    fun extractExplicitDateFromCardMetadata(card: HotspotCard, nowMillis: Long = System.currentTimeMillis()): Long? {
+        if (card.createdAtHint in MIN_VALID_EPOCH_MS..MAX_VALID_EPOCH_MS) {
+            return card.createdAtHint
+        }
+
         val idMatch = Regex("""(?:gen_|card_|c_|tum_|um_)?(\d{10,13})""").find(card.id)
         if (idMatch != null) {
             val numStr = idMatch.groupValues[1]
@@ -94,30 +98,14 @@ object FinanceAnalyticsEngine {
             }
         }
 
-        val comment = normalizeDigits(card.comment)
-        if (comment.isNotBlank()) {
-            val dateMatch = Regex("""(\d{4})[-/](\d{1,2})[-/](\d{1,2})""").find(comment)
-            if (dateMatch != null) {
-                val y = dateMatch.groupValues[1].toIntOrNull()
-                val m = dateMatch.groupValues[2].toIntOrNull()
-                val d = dateMatch.groupValues[3].toIntOrNull()
-                if (y != null && y in 2020..2035 && m != null && m in 1..12 && d != null && d in 1..31) {
-                    val cal = Calendar.getInstance()
-                    cal.clear()
-                    cal.set(y, m - 1, d, 12, 0, 0)
-                    return cal.timeInMillis
-                }
-            }
-            val epochMatch = Regex("""\b(1[6-9]\d{8,11})\b""").find(comment)
-            if (epochMatch != null) {
-                val raw = epochMatch.groupValues[1]
-                val num = raw.toLongOrNull()
-                if (num != null) {
-                    val ms = if (raw.length == 10) num * 1000L else num
-                    if (ms in MIN_VALID_EPOCH_MS..MAX_VALID_EPOCH_MS) return ms
-                }
-            }
+        if (card.comment.isNotBlank()) {
+            NetworkUtils.parseRouterDateToEpoch(card.comment, nowMillis)?.let { return it }
         }
+        return null
+    }
+
+    fun extractTimestampFromCardMetadata(card: HotspotCard, nowMillis: Long): Long? {
+        extractExplicitDateFromCardMetadata(card, nowMillis)?.let { return it }
 
         val uptimeSec = NetworkUtils.parseUptimeToSeconds(card.uptime)
         if (uptimeSec > 0L) {
@@ -273,8 +261,15 @@ object FinanceAnalyticsEngine {
                     soldNamesInWindow.add(key)
                 } else {
                     val local = localCardMap[key]
+                    val explicitMetaTs = extractExplicitDateFromCardMetadata(card, nowMillis)
+                    val localCreated = local?.createdTimestamp?.takeIf { it > 0L }
+                    val bestLocalTs = if (explicitMetaTs != null && (localCreated == null || explicitMetaTs < localCreated)) {
+                        explicitMetaTs
+                    } else {
+                        localCreated
+                    }
                     val createdTs = batchCardCreatedAt[key]
-                        ?: local?.createdTimestamp?.takeIf { it > 0L }
+                        ?: bestLocalTs
                         ?: local?.firstSeenTimestamp?.takeIf { it > 0L }
                         ?: assignment?.assignedAt?.takeIf { it > 0L }
                         ?: extractTimestampFromCardMetadata(card, nowMillis)
@@ -405,7 +400,8 @@ object FinanceAnalyticsEngine {
         loginHistory: List<UserLoginHistoryEntity>,
         archivedSessions: List<SessionArchiveEntity>,
         savedMonthlyRecords: List<MonthlyProfitRecordEntity>,
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        savedPackageBreakdownsByMonth: Map<String, List<MonthlyPackageSales>> = emptyMap()
     ): List<MonthlySalesSummary> {
         val currentYm = timestampToYearMonth(nowMillis)
         val packagePriceMap = resolveAllPackagePricings(profiles, allCards, pricings, assignments)
@@ -439,9 +435,16 @@ object FinanceAnalyticsEngine {
 
             val local = localCardMap[cardKey]
             val assignment = assignmentByCard[cardKey]
+            val explicitMetaTs = extractExplicitDateFromCardMetadata(card, nowMillis)
+            val localCreated = local?.createdTimestamp?.takeIf { it > 0L }
+            val bestLocalOrExplicitTs = if (explicitMetaTs != null && (localCreated == null || explicitMetaTs < localCreated)) {
+                explicitMetaTs
+            } else {
+                localCreated
+            }
 
             var createdTs = batchCardCreatedAt[cardKey]?.takeIf { it > 0L }
-                ?: local?.createdTimestamp?.takeIf { it > 0L }
+                ?: bestLocalOrExplicitTs
                 ?: local?.firstSeenTimestamp?.takeIf { it > 0L }
                 ?: assignment?.assignedAt?.takeIf { it > 0L }
                 ?: extractTimestampFromCardMetadata(card, nowMillis)
@@ -572,6 +575,7 @@ object FinanceAnalyticsEngine {
         // Extra bytes from archived sessions / login history for users no longer in allCards/assignments
         val extraBytesByUser = mutableMapOf<String, Pair<YearMonth, Long>>()
         for (session in archivedSessions) {
+            if (session.sessionId.startsWith("sess_card_")) continue
             val uKey = session.username.trim().lowercase(Locale.ROOT)
             if (uKey.isBlank() || seenCardKeys.contains(uKey) || session.timestamp <= 0L) continue
             val bytes = maxOf(session.totalBytes, session.bytesIn + session.bytesOut)
@@ -618,16 +622,22 @@ object FinanceAnalyticsEngine {
         dataMonths.addAll(extraGenByMonth.keys)
         dataMonths.addAll(extraBytesByMonth.keys)
 
-        val savedRecordsMap = savedMonthlyRecords.associateBy { it.monthKey }
-        val nonEmptySavedMonths = savedMonthlyRecords
+        val validSavedRecords = savedMonthlyRecords.filter { rec ->
+            rec.year in 2020..2035 &&
+                rec.month in 1..12 &&
+                rec.totalRevenue.isFinite() && rec.totalRevenue >= 0.0 &&
+                rec.totalCost.isFinite() && rec.totalCost >= 0.0 &&
+                rec.netProfit.isFinite() && rec.netProfit >= 0.0 &&
+                rec.soldCardsCount >= 0 &&
+                rec.totalCardsCount >= rec.soldCardsCount &&
+                rec.totalBytesConsumed >= 0L
+        }
+        val savedRecordsMap = validSavedRecords.associateBy { it.monthKey }
+        val nonEmptySavedMonths = validSavedRecords
             .filter {
-                it.year in 2020..2035 &&
-                    it.month in 1..12 &&
-                    (it.soldCardsCount > 0 || it.totalCardsCount > 0 || it.totalRevenue > 0.0 || it.totalBytesConsumed > 0L)
+                it.soldCardsCount > 0 || it.totalCardsCount > 0 || it.totalRevenue > 0.0 || it.totalBytesConsumed > 0L
             }
             .map { YearMonth(it.year, it.month) }
-
-        val earliestLiveYm = dataMonths.minOrNull()
 
         val allMonthSet = linkedSetOf<YearMonth>()
         // Always include the latest 6 calendar months up to currentYm
@@ -668,7 +678,6 @@ object FinanceAnalyticsEngine {
             val savedRec = savedRecordsMap[ym.key]
 
             if (!hasLiveData && savedRec != null &&
-                (earliestLiveYm == null || ym < earliestLiveYm) &&
                 (savedRec.soldCardsCount > 0 || savedRec.totalCardsCount > 0 || savedRec.totalRevenue > 0.0 || savedRec.totalBytesConsumed > 0L)
             ) {
                 val gen = savedRec.totalCardsCount.coerceAtLeast(savedRec.soldCardsCount)
@@ -678,8 +687,10 @@ object FinanceAnalyticsEngine {
                 val cost = savedRec.totalCost
                 val profit = savedRec.netProfit.takeIf { it > 0.0 } ?: (rev - cost).coerceAtLeast(0.0)
                 val salesPct = if (gen > 0) ((sold.toFloat() / gen.toFloat()) * 100f).coerceIn(0f, 100f) else if (sold > 0) 100f else 0f
-                val pkgList = if (savedRec.topSellingProfile.isNotBlank() && sold > 0) {
-                    listOf(
+                val restoredBreakdown = savedPackageBreakdownsByMonth[ym.key].orEmpty()
+                val pkgList = when {
+                    restoredBreakdown.isNotEmpty() -> restoredBreakdown
+                    savedRec.topSellingProfile.isNotBlank() && sold > 0 -> listOf(
                         MonthlyPackageSales(
                             packageName = savedRec.topSellingProfile,
                             cardsSold = sold,
@@ -688,7 +699,8 @@ object FinanceAnalyticsEngine {
                             sharePercentage = 100f
                         )
                     )
-                } else emptyList()
+                    else -> emptyList()
+                }
 
                 MonthlySalesSummary(
                     monthKey = ym.key,
@@ -843,6 +855,7 @@ object FinanceAnalyticsEngine {
             map[key] = if (cur == null) login.timestamp else min(cur, login.timestamp)
         }
         for (session in archivedSessions) {
+            if (session.sessionId.startsWith("sess_card_")) continue
             val key = session.username.trim().lowercase(Locale.ROOT)
             if (key.isBlank() || session.timestamp <= 0L) continue
             val cur = map[key]
@@ -863,6 +876,7 @@ object FinanceAnalyticsEngine {
             map[key] = if (cur == null) login.timestamp else maxOf(cur, login.timestamp)
         }
         for (session in archivedSessions) {
+            if (session.sessionId.startsWith("sess_card_")) continue
             val key = session.username.trim().lowercase(Locale.ROOT)
             if (key.isBlank() || session.timestamp <= 0L) continue
             val cur = map[key]

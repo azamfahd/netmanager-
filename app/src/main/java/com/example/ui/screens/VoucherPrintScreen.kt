@@ -82,6 +82,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -92,6 +93,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -117,7 +119,9 @@ import com.example.ui.theme.StatusActiveGreen
 import com.example.ui.util.CardDesignConfig
 import com.example.ui.util.CardTemplateType
 import com.example.ui.util.VoucherPrintUtils
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -140,7 +144,7 @@ fun VoucherPrintScreen(
     var offsetX by remember { mutableFloatStateOf(0f) } // horizontal offset in px/dp
     var offsetY by remember { mutableFloatStateOf(0f) } // vertical offset in px/dp
     var fontSizeSp by remember { mutableFloatStateOf(15f) } // font size in px/sp
-    var cardHeightMm by remember { mutableFloatStateOf(15f) } // height mm
+    var cardHeightMm by remember { mutableFloatStateOf(18f) } // height mm
     var cardWidthMm by remember { mutableFloatStateOf(50f) } // width mm
 
     var columns by remember { mutableIntStateOf(4) } // عدد الكروت بالعرض
@@ -432,6 +436,7 @@ fun VoucherPrintScreen(
                             pageCards = pageCards,
                             columns = columns,
                             rows = rows,
+                            cardWidthMm = cardWidthMm,
                             cardHeightMm = cardHeightMm,
                             offsetX = offsetX,
                             offsetY = offsetY,
@@ -531,6 +536,7 @@ fun VoucherPrintScreen(
                             pageCards = pageCards,
                             columns = columns,
                             rows = rows,
+                            cardWidthMm = cardWidthMm,
                             cardHeightMm = cardHeightMm,
                             offsetX = offsetX,
                             offsetY = offsetY,
@@ -684,6 +690,7 @@ fun SheetPreviewArea(
     pageCards: List<HotspotCard>,
     columns: Int,
     rows: Int,
+    cardWidthMm: Float,
     cardHeightMm: Float,
     offsetX: Float,
     offsetY: Float,
@@ -699,10 +706,17 @@ fun SheetPreviewArea(
     onNextPage: () -> Unit,
     context: Context
 ) {
-    val customBitmap = remember(customImageUri?.toString()) {
-        VoucherPrintUtils.loadBitmapFromUri(context, customImageUri)
+    var customBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(customImageUri?.toString()) {
+        customBitmap = if (customImageUri != null) {
+            withContext(Dispatchers.IO) {
+                VoucherPrintUtils.loadBitmapFromUri(context, customImageUri, maxDim = 1280)
+            }
+        } else {
+            null
+        }
     }
-    val cellHeightDp = (42f * (cardHeightMm / 15f)).coerceIn(30f, 88f).dp
+    val cellAspect = (cardWidthMm.coerceAtLeast(20f) / cardHeightMm.coerceAtLeast(8f)).coerceIn(1.2f, 5.5f)
 
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -778,7 +792,8 @@ fun SheetPreviewArea(
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(cellHeightDp)
+                                    .aspectRatio(cellAspect)
+                                    .clipToBounds()
                                     .border(
                                         width = if (templateType == CardTemplateType.CUSTOM_IMAGE) 0.5.dp else 0.8.dp,
                                         color = if (templateType == CardTemplateType.CUSTOM_IMAGE) Color(0xFFD8E0E8) else Color(0xFFB0C4DE),
@@ -834,7 +849,11 @@ fun SingleCardRender(
         else -> Color(0xFF0277BD)
     }
 
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .clipToBounds()
+    ) {
         // Custom Image Mode: strictly clear previous design & info, render ONLY image + card code
         if (templateType == CardTemplateType.CUSTOM_IMAGE) {
             if (customBitmap != null && !customBitmap.isRecycled) {
@@ -1282,7 +1301,8 @@ fun CustomizationControlPanel(
             }
         }
 
-        if (templateType == CardTemplateType.CUSTOM_IMAGE) {
+        val isCustomImageMode = templateType == CardTemplateType.CUSTOM_IMAGE
+        if (isCustomImageMode) {
             // Custom Image Mode Info & Code Color Selector (old template details are stripped)
             Surface(
                 shape = RoundedCornerShape(8.dp),
@@ -1352,38 +1372,56 @@ fun CustomizationControlPanel(
                     }
                 }
             }
-        } else {
-            // Network Name & Contact Text Fields (Built-in templates only)
-            OutlinedTextField(
-                value = networkName,
-                onValueChange = onNetworkNameChange,
-                label = { Text("اسم الشبكة في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    focusedBorderColor = Color(0xFF0288D1),
-                    unfocusedBorderColor = Color(0xFF2E5370)
-                ),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
-                value = contactPhone,
-                onValueChange = onContactPhoneChange,
-                label = { Text("رقم التواصل في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    focusedBorderColor = Color(0xFF0288D1),
-                    unfocusedBorderColor = Color(0xFF2E5370)
-                ),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            )
         }
+
+        // Network Name & Contact Text Fields — explicitly disabled in CUSTOM_IMAGE mode to avoid overlapping custom design artwork
+        OutlinedTextField(
+            value = if (isCustomImageMode) "" else networkName,
+            onValueChange = onNetworkNameChange,
+            enabled = !isCustomImageMode,
+            label = { Text("اسم الشبكة في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
+            placeholder = if (isCustomImageMode) {
+                { Text("معطّل مع الصورة المخصصة", color = Color(0xFF78909C), fontSize = 11.sp) }
+            } else null,
+            singleLine = true,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                disabledTextColor = Color(0xFF78909C),
+                focusedBorderColor = Color(0xFF0288D1),
+                unfocusedBorderColor = Color(0xFF2E5370),
+                disabledBorderColor = Color(0xFF1E3A5F),
+                disabledLabelColor = Color(0xFF607D8B)
+            ),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("network_name_card_input")
+        )
+
+        OutlinedTextField(
+            value = if (isCustomImageMode) "" else contactPhone,
+            onValueChange = onContactPhoneChange,
+            enabled = !isCustomImageMode,
+            label = { Text("رقم التواصل في الكرت", color = Color(0xFFB0BEC5), fontSize = 12.sp) },
+            placeholder = if (isCustomImageMode) {
+                { Text("معطّل مع الصورة المخصصة", color = Color(0xFF78909C), fontSize = 11.sp) }
+            } else null,
+            singleLine = true,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                disabledTextColor = Color(0xFF78909C),
+                focusedBorderColor = Color(0xFF0288D1),
+                unfocusedBorderColor = Color(0xFF2E5370),
+                disabledBorderColor = Color(0xFF1E3A5F),
+                disabledLabelColor = Color(0xFF607D8B)
+            ),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("contact_phone_card_input")
+        )
 
         Spacer(modifier = Modifier.height(6.dp))
 

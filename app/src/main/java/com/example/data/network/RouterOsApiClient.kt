@@ -249,7 +249,8 @@ class RouterOsApiClient {
                         val outLimit = map["limit-bytes-out"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                         val inLimit = map["limit-bytes-in"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                         val effectiveLimit = if (totalLimit > 0L) totalLimit else if (outLimit > 0L) outLimit else inLimit
-                        
+                        val dateHint = com.example.data.network.NetworkUtils.parseRouterDateToEpoch(comment) ?: 0L
+
                         list.add(
                             HotspotCard(
                                 id = map[".id"] ?: "c_${list.size}",
@@ -264,7 +265,8 @@ class RouterOsApiClient {
                                 comment = comment,
                                 disabled = map["disabled"] == "true" || map["disabled"] == "yes",
                                 price = parsedPrice,
-                                cardType = "hotspot"
+                                cardType = "hotspot",
+                                createdAtHint = dateHint
                             )
                         )
                     }
@@ -2338,10 +2340,34 @@ class RouterOsApiClient {
             try {
                 // Try v7 user-manager first
                 var sentences = executeSentence(listOf("/user-manager/user/print"))
-                if (sentences.none { it.firstOrNull() == "!re" }) {
+                val isV7Um = sentences.any { it.firstOrNull() == "!re" }
+                if (!isV7Um) {
                     // Try v6 /tool/user-manager/user
                     sentences = executeSentence(listOf("/tool/user-manager/user/print"))
                 }
+
+                // In RouterOS v7, active/assigned profiles & subscription timestamps often live in /user-manager/user-profile
+                val userProfileMap = mutableMapOf<String, Pair<String, String>>()
+                try {
+                    val upSentences = executeSentence(
+                        listOf(if (isV7Um) "/user-manager/user-profile/print" else "/tool/user-manager/user-profile/print")
+                    )
+                    for (ups in upSentences) {
+                        if (ups.firstOrNull() == "!re") {
+                            val upMap = parseSentenceToMap(ups)
+                            val uName = (upMap["user"] ?: upMap["username"] ?: "").trim()
+                            val pName = (upMap["profile"] ?: "").trim()
+                            val endRaw = (upMap["end-time"] ?: upMap["till-time"] ?: "").trim()
+                            val state = (upMap["state"] ?: "").lowercase()
+                            if (uName.isNotBlank() && pName.isNotBlank()) {
+                                val existing = userProfileMap[uName.lowercase()]
+                                if (existing == null || state == "running-active" || state == "running") {
+                                    userProfileMap[uName.lowercase()] = pName to endRaw
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
 
                 val list = mutableListOf<HotspotCard>()
                 for (s in sentences) {
@@ -2350,20 +2376,37 @@ class RouterOsApiClient {
                         val name = map["name"] ?: map["username"] ?: ""
                         if (name.isNotBlank()) {
                             val comment = map["comment"] ?: ""
-                            val profile = map["profile"] ?: map["actual-profile"] ?: "UserManager"
+                            val upEntry = userProfileMap[name.trim().lowercase()]
+                            val profile = map["actual-profile"]?.takeIf { it.isNotBlank() }
+                                ?: map["profile"]?.takeIf { it.isNotBlank() }
+                                ?: upEntry?.first?.takeIf { it.isNotBlank() }
+                                ?: "UserManager"
                             val price = extractPriceFromText(comment, profile, name)
-                            
-                            // MikroTik User Manager v6:
+
+                            // MikroTik User Manager v6/v7:
                             // download-used = Router to Client (Download) -> bytesOut
                             // upload-used = Client to Router (Upload) -> bytesIn
                             val downUsed = map["download-used"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                             val upUsed = map["upload-used"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
-                            
+
                             val downLimit = map["download-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                             val totalLimit = map["total-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                             val transLimit = map["transfer-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
-                            
+
                             val bestLimit = if (totalLimit > 0L) totalLimit else if (transLimit > 0L) transLimit else downLimit
+                            val dateHint = listOfNotNull(
+                                map["creation-time"],
+                                map["start-time"],
+                                map["started"],
+                                comment.takeIf { it.isNotBlank() },
+                                map["last-seen"],
+                                map["last-logged-in"],
+                                map["till-time"],
+                                map["end-time"],
+                                upEntry?.second?.takeIf { it.isNotBlank() }
+                            ).firstNotNullOfOrNull { raw ->
+                                com.example.data.network.NetworkUtils.parseRouterDateToEpoch(raw)
+                            } ?: 0L
 
                             list.add(
                                 HotspotCard(
@@ -2371,7 +2414,7 @@ class RouterOsApiClient {
                                     name = name,
                                     password = map["password"] ?: "",
                                     profile = profile,
-                                    uptime = map["uptime"] ?: map["till-time"] ?: "0s",
+                                    uptime = map["uptime"] ?: "0s",
                                     bytesIn = upUsed,
                                     bytesOut = downUsed,
                                     limitUptime = map["time-limit"] ?: "",
@@ -2379,10 +2422,79 @@ class RouterOsApiClient {
                                     comment = comment,
                                     disabled = map["disabled"] == "true" || map["disabled"] == "yes",
                                     price = price,
-                                    cardType = "usermanager"
+                                    cardType = "usermanager",
+                                    createdAtHint = dateHint
                                 )
                             )
                         }
+                    }
+                }
+                Result.success(list)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    suspend fun getUserManagerSessions(): Result<List<com.example.data.local.SessionArchiveEntity>> {
+        return withContext(Dispatchers.IO) {
+            try {
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر"))
+                }
+                var sentences = executeSentence(listOf("/user-manager/session/print"))
+                if (sentences.none { it.firstOrNull() == "!re" }) {
+                    sentences = executeSentence(listOf("/tool/user-manager/session/print"))
+                }
+                val list = mutableListOf<com.example.data.local.SessionArchiveEntity>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        val map = parseSentenceToMap(s)
+                        val username = (map["user"] ?: map["username"] ?: "").trim()
+                        if (username.isBlank()) continue
+                        val fromRaw = map["from-time"] ?: map["started"] ?: map["start-time"] ?: ""
+                        val tillRaw = map["till-time"] ?: map["ended"] ?: map["end-time"] ?: ""
+                        val isActive = map["active"] == "true" || map["active"] == "yes"
+                        val parsedTs = com.example.data.network.NetworkUtils.parseRouterDateToEpoch(fromRaw)
+                            ?: com.example.data.network.NetworkUtils.parseRouterDateToEpoch(tillRaw)
+                            ?: if (isActive) System.currentTimeMillis() else 0L
+                        if (parsedTs <= 0L) continue
+
+                        val downUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(
+                            map["download"] ?: map["download-used"] ?: map["bytes-out"] ?: "0"
+                        )
+                        val upUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(
+                            map["upload"] ?: map["upload-used"] ?: map["bytes-in"] ?: "0"
+                        )
+                        val rawId = map[".id"] ?: "${fromRaw}_${tillRaw}"
+                        val sessionId = "um_sess_${username}_${rawId}"
+                        list.add(
+                            com.example.data.local.SessionArchiveEntity(
+                                sessionId = sessionId,
+                                username = username,
+                                ipAddress = map["user-ip"] ?: map["ip-address"] ?: "",
+                                macAddress = (map["calling-station-id"] ?: map["mac-address"] ?: "").uppercase(),
+                                isOnline = isActive,
+                                loginTime = if (fromRaw.isNotBlank()) {
+                                    com.example.data.network.NetworkUtils.formatArabicFullDateTimeFromString(fromRaw, parsedTs)
+                                } else {
+                                    com.example.data.network.NetworkUtils.formatArabicFullDateTime(parsedTs)
+                                },
+                                logoutTime = when {
+                                    isActive -> "متصل حالياً"
+                                    tillRaw.isNotBlank() -> com.example.data.network.NetworkUtils.formatArabicFullDateTimeFromString(tillRaw, parsedTs)
+                                    else -> "جلسة مكتملة"
+                                },
+                                duration = map["uptime"] ?: "0s",
+                                bytesIn = upUsed,
+                                bytesOut = downUsed,
+                                totalBytes = upUsed + downUsed,
+                                terminateReason = map["terminate-cause"] ?: map["status"] ?: if (isActive) "جلسة نشطة" else "جلسة يوزرمانجر",
+                                profile = map["profile"] ?: map["actual-profile"] ?: "",
+                                nodeName = map["nas-ip-address"] ?: "UserManager",
+                                timestamp = parsedTs
+                            )
+                        )
                     }
                 }
                 Result.success(list)

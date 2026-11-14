@@ -1,78 +1,221 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 1. Helpers
-    function isSignedIn() { return request.auth != null; }
-    function isUser(uid) { return isSignedIn() && request.auth.uid == uid; }
-    function isValidId(id) { return id is string && id.size() > 0 && id.size() <= 128; }
+
+    // Global Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Helpers
     function incoming() { return request.resource.data; }
     function existing() { return resource.data; }
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isValidId(id) { return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function isValidMonthId(monthId) { return monthId is string && monthId.size() == 7 && monthId.matches('^20(2[0-9]|3[0-5])-(0[1-9]|1[0-2])$'); }
 
-    // 2. Resource-Specific Validations
-    function isValidRouter(data) {
-      return data.id is string && data.name is string && data.ipAddress is string;
+    // Hardened Validation Helpers
+    function isValidMonthlyProfit(data, monthId) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId.size() > 0 && data.userId.size() <= 128 &&
+             data.monthKey is string && data.monthKey == monthId && isValidMonthId(data.monthKey) &&
+             data.monthNameAr is string && data.monthNameAr.size() >= 1 && data.monthNameAr.size() <= 60 &&
+             data.year is int && data.year >= 2020 && data.year <= 2035 &&
+             data.month is int && data.month >= 1 && data.month <= 12 &&
+             data.yearMonthSerial is int && data.yearMonthSerial == (data.year * 12 + data.month) &&
+             data.totalRevenue is number && data.totalRevenue >= 0 && data.totalRevenue <= 1000000000 &&
+             data.totalCost is number && data.totalCost >= 0 && data.totalCost <= 1000000000 &&
+             data.netProfit is number && data.netProfit >= 0 && data.netProfit <= 1000000000 &&
+             data.soldCardsCount is int && data.soldCardsCount >= 0 && data.soldCardsCount <= 10000000 &&
+             data.totalCardsCount is int && data.totalCardsCount >= data.soldCardsCount && data.totalCardsCount <= 10000000 &&
+             data.topSellingProfile is string && data.topSellingProfile.size() <= 120 &&
+             data.totalBytesConsumed is int && data.totalBytesConsumed >= 0 &&
+             (!('packageBreakdown' in data) || (data.packageBreakdown is list && data.packageBreakdown.size() <= 50)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
-    function isValidBatch(data) {
-      return data.id is string && data.profileName is string && data.count is number;
-    }
-    function isValidAgent(data) {
-      return data.id is string && data.name is string && data.discountPercent is number;
-    }
-    function isValidPosCard(data) {
-      return data.id is string && data.cardName is string && data.isSold is bool;
-    }
-    function isValidPayment(data) {
-      return data.id is string && data.agentId is string && data.amount is number;
-    }
+
     function isValidPricing(data) {
-      return data.profileName is string && data.costPrice is number && data.salePrice is number;
-    }
-    function isValidSession(data) {
-      return data.id is string && data.username is string && data.timestamp is timestamp;
-    }
-    function isValidErrorLog(data) {
-      return data.id is string && data.operation is string && data.timestamp is timestamp;
-    }
-    function isValidLoginHistory(data) {
-      return data.id is string && data.username is string && data.timestamp is timestamp;
-    }
-    function isValidSystemLog(data) {
-      return data.id is string && data.actionType is string && data.timestamp is timestamp;
+      return (!('userId' in data) || (data.userId is string && data.userId == request.auth.uid && data.userId.size() <= 128)) &&
+             data.profileName is string && data.profileName.size() >= 1 && data.profileName.size() <= 120 &&
+             data.costPrice is number && data.costPrice >= 0 && data.costPrice <= 1000000000 &&
+             data.salePrice is number && data.salePrice >= 0 && data.salePrice <= 1000000000 &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp);
     }
 
-    // 3. Collection Rules
-    match /users/{uid} {
-      allow read, write: if isUser(uid);
+    function isValidRouter(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 120 &&
+             data.ipAddress is string && data.ipAddress.size() <= 128;
+    }
+
+    function isValidBatch(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.profileName is string && data.profileName.size() <= 120 &&
+             data.count is number && data.count >= 0;
+    }
+
+    function isValidAgent(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 120 &&
+             data.discountPercent is number && data.discountPercent >= 0 && data.discountPercent <= 100;
+    }
+
+    function isValidPosCard(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.cardName is string && data.cardName.size() <= 120 &&
+             data.isSold is bool;
+    }
+
+    function isValidPayment(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.agentId is string && data.agentId.size() <= 128 &&
+             data.amount is number && data.amount >= 0;
+    }
+
+    function isValidSession(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.username is string && data.username.size() <= 120 &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidErrorLog(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.operation is string && data.operation.size() <= 120 &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidLoginHistory(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.username is string && data.username.size() <= 120 &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidSystemLog(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+             data.actionType is string && data.actionType.size() <= 120 &&
+             data.timestamp is timestamp;
+    }
+
+    // User-Scoped Subcollections
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow create, update: if isOwner(userId) && isValidId(userId);
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // Sequential Monthly Finance Aggregates (Hardened Eight Pillars)
+      match /monthlyProfits/{monthId} {
+        allow get: if isOwner(userId) && isValidMonthId(monthId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidMonthId(monthId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'monthKey', 'monthNameAr', 'year', 'month',
+                           'yearMonthSerial', 'totalRevenue', 'totalCost', 'netProfit',
+                           'soldCardsCount', 'totalCardsCount', 'topSellingProfile',
+                           'totalBytesConsumed', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'monthKey', 'monthNameAr', 'year', 'month',
+                           'yearMonthSerial', 'totalRevenue', 'totalCost', 'netProfit',
+                           'soldCardsCount', 'totalCardsCount', 'topSellingProfile',
+                           'totalBytesConsumed', 'packageBreakdown', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidMonthlyProfit(incoming(), monthId);
+        allow update: if isOwner(userId) &&
+                         isValidMonthId(monthId) &&
+                         isValidMonthlyProfit(incoming(), monthId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().monthKey == existing().monthKey &&
+                         incoming().year == existing().year &&
+                         incoming().month == existing().month &&
+                         incoming().yearMonthSerial == existing().yearMonthSerial &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'monthNameAr', 'totalRevenue', 'totalCost', 'netProfit',
+                           'soldCardsCount', 'totalCardsCount', 'topSellingProfile',
+                           'totalBytesConsumed', 'packageBreakdown', 'updatedAt'
+                         ]);
+        allow delete: if isOwner(userId) && isValidMonthId(monthId);
+      }
+
+      match /packagePricing/{pricingId} {
+        allow get: if isOwner(userId) && isValidId(pricingId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(pricingId) &&
+                         incoming().keys().hasAll(['profileName', 'costPrice', 'salePrice', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'profileName', 'costPrice', 'salePrice', 'updatedAt']) &&
+                         isValidPricing(incoming());
+        allow update: if isOwner(userId) &&
+                         isValidId(pricingId) &&
+                         isValidPricing(incoming()) &&
+                         (!('userId' in existing()) || incoming().userId == existing().userId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['userId', 'profileName', 'costPrice', 'salePrice', 'updatedAt']);
+        allow delete: if isOwner(userId) && isValidId(pricingId);
+      }
 
       match /routers/{routerId} {
-        allow read, write: if isUser(uid) && isValidId(routerId) && (request.method == 'delete' || isValidRouter(incoming()));
+        allow get: if isOwner(userId) && isValidId(routerId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(routerId) && isValidRouter(incoming());
+        allow delete: if isOwner(userId) && isValidId(routerId);
       }
+
       match /batchHistory/{batchId} {
-        allow read, write: if isUser(uid) && isValidId(batchId) && (request.method == 'delete' || isValidBatch(incoming()));
+        allow get: if isOwner(userId) && isValidId(batchId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(batchId) && isValidBatch(incoming());
+        allow delete: if isOwner(userId) && isValidId(batchId);
       }
+
       match /posAgents/{agentId} {
-        allow read, write: if isUser(uid) && isValidId(agentId) && (request.method == 'delete' || isValidAgent(incoming()));
+        allow get: if isOwner(userId) && isValidId(agentId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(agentId) && isValidAgent(incoming());
+        allow delete: if isOwner(userId) && isValidId(agentId);
       }
+
       match /posCards/{cardId} {
-        allow read, write: if isUser(uid) && isValidId(cardId) && (request.method == 'delete' || isValidPosCard(incoming()));
+        allow get: if isOwner(userId) && isValidId(cardId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(cardId) && isValidPosCard(incoming());
+        allow delete: if isOwner(userId) && isValidId(cardId);
       }
+
       match /posPayments/{paymentId} {
-        allow read, write: if isUser(uid) && isValidId(paymentId) && (request.method == 'delete' || isValidPayment(incoming()));
+        allow get: if isOwner(userId) && isValidId(paymentId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(paymentId) && isValidPayment(incoming());
+        allow delete: if isOwner(userId) && isValidId(paymentId);
       }
-      match /packagePricing/{pricingId} {
-        allow read, write: if isUser(uid) && isValidId(pricingId) && (request.method == 'delete' || isValidPricing(incoming()));
-      }
+
       match /sessionArchive/{sessionId} {
-        allow read, write: if isUser(uid) && isValidId(sessionId) && (request.method == 'delete' || isValidSession(incoming()));
+        allow get: if isOwner(userId) && isValidId(sessionId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(sessionId) && isValidSession(incoming());
+        allow delete: if isOwner(userId) && isValidId(sessionId);
       }
+
       match /errorLogs/{logId} {
-        allow read, write: if isUser(uid) && isValidId(logId) && (request.method == 'delete' || isValidErrorLog(incoming()));
+        allow get: if isOwner(userId) && isValidId(logId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(logId) && isValidErrorLog(incoming());
+        allow delete: if isOwner(userId) && isValidId(logId);
       }
+
       match /loginHistory/{historyId} {
-        allow read, write: if isUser(uid) && isValidId(historyId) && (request.method == 'delete' || isValidLoginHistory(incoming()));
+        allow get: if isOwner(userId) && isValidId(historyId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(historyId) && isValidLoginHistory(incoming());
+        allow delete: if isOwner(userId) && isValidId(historyId);
       }
+
       match /systemLogs/{logId} {
-        allow read, write: if isUser(uid) && isValidId(logId) && (request.method == 'delete' || isValidSystemLog(incoming()));
+        allow get: if isOwner(userId) && isValidId(logId);
+        allow list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(logId) && isValidSystemLog(incoming());
+        allow delete: if isOwner(userId) && isValidId(logId);
       }
     }
   }

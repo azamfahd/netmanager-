@@ -548,6 +548,7 @@ fun MainPagerContent(
                     viewModel = viewModel,
                     onNavigateToCards = { scope.launch { pagerState.animateScrollToPage(MainTab.CARDS.ordinal) } },
                     onNavigateToPosAgents = { scope.launch { pagerState.animateScrollToPage(MainTab.POS_AGENTS.ordinal) } },
+                    onTriggerSignIn = onTriggerSignIn,
                     modifier = Modifier.padding(bottom = 78.dp)
                 )
                 MainTab.LOGS -> SystemEventLogScreen(

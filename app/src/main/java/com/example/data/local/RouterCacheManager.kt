@@ -105,6 +105,7 @@ object RouterCacheManager {
                             put("price", c.price)
                             put("posAgent", c.posAgent)
                             put("cardType", c.cardType)
+                            put("createdAtHint", c.createdAtHint)
                         })
                     }
                 })
@@ -292,7 +293,8 @@ object RouterCacheManager {
                         disabled = o.optBoolean("disabled", false),
                         price = o.optString("price", ""),
                         posAgent = o.optString("posAgent", ""),
-                        cardType = o.optString("cardType", "hotspot")
+                        cardType = o.optString("cardType", "hotspot"),
+                        createdAtHint = o.optLong("createdAtHint", 0L)
                     )
                 )
             }

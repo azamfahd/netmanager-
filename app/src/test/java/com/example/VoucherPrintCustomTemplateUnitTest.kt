@@ -149,4 +149,52 @@ class VoucherPrintCustomTemplateUnitTest {
         assertTrue(canvas.drawnTexts.any { it.text == "200" })
         assertTrue(canvas.drawnTexts.any { it.text == "ريال" })
     }
+
+    @Test
+    fun highRes300DpiPageRendersCustomCardCleanlyAndClipsBounds() {
+        val w = VoucherPrintUtils.DEFAULT_EXPORT_WIDTH
+        val h = VoucherPrintUtils.DEFAULT_EXPORT_HEIGHT
+        assertEquals(2480, w)
+        assertEquals(3508, h)
+
+        val pageBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val customCardBitmap = Bitmap.createBitmap(800, 300, Bitmap.Config.ARGB_8888)
+        val canvas = RecordingCanvas(pageBitmap)
+
+        val cards = listOf(
+            HotspotCard(
+                id = "*1",
+                name = "774411",
+                password = "",
+                profile = "500",
+                limitUptime = "10 ساعات",
+                price = "500 ر.ي"
+            )
+        )
+
+        val config = CardDesignConfig(
+            templateType = CardTemplateType.CUSTOM_IMAGE,
+            networkName = "سكود نت",
+            contactPhone = "777000111",
+            columns = 4,
+            rows = 15,
+            cardWidthMm = 50f,
+            cardHeightMm = 18f,
+            fontSizeSp = 15f
+        )
+
+        VoucherPrintUtils.drawCardsPage(
+            canvas = canvas,
+            pageIndex = 0,
+            pageCards = cards,
+            config = config,
+            customBgBitmap = customCardBitmap,
+            pageWidth = w,
+            pageHeight = h
+        )
+
+        assertEquals(1, canvas.drawnBitmapCount)
+        assertEquals(listOf("774411"), canvas.drawnTexts.map { it.text })
+        assertTrue("Expected card code within 300 DPI cell bounds", canvas.drawnTexts[0].x in 40f..640f)
+    }
 }

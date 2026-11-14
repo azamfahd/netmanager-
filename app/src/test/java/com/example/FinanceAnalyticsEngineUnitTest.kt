@@ -10,9 +10,11 @@ import com.example.data.local.UserLoginHistoryEntity
 import com.example.data.model.HotspotCard
 import com.example.data.model.HotspotProfile
 import com.example.data.model.TimeFilterRange
+import com.example.data.network.NetworkUtils
 import com.example.data.util.FinanceAnalyticsEngine
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Calendar
@@ -243,5 +245,252 @@ class FinanceAnalyticsEngineUnitTest {
         assertEquals(420.0, summary.totalNetProfit, 0.01)
         // Weighted average card price across sold cards = 700 / 2 = 350.0
         assertEquals(350.0, summary.averageCardPrice, 0.01)
+    }
+
+    @Test
+    fun historicalRouterDatesUmSessionsAndIntermediateArchivesPopulatePreviousMonths() {
+        val now = epochOf(2026, 11, 14, 12)
+        val umFeb2026Ts = epochOf(2026, 2, 10, 9)
+        val umAug2026Ts = epochOf(2026, 8, 22, 16)
+        val wrongLocalTodayTs = epochOf(2026, 11, 14, 8)
+
+        val profiles = listOf(
+            HotspotProfile(id = "p1", name = "500-Day", price = "500 ر.ي", priceNumber = 500.0, costPrice = 200.0)
+        )
+
+        val cards = listOf(
+            // Card 1: Hotspot Mikhmon comment in Oct 2025, stale LocalCard timestamp set to today
+            HotspotCard(
+                id = "*10",
+                name = "mk_oct25",
+                password = "1",
+                profile = "500-Day",
+                comment = "vc-110-10.15.25",
+                uptime = "4h",
+                bytesOut = 2_000_000L
+            ),
+            // Card 2: RouterOS comment date in Jul 2026, with legacy poisoned sess_card_ today timestamp that must be ignored
+            HotspotCard(
+                id = "*11",
+                name = "ros_jul26",
+                password = "1",
+                profile = "500-Day",
+                comment = "jul/08/2026 11:30:00",
+                uptime = "2h",
+                bytesOut = 1_500_000L
+            ),
+            // Card 3: UserManager card with no comment date, date comes from um_sess_ historical archive (Aug 2026)
+            HotspotCard(
+                id = "*12",
+                name = "um_aug26",
+                password = "1",
+                profile = "500-Day",
+                uptime = "1h",
+                bytesIn = 900_000L,
+                cardType = "usermanager"
+            ),
+            // Card 4: UserManager card with explicit creation-time hint in Feb 2026 (still unsold)
+            HotspotCard(
+                id = "*13",
+                name = "um_feb26",
+                password = "1",
+                profile = "500-Day",
+                uptime = "0s",
+                cardType = "usermanager",
+                createdAtHint = umFeb2026Ts
+            )
+        )
+
+        // All local cards accidentally stamped with today's sync timestamp (simulates prior bug)
+        val staleLocalCards = cards.map {
+            LocalCardEntity(
+                name = it.name,
+                cardId = it.id,
+                profile = it.profile,
+                createdTimestamp = wrongLocalTodayTs,
+                firstSeenTimestamp = wrongLocalTodayTs
+            )
+        }
+
+        val sessions = listOf(
+            // Legacy synthetic snapshot with today's timestamp — MUST NOT overwrite July 2026 into Nov 2026
+            SessionArchiveEntity(
+                sessionId = "sess_card_ros_jul26",
+                username = "ros_jul26",
+                timestamp = wrongLocalTodayTs
+            ),
+            // Real historical UM session in August 2026
+            SessionArchiveEntity(
+                sessionId = "um_sess_um_aug26_*A1",
+                username = "um_aug26",
+                timestamp = umAug2026Ts,
+                totalBytes = 900_000L
+            )
+        )
+
+        // Intermediate saved historical month (May 2026) between Feb 2026 and Jul 2026 live data
+        val savedMay2026 = listOf(
+            MonthlyProfitRecordEntity(
+                monthKey = "2026-05",
+                monthNameAr = "مايو 2026",
+                year = 2026,
+                month = 5,
+                totalRevenue = 3500.0,
+                totalCost = 1400.0,
+                netProfit = 2100.0,
+                soldCardsCount = 7,
+                totalCardsCount = 10,
+                topSellingProfile = "500-Day",
+                totalBytesConsumed = 4_000_000L
+            )
+        )
+
+        val months = FinanceAnalyticsEngine.computeMonthlySalesList(
+            allCards = cards,
+            localCards = staleLocalCards,
+            profiles = profiles,
+            pricings = emptyList(),
+            assignments = emptyList(),
+            batches = emptyList(),
+            loginHistory = emptyList(),
+            archivedSessions = sessions,
+            savedMonthlyRecords = savedMay2026,
+            nowMillis = now
+        )
+
+        val oct25 = months.first { it.monthKey == "2025-10" }
+        assertEquals(1, oct25.totalCardsSold)
+        assertEquals(500.0, oct25.totalRevenue, 0.01)
+
+        val feb26 = months.first { it.monthKey == "2026-02" }
+        assertEquals(1, feb26.totalCardsGenerated)
+        assertEquals(1, feb26.totalCardsUnsold)
+        assertEquals(0, feb26.totalCardsSold)
+
+        val may26 = months.first { it.monthKey == "2026-05" }
+        assertEquals(7, may26.totalCardsSold)
+        assertEquals(3500.0, may26.totalRevenue, 0.01)
+
+        val jul26 = months.first { it.monthKey == "2026-07" }
+        assertEquals(1, jul26.totalCardsSold)
+        assertEquals(500.0, jul26.totalRevenue, 0.01)
+
+        val aug26 = months.first { it.monthKey == "2026-08" }
+        assertEquals(1, aug26.totalCardsSold)
+        assertEquals(500.0, aug26.totalRevenue, 0.01)
+
+        // Current month (2026-11) must NOT steal the historical sold cards!
+        val nov26 = months.first { it.monthKey == "2026-11" }
+        assertEquals(0, nov26.totalCardsSold)
+        assertEquals(0.0, nov26.totalRevenue, 0.01)
+    }
+
+    @Test
+    fun parseRouterDateToEpochSkipsInvalidLeadingNumbers() {
+        val now = epochOf(2026, 11, 14, 12)
+
+        val isoAfterNumericPrefix = NetworkUtils.parseRouterDateToEpoch("batch-1000-2025-10-15", now)
+        assertNotNull(isoAfterNumericPrefix)
+        val cal1 = Calendar.getInstance().apply { timeInMillis = isoAfterNumericPrefix!! }
+        assertEquals(2025, cal1.get(Calendar.YEAR))
+        assertEquals(Calendar.OCTOBER, cal1.get(Calendar.MONTH))
+        assertEquals(15, cal1.get(Calendar.DAY_OF_MONTH))
+
+        val mikhmonAfterInvalid = NetworkUtils.parseRouterDateToEpoch("id-99/99/99 vc-120-08.22.26", now)
+        assertNotNull(mikhmonAfterInvalid)
+        val cal2 = Calendar.getInstance().apply { timeInMillis = mikhmonAfterInvalid!! }
+        assertEquals(2026, cal2.get(Calendar.YEAR))
+        assertEquals(Calendar.AUGUST, cal2.get(Calendar.MONTH))
+        assertEquals(22, cal2.get(Calendar.DAY_OF_MONTH))
+    }
+
+    @Test
+    fun cloudValidatorRejectsCorruptRecordsAndSanitizesIdsWhileEngineRestoresBreakdowns() {
+        val sanitizedArabic = com.example.data.model.FinanceCloudValidator.sanitizeFirestoreDocId("باقة / 500 يومي")
+        assertTrue(Regex("^[a-zA-Z0-9_\\-]{1,128}$").matches(sanitizedArabic))
+        val sanitizedAscii = com.example.data.model.FinanceCloudValidator.sanitizeFirestoreDocId("500-Day")
+        assertEquals("500-Day", sanitizedAscii)
+
+        val validCandidate = com.example.data.model.FinanceCloudValidator.validateMonthlySummaryForUpload(
+            com.example.data.model.MonthlySalesSummary(
+                monthKey = "2025-11",
+                monthName = "نوفمبر 2025",
+                totalCardsGenerated = 20,
+                totalCardsSold = 15,
+                totalRevenue = 7500.0,
+                totalCost = 3000.0,
+                netProfit = 4500.0,
+                totalBytesConsumed = 2_000_000L
+            ),
+            userId = "user_abc"
+        )
+        assertNotNull(validCandidate)
+        assertEquals(2025L * 12L + 11L, validCandidate!!.yearMonthSerial)
+
+        val corruptNegative = com.example.data.model.FinanceCloudValidator.validateMonthlySummaryForUpload(
+            com.example.data.model.MonthlySalesSummary(
+                monthKey = "2025-11",
+                monthName = "نوفمبر 2025",
+                totalRevenue = 500.0,
+                totalCost = 600.0,
+                netProfit = -100.0
+            ),
+            userId = "user_abc"
+        )
+        assertEquals(null, corruptNegative)
+
+        val now = epochOf(2026, 11, 14, 12)
+        val restoredBreakdowns = mapOf(
+            "2025-06" to listOf(
+                com.example.data.model.MonthlyPackageSales("500-Day", cardsSold = 10, totalRevenue = 5000.0, netProfit = 3000.0, sharePercentage = 62.5f),
+                com.example.data.model.MonthlyPackageSales("300-Hour", cardsSold = 10, totalRevenue = 3000.0, netProfit = 1500.0, sharePercentage = 37.5f)
+            )
+        )
+        val savedRecords = listOf(
+            MonthlyProfitRecordEntity(
+                monthKey = "2025-06",
+                monthNameAr = "يونيو 2025",
+                year = 2025,
+                month = 6,
+                totalRevenue = 8000.0,
+                totalCost = 3500.0,
+                netProfit = 4500.0,
+                soldCardsCount = 20,
+                totalCardsCount = 25,
+                topSellingProfile = "500-Day",
+                totalBytesConsumed = 10_000_000L
+            ),
+            // Corrupted negative SQLite record must be ignored completely
+            MonthlyProfitRecordEntity(
+                monthKey = "2025-04",
+                monthNameAr = "أبريل 2025",
+                year = 2025,
+                month = 4,
+                totalRevenue = -50.0,
+                totalCost = 0.0,
+                netProfit = -50.0,
+                soldCardsCount = 1,
+                totalCardsCount = 1
+            )
+        )
+
+        val months = FinanceAnalyticsEngine.computeMonthlySalesList(
+            allCards = emptyList(),
+            localCards = emptyList(),
+            profiles = emptyList(),
+            pricings = emptyList(),
+            assignments = emptyList(),
+            batches = emptyList(),
+            loginHistory = emptyList(),
+            archivedSessions = emptyList(),
+            savedMonthlyRecords = savedRecords,
+            nowMillis = now,
+            savedPackageBreakdownsByMonth = restoredBreakdowns
+        )
+
+        assertTrue("Corrupt 2025-04 record must be excluded", months.none { it.monthKey == "2025-04" })
+        val june25 = months.first { it.monthKey == "2025-06" }
+        assertEquals(2, june25.packageBreakdown.size)
+        assertEquals("300-Hour", june25.packageBreakdown[1].packageName)
     }
 }
