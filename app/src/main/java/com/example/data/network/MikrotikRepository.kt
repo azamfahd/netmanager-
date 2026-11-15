@@ -122,7 +122,7 @@ class MikrotikRepository(
         )
     }
 
-    suspend fun syncCardsToRoom(cards: List<HotspotCard>) {
+    suspend fun syncCardsToRoom(cards: List<HotspotCard>, successfulSources: Set<String> = emptySet()) {
         val dao = appDao ?: return
         try {
             val existing = dao.getAllLocalCardsSync().associateBy { it.name }
@@ -143,6 +143,11 @@ class MikrotikRepository(
                 )
             }
             dao.insertOrUpdateLocalCards(entities)
+            successfulSources.forEach { source ->
+                val keepNames = entities.filter { it.sourceSystem == source }.map { it.name }
+                if (keepNames.isEmpty()) dao.deleteLocalCardsBySource(source)
+                else dao.deleteLocalCardsBySourceExcept(source, keepNames)
+            }
         } catch (_: Exception) {}
     }
 
@@ -546,7 +551,7 @@ class MikrotikRepository(
                 id = "node_ap_main",
                 name = "برج الإرسال المركزي 1 (الرئيسي)",
                 ipAddress = "192.168.88.2",
-                macAddress = "D4:CA:6D:AA:11:01",
+                macAddress = "",
                 interfaceName = "ether2",
                 model = "MikroTik NetMetal 5 / Omni",
                 role = "برج إرسال رئيسي (Omni)",
@@ -1282,7 +1287,10 @@ class MikrotikRepository(
                 val sortedCards = sortCardsByNewestFirst(combinedCards.distinctBy { it.name })
                 if (sortedCards.isNotEmpty() || (hotspotCardsRes.isSuccess && umCardsRes.isSuccess)) {
                     _cards.value = sortedCards
-                    syncCardsToRoom(sortedCards)
+                    syncCardsToRoom(sortedCards, buildSet {
+                        if (hotspotCardsRes.isSuccess) add("hotspot")
+                        if (umCardsRes.isSuccess) add("usermanager")
+                    })
                 }
             }
 
@@ -1475,9 +1483,7 @@ class MikrotikRepository(
                                     )
                                 )
                             }
-                            if (userList.isNotEmpty()) {
-                                _adminUsers.value = userList
-                            }
+                            _adminUsers.value = userList
                         }
                     }
                 } catch (_: Exception) {}
@@ -1503,9 +1509,7 @@ class MikrotikRepository(
                                     )
                                 )
                             }
-                            if (serverList.isNotEmpty() || _hotspotServers.value.isEmpty()) {
-                                _hotspotServers.value = serverList
-                            }
+                            _hotspotServers.value = serverList
                         }
                     }
                 } catch (_: Exception) {}
@@ -1526,9 +1530,7 @@ class MikrotikRepository(
                                     )
                                 )
                             }
-                            if (poolList.isNotEmpty() || _ipPools.value.isEmpty()) {
-                                _ipPools.value = poolList
-                            }
+                            _ipPools.value = poolList
                         }
                     }
                 } catch (_: Exception) {}
@@ -1668,6 +1670,8 @@ class MikrotikRepository(
                         val activeListResult = mutableListOf<HotspotActiveUser>()
                         for (i in 0 until activeArray.length()) {
                             val obj = activeArray.getJSONObject(i)
+                            val username = obj.optString("user", "").trim()
+                            if (username.isBlank()) continue
                             val mac = obj.optString("mac-address", "").uppercase()
                             val ip = obj.optString("address", "")
                             val rawComment = obj.optString("comment", "")
@@ -1678,7 +1682,7 @@ class MikrotikRepository(
                             activeListResult.add(
                                 HotspotActiveUser(
                                     id = obj.optString(".id", "u$i"),
-                                    user = obj.optString("user", "user$i"),
+                                    user = username,
                                     address = ip,
                                     macAddress = mac,
                                     uptime = obj.optString("uptime", "0s"),
@@ -1703,7 +1707,8 @@ class MikrotikRepository(
                         anyCoreSuccess = true
                         for (i in 0 until usersArray.length()) {
                             val obj = usersArray.getJSONObject(i)
-                            val cardName = obj.optString("name", "")
+                            val cardName = obj.optString("name", "").trim()
+                            if (cardName.isBlank()) continue
                             val comment = obj.optString("comment", "")
                             val profile = obj.optString("profile", "default")
                             val price = extractPriceFromText(comment, profile, cardName)
@@ -1801,10 +1806,13 @@ class MikrotikRepository(
                 }
                 if (hsCardsSucceeded || umCardsSucceeded) {
                     val sortedCards = sortCardsByNewestFirst(cardList.distinctBy { it.name })
-                    if (sortedCards.isNotEmpty() || (hsCardsSucceeded && _cards.value.isEmpty())) {
-                        _cards.value = sortedCards
-                        syncCardsToRoom(sortedCards)
-                    }
+                    // Empty is a valid successful response (for example, the last card was deleted).
+                    // Failed sources have already contributed their cached cards above.
+                    _cards.value = sortedCards
+                    syncCardsToRoom(sortedCards, buildSet {
+                        if (hsCardsSucceeded) add("hotspot")
+                        if (umCardsSucceeded) add("usermanager")
+                    })
                 }
 
                 // Fetch hotspot profiles
@@ -1895,9 +1903,7 @@ class MikrotikRepository(
                                 }
                             } catch (_: Exception) {}
 
-                            if (profList.isNotEmpty()) {
-                                _profiles.value = profList
-                            }
+                            _profiles.value = profList
                         }
                     }
                 } catch (_: Exception) {}
@@ -1925,9 +1931,7 @@ class MikrotikRepository(
                                     )
                                 )
                             }
-                            if (bindList.isNotEmpty()) {
-                                _ipBindings.value = bindList
-                            }
+                            _ipBindings.value = bindList
                         }
                     }
                 } catch (_: Exception) {}
@@ -2202,11 +2206,8 @@ class MikrotikRepository(
             version = "RouterOS v7.14"
         )
 
-        _activeUsers.value = _activeUsers.value.mapIndexed { idx, active ->
-            active.copy(
-                address = "$subnetPrefix.${100 + idx}",
-                comment = "مستخدم متصل - $routerName"
-            )
+        _activeUsers.value = _activeUsers.value.map { active ->
+            active.copy(comment = "مستخدم متصل - $routerName")
         }
 
         repositoryScope.launch {
@@ -2228,7 +2229,6 @@ class MikrotikRepository(
         val cardList = _cards.value
 
         val routerIpBase = config.ipAddress.takeIf { it.isNotBlank() } ?: "192.168.88.1"
-        val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else "172.16.1"
         val serverName = realIdentity.ifBlank { config.name.ifBlank { "السيرفر الرئيسي ($routerIpBase)" } }
 
         // 1. Build IP map: interface -> IP address
@@ -2297,9 +2297,9 @@ class MikrotikRepository(
 
                 val parentIf = vlanObj?.get("interface")?.takeIf { it.isNotBlank() } ?: defaultBridgeName
 
-                val assignedIp = interfaceIpMap[ifName]
-                    ?: if (vlanId != null && vlanId > 0) "172.16.1.$vlanId"
-                    else "$subnetPrefix.254"
+                // Do not synthesize a host address for a VLAN. It may have no
+                // L3 address at all, and fabricated addresses cause false tower matches.
+                val assignedIp = interfaceIpMap[ifName].orEmpty()
 
                 if (isNodeBlacklisted("node_vlan_$ifName", assignedIp, ifName, iface.macAddress, vlanId)) {
                     return@forEach
@@ -2309,12 +2309,10 @@ class MikrotikRepository(
                 val matchedNeighbor = neighbors.firstOrNull { n ->
                     val nIf = n["interface"] ?: ""
                     val nAddr = n["address"] ?: ""
-                    val nId = n["identity"] ?: ""
                     val nMac = n["mac-address"] ?: ""
 
                     nIf.equals(ifName, true) ||
-                    (nAddr.isNotBlank() && nAddr == assignedIp) ||
-                    (vlanId != null && (nId == "$vlanId" || nId.contains("($vlanId)", true) || nId.contains("(${vlanId.toString().padStart(2, '0')})", true) || nAddr.endsWith(".$vlanId")))
+                    (assignedIp.isNotBlank() && nAddr.isNotBlank() && nAddr == assignedIp)
                 }
 
                 if (matchedNeighbor != null) {
@@ -2327,7 +2325,7 @@ class MikrotikRepository(
 
                     val nIdentity = matchedNeighbor["identity"] ?: matchedNeighbor["board"] ?: "نقطة $vlanId"
                     val nPlatform = matchedNeighbor["platform"] ?: matchedNeighbor["board"] ?: "MikroTik AP"
-                    val effectiveIp = nAddr.ifBlank { assignedIp }
+                    val effectiveIp = nAddr
 
                     val displayName = when {
                         nIdentity.isNotBlank() && nIdentity != ifName -> "$nIdentity ($ifName)"
@@ -2340,7 +2338,7 @@ class MikrotikRepository(
                             id = "node_vlan_$ifName",
                             name = displayName,
                             ipAddress = effectiveIp,
-                            macAddress = nMac.ifBlank { iface.macAddress.ifBlank { "48:A9:8A:76:FB:${"%02X".format(vlanId ?: 1)}" } },
+                            macAddress = nMac,
                             interfaceName = ifName,
                             parentInterface = parentIf,
                             vlanId = vlanId,
@@ -2375,7 +2373,7 @@ class MikrotikRepository(
                             id = "node_vlan_$ifName",
                             name = displayName,
                             ipAddress = assignedIp,
-                            macAddress = iface.macAddress.ifBlank { "48:A9:8A:76:FB:${"%02X".format(vlanId ?: 1)}" },
+                            macAddress = iface.macAddress,
                             interfaceName = ifName,
                             parentInterface = parentIf,
                             vlanId = vlanId,
@@ -2550,9 +2548,7 @@ class MikrotikRepository(
                 val matchIdx = candidateSubNodes.indexOfFirst { c ->
                     c.id == dbNode.id ||
                     (dbNode.ipAddress.isNotBlank() && c.ipAddress == dbNode.ipAddress) ||
-                    (dbNode.macAddress.isNotBlank() && c.macAddress.equals(dbNode.macAddress, true)) ||
-                    (dbNode.vlanId != null && c.vlanId == dbNode.vlanId) ||
-                    (dbNode.interfaceName.isNotBlank() && c.interfaceName.equals(dbNode.interfaceName, true))
+                    (dbNode.macAddress.isNotBlank() && c.macAddress.isNotBlank() && c.macAddress.equals(dbNode.macAddress, true))
                 }
                 if (matchIdx >= 0) {
                     val live = candidateSubNodes[matchIdx]
@@ -2569,7 +2565,7 @@ class MikrotikRepository(
             }
         }
 
-        // 7. Strict Final Deduplication of Sub-Nodes by IP, then MAC, then ID
+        // 7. Deduplicate only on actual IP/MAC values or stable IDs, never a shared interface/VLAN label.
         val deduplicatedSubNodes = mutableListOf<com.example.data.model.NetworkNode>()
         val seenIps = mutableSetOf<String>()
         val seenMacs = mutableSetOf<String>()
@@ -2580,13 +2576,13 @@ class MikrotikRepository(
             val cleanMac = node.macAddress.trim().uppercase()
             val cleanId = node.id.trim()
 
-            val ipClash = cleanIp.isNotBlank() && cleanIp != routerIpBase && cleanIp != "$subnetPrefix.254" && seenIps.contains(cleanIp)
-            val macClash = cleanMac.isNotBlank() && !cleanMac.startsWith("48:A9:8A:76:FB") && seenMacs.contains(cleanMac)
+            val ipClash = cleanIp.isNotBlank() && cleanIp != routerIpBase && seenIps.contains(cleanIp)
+            val macClash = cleanMac.isNotBlank() && seenMacs.contains(cleanMac)
             val idClash = seenIds.contains(cleanId)
 
             if (!ipClash && !macClash && !idClash) {
-                if (cleanIp.isNotBlank() && cleanIp != routerIpBase && cleanIp != "$subnetPrefix.254") seenIps.add(cleanIp)
-                if (cleanMac.isNotBlank() && !cleanMac.startsWith("48:A9:8A:76:FB")) seenMacs.add(cleanMac)
+                if (cleanIp.isNotBlank() && cleanIp != routerIpBase) seenIps.add(cleanIp)
+                if (cleanMac.isNotBlank()) seenMacs.add(cleanMac)
                 seenIds.add(cleanId)
                 deduplicatedSubNodes.add(node)
             }
@@ -2643,11 +2639,12 @@ class MikrotikRepository(
             id = "node_main_router",
             name = serverName,
             ipAddress = routerIpBase,
-            macAddress = "D4:CA:6D:AA:11:01",
+            macAddress = "",
             interfaceName = "ALL",
             model = _resourceState.value.boardName.ifBlank { "MikroTik Router" },
             role = "السيرفر الرئيسي (Gateway)",
             isOnline = true,
+            status = com.example.data.model.NodeStatus.ACTIVE,
             connectedUsers = remainingClients.size,
             uptime = _resourceState.value.uptime,
             nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
@@ -2684,7 +2681,7 @@ class MikrotikRepository(
         val sessionList = mutableListOf<com.example.data.model.UserSessionRecord>()
         val activeUsernames = _activeUsers.value.map { it.user }.toSet()
 
-        _activeUsers.value.forEachIndexed { index, active ->
+        _activeUsers.value.forEach { active ->
             val cleanMac = active.macAddress.uppercase()
             val hostName = active.hostName.ifBlank { active.comment.ifBlank { "" } }
             val detected = if (active.deviceModel.isNotBlank()) {
@@ -2722,7 +2719,7 @@ class MikrotikRepository(
                 com.example.data.model.UserSessionRecord(
                     id = "sess_active_${active.user}",
                     username = active.user,
-                    ipAddress = active.address.ifBlank { "$subnetPrefix.${100 + index}" },
+                    ipAddress = active.address,
                     macAddress = cleanMac.ifBlank { "غير مسجل" },
                     isOnline = true,
                     loginTime = loginDisplay,
@@ -3081,19 +3078,19 @@ class MikrotikRepository(
                         mergedCards.add(merged)
                         processedNames.add(c.name)
                     }
-                    // Keep recent in-memory cards that router might not have returned immediately
+                    // Preserve cached cards only for a source whose request failed.
                     for ((name, card) in currentInMemory) {
-                        if (!processedNames.contains(name)) {
-                            mergedCards.add(card)
-                        }
+                        val sourceFailed = if (card.isUserManagerCard) umCardsRes.isFailure else hotspotCardsRes.isFailure
+                        if (!processedNames.contains(name) && sourceFailed) mergedCards.add(card)
                     }
 
                     val distinctCards = mergedCards.distinctBy { it.name }
                     val sortedCards = sortCardsByNewestFirst(distinctCards)
-                    if (sortedCards.isNotEmpty()) {
-                        _cards.value = sortedCards
-                        syncCardsToRoom(sortedCards)
-                    }
+                    _cards.value = sortedCards
+                    syncCardsToRoom(sortedCards, buildSet {
+                        if (hotspotCardsRes.isSuccess) add("hotspot")
+                        if (umCardsRes.isSuccess) add("usermanager")
+                    })
                 }
             } else {
                 try {
@@ -3111,7 +3108,8 @@ class MikrotikRepository(
                             val userArray = JSONArray(userResp.body?.string() ?: "[]")
                             for (i in 0 until userArray.length()) {
                                 val obj = userArray.getJSONObject(i)
-                                val name = obj.optString("name", "card$i")
+                                val name = obj.optString("name", "").trim()
+                                if (name.isBlank()) continue
                                 val comment = obj.optString("comment", "")
                                 val profile = obj.optString("profile", "default")
                                 val price = extractPriceFromText(comment, profile, name)
@@ -3216,16 +3214,16 @@ class MikrotikRepository(
                             processedNames.add(c.name)
                         }
                         for ((name, card) in currentInMemory) {
-                            if (!processedNames.contains(name)) {
-                                mergedList.add(card)
-                            }
+                            val sourceFailed = if (card.isUserManagerCard) !umOk else !hsOk
+                            if (!processedNames.contains(name) && sourceFailed) mergedList.add(card)
                         }
 
                         val sortedCards = sortCardsByNewestFirst(mergedList.distinctBy { it.name })
-                        if (sortedCards.isNotEmpty()) {
-                            _cards.value = sortedCards
-                            syncCardsToRoom(sortedCards)
-                        }
+                        _cards.value = sortedCards
+                        syncCardsToRoom(sortedCards, buildSet {
+                            if (hsOk) add("hotspot")
+                            if (umOk) add("usermanager")
+                        })
                     }
                 } catch (_: Exception) {}
             }
@@ -4730,85 +4728,65 @@ class MikrotikRepository(
 
     suspend fun addNetworkNode(node: com.example.data.model.NetworkNode): Result<Boolean> {
         return withContext(Dispatchers.IO) {
+            val dao = appDao ?: return@withContext Result.failure(Exception("قاعدة البيانات المحلية غير متاحة"))
+            try {
+                dao.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
+
             deletedNodeIds.remove(node.id)
             if (node.ipAddress.isNotBlank()) deletedNodeKeys.remove(node.ipAddress)
             if (node.interfaceName.isNotBlank()) deletedNodeKeys.remove(node.interfaceName)
             if (node.macAddress.isNotBlank()) deletedNodeKeys.remove(node.macAddress.uppercase())
             if (node.vlanId != null) deletedNodeKeys.remove("vlan_${node.vlanId}")
 
-            if (customAddedNodes.none { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }) {
-                customAddedNodes.add(0, node)
-            }
+            if (customAddedNodes.none { it.id == node.id }) customAddedNodes.add(0, node)
             val list = _networkNodes.value.toMutableList()
-            if (list.none { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }) {
-                list.add(0, node)
-            }
-            _networkNodes.value = list.distinctBy { it.id.ifBlank { it.ipAddress } }
-
-            try {
-                appDao?.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
-            } catch (_: Exception) {}
-
+            val existingIdx = list.indexOfFirst { it.id == node.id }
+            if (existingIdx >= 0) list[existingIdx] = node else list.add(0, node)
+            _networkNodes.value = list.distinctBy { it.id }
             Result.success(true)
         }
     }
 
     suspend fun updateNetworkNode(node: com.example.data.model.NetworkNode): Result<Boolean> {
         return withContext(Dispatchers.IO) {
+            val dao = appDao ?: return@withContext Result.failure(Exception("قاعدة البيانات المحلية غير متاحة"))
+            try {
+                dao.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
+            }
+
             deletedNodeIds.remove(node.id)
             if (node.ipAddress.isNotBlank()) deletedNodeKeys.remove(node.ipAddress)
             if (node.interfaceName.isNotBlank()) deletedNodeKeys.remove(node.interfaceName)
             if (node.macAddress.isNotBlank()) deletedNodeKeys.remove(node.macAddress.uppercase())
             if (node.vlanId != null) deletedNodeKeys.remove("vlan_${node.vlanId}")
 
-            val customIdx = customAddedNodes.indexOfFirst { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }
-            if (customIdx >= 0) {
-                customAddedNodes[customIdx] = node
-            } else {
-                customAddedNodes.add(node)
-            }
-
+            val customIdx = customAddedNodes.indexOfFirst { it.id == node.id }
+            if (customIdx >= 0) customAddedNodes[customIdx] = node else customAddedNodes.add(node)
             val currentList = _networkNodes.value.toMutableList()
-            val listIdx = currentList.indexOfFirst { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }
-            if (listIdx >= 0) {
-                currentList[listIdx] = node
-            } else {
-                currentList.add(node)
-            }
+            val listIdx = currentList.indexOfFirst { it.id == node.id }
+            if (listIdx >= 0) currentList[listIdx] = node else currentList.add(node)
             _networkNodes.value = currentList
-
-            try {
-                appDao?.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
-            } catch (_: Exception) {}
-
             Result.success(true)
         }
     }
 
     suspend fun deleteNetworkNode(nodeId: String): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            val existing = _networkNodes.value.firstOrNull { it.id == nodeId }
-                ?: customAddedNodes.firstOrNull { it.id == nodeId }
-            deletedNodeIds.add(nodeId)
-            existing?.let {
-                if (it.ipAddress.isNotBlank()) deletedNodeKeys.add(it.ipAddress)
-                if (it.interfaceName.isNotBlank()) deletedNodeKeys.add(it.interfaceName)
-                if (it.macAddress.isNotBlank()) deletedNodeKeys.add(it.macAddress.uppercase())
-                if (it.vlanId != null) deletedNodeKeys.add("vlan_${it.vlanId}")
-            }
-
-            customAddedNodes.removeAll {
-                it.id == nodeId || (existing != null && it.ipAddress.isNotBlank() && it.ipAddress == existing.ipAddress)
-            }
-            _networkNodes.value = _networkNodes.value.filter {
-                it.id != nodeId && (existing == null || it.ipAddress.isBlank() || it.ipAddress != existing.ipAddress)
-            }
-
+            val dao = appDao ?: return@withContext Result.failure(Exception("قاعدة البيانات المحلية غير متاحة"))
             try {
-                appDao?.deleteNetworkNodesFlexible(nodeId, existing?.ipAddress.orEmpty(), existing?.interfaceName.orEmpty())
-            } catch (_: Exception) {
-                try { appDao?.deleteNetworkNodeEntity(nodeId) } catch (_: Exception) {}
+                dao.deleteNetworkNodeEntity(nodeId)
+            } catch (e: Exception) {
+                return@withContext Result.failure(e)
             }
+
+            deletedNodeIds.add(nodeId)
+            customAddedNodes.removeAll { it.id == nodeId }
+            _networkNodes.value = _networkNodes.value.filter { it.id != nodeId }
             Result.success(true)
         }
     }

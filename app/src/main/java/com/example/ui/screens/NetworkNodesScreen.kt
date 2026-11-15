@@ -1710,7 +1710,7 @@ fun AddNodeDialog(
     var location by remember { mutableStateOf("البرج الرئيسي") }
     var interfaceName by remember { mutableStateOf("ether2") }
     var selectedNodeType by remember { mutableStateOf(NetworkNodeType.DISTRIBUTION) }
-    var parentTowerName by remember { mutableStateOf("البرج الرئيسي") }
+    var parentTowerName by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1782,7 +1782,7 @@ fun AddNodeDialog(
                         value = parentTowerName,
                         onValueChange = { parentTowerName = it },
                         label = { Text("اسم البرج التابعة له (للتجميع الذكي)") },
-                        placeholder = { Text("البرج الرئيسي / برج الشرق") },
+                        placeholder = { Text("اكتب اسم نقطة/برج موجود كما يظهر في القائمة") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp)
@@ -1848,8 +1848,8 @@ fun AddNodeDialog(
                             role = role.ifBlank { "أكسس بوينت" },
                             location = location.ifBlank { "الموقع الرئيسي" },
                             nodeType = selectedNodeType,
-                            parentTowerId = if (selectedNodeType == NetworkNodeType.HOME_NODE) "node_ap_main" else null,
-                            parentTowerName = if (selectedNodeType == NetworkNodeType.HOME_NODE) parentTowerName.ifBlank { "البرج الرئيسي" } else null,
+                            parentTowerId = null,
+                            parentTowerName = parentTowerName.trim().takeIf { selectedNodeType == NetworkNodeType.HOME_NODE && it.isNotBlank() },
                             status = NodeStatus.ACTIVE,
                             isOnline = true,
                             pingMs = 3L,
@@ -2232,12 +2232,18 @@ private fun buildTreeSubset(subset: List<NetworkNode>): List<TreeNode> {
 
     subset.forEach { node ->
         val directParentId = node.parentTowerId?.takeIf { nodeMap.containsKey(it) }
+        val namedParentId = if (directParentId == null) {
+            node.parentTowerName?.trim()?.takeIf { it.isNotBlank() }?.let { parentName ->
+                subset.firstOrNull { it.id != node.id && it.name.equals(parentName, ignoreCase = true) }?.id
+            }
+        } else null
+        val resolvedParentId = directParentId ?: namedParentId
         val cleanParentIf = node.parentInterface?.trim().orEmpty().lowercase()
-        val interfaceParentId = if (directParentId == null && cleanParentIf.isNotEmpty()) {
+        val interfaceParentId = if (resolvedParentId == null && cleanParentIf.isNotEmpty()) {
             nodeMap["node_if_$cleanParentIf"]?.id ?: ifaceToNodeMap[cleanParentIf]?.id
         } else null
 
-        val effectiveParentId = directParentId ?: interfaceParentId
+        val effectiveParentId = resolvedParentId ?: interfaceParentId
         if (effectiveParentId != null && effectiveParentId != node.id) {
             childrenMap.getOrPut(effectiveParentId) { mutableListOf() }.add(node)
         } else {
