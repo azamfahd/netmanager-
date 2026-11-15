@@ -188,9 +188,6 @@ interface AppDao {
     @Query("DELETE FROM network_nodes WHERE id = :nodeId")
     suspend fun deleteNetworkNodeEntity(nodeId: String)
 
-    @Query("DELETE FROM network_nodes WHERE id = :nodeId OR (ipAddress != '' AND ipAddress = :ipAddress) OR (interfaceName != '' AND interfaceName = :interfaceName)")
-    suspend fun deleteNetworkNodesFlexible(nodeId: String, ipAddress: String, interfaceName: String)
-
     // ==========================================
     // System Event Logs (Add, Edit, Delete Operations)
     // ==========================================
@@ -244,6 +241,12 @@ interface AppDao {
 
     @Query("DELETE FROM local_cards WHERE name = :cardName")
     suspend fun deleteLocalCardByName(cardName: String)
+
+    @Query("DELETE FROM local_cards WHERE sourceSystem = :sourceSystem")
+    suspend fun deleteLocalCardsBySource(sourceSystem: String)
+
+    @Query("DELETE FROM local_cards WHERE sourceSystem = :sourceSystem AND name NOT IN (:keepNames)")
+    suspend fun deleteLocalCardsBySourceExcept(sourceSystem: String, keepNames: List<String>)
 
     @Query("DELETE FROM local_cards")
     suspend fun clearAllLocalCards()

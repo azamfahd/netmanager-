@@ -205,10 +205,12 @@ class RouterOsApiClient {
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
                         val map = parseSentenceToMap(s)
+                        val userName = map["user"].orEmpty().trim()
+                        if (userName.isBlank()) continue
                         list.add(
                             HotspotActiveUser(
                                 id = map[".id"] ?: "u_${list.size}",
-                                user = map["user"] ?: "unknown",
+                                user = userName,
                                 address = map["address"] ?: "",
                                 macAddress = map["mac-address"] ?: "",
                                 uptime = map["uptime"] ?: "0s",
@@ -239,7 +241,8 @@ class RouterOsApiClient {
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
                         val map = parseSentenceToMap(s)
-                        val name = map["name"] ?: ""
+                        val name = map["name"]?.trim().orEmpty()
+                        if (name.isBlank()) continue
                         val comment = map["comment"] ?: ""
                         val profile = map["profile"] ?: "default"
                         val parsedPrice = extractPriceFromText(comment, profile, name)
@@ -2338,11 +2341,17 @@ class RouterOsApiClient {
     suspend fun getUserManagerUsers(): Result<List<HotspotCard>> {
         return withContext(Dispatchers.IO) {
             try {
-                // Try v7 user-manager first
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
+                }
+                // RouterOS returns !trap followed by !done for unsupported paths. An empty
+                // successful !done is different: it means the supported table has no users.
                 var sentences = executeSentence(listOf("/user-manager/user/print"))
-                if (sentences.none { it.firstOrNull() == "!re" }) {
-                    // Try v6 /tool/user-manager/user
+                if (hasApiTrap(sentences)) {
                     sentences = executeSentence(listOf("/tool/user-manager/user/print"))
+                }
+                if (hasApiTrap(sentences)) {
+                    return@withContext Result.failure(apiTrapException(sentences, "تعذر قراءة مستخدمي User Manager"))
                 }
 
                 val list = mutableListOf<HotspotCard>()
@@ -2415,8 +2424,11 @@ class RouterOsApiClient {
                     return@withContext Result.failure(Exception("غير متصل بالراوتر"))
                 }
                 var sentences = executeSentence(listOf("/user-manager/session/print"))
-                if (sentences.none { it.firstOrNull() == "!re" }) {
+                if (hasApiTrap(sentences)) {
                     sentences = executeSentence(listOf("/tool/user-manager/session/print"))
+                }
+                if (hasApiTrap(sentences)) {
+                    return@withContext Result.failure(apiTrapException(sentences, "تعذر قراءة جلسات User Manager"))
                 }
                 val list = mutableListOf<com.example.data.local.SessionArchiveEntity>()
                 for (s in sentences) {
@@ -2534,6 +2546,18 @@ class RouterOsApiClient {
                 Result.success(emptyList())
             }
         }
+    }
+
+    private fun hasApiTrap(sentences: List<List<String>>): Boolean =
+        sentences.any { it.firstOrNull() == "!trap" || it.firstOrNull() == "!fatal" }
+
+    private fun apiTrapException(sentences: List<List<String>>, fallbackMessage: String): Exception {
+        val message = sentences.asSequence()
+            .flatten()
+            .firstOrNull { it.startsWith("=message=") }
+            ?.removePrefix("=message=")
+            ?.takeIf { it.isNotBlank() }
+        return Exception(message ?: fallbackMessage)
     }
 
     private fun parseSentenceToMap(sentence: List<String>): Map<String, String> {

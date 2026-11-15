@@ -2459,22 +2459,22 @@ class MainViewModel(
 
     fun addNetworkNode(node: com.example.data.model.NetworkNode) {
         viewModelScope.launch {
-            repository.addNetworkNode(node)
-            _toastEvent.emit("تمت إضافة نقطة الشبكة (${node.name}) بنجاح!")
+            val result = repository.addNetworkNode(node)
+            _toastEvent.emit(if (result.getOrDefault(false)) "تمت إضافة نقطة الشبكة (${node.name}) بنجاح!" else "تعذر حفظ النقطة: ${result.exceptionOrNull()?.localizedMessage ?: "خطأ غير معروف"}")
         }
     }
 
     fun updateNetworkNode(node: com.example.data.model.NetworkNode) {
         viewModelScope.launch {
-            repository.updateNetworkNode(node)
-            _toastEvent.emit("تم حفظ تعديلات النقطة (${node.name}) بنجاح")
+            val result = repository.updateNetworkNode(node)
+            _toastEvent.emit(if (result.getOrDefault(false)) "تم حفظ تعديلات النقطة (${node.name}) بنجاح" else "تعذر حفظ تعديلات النقطة: ${result.exceptionOrNull()?.localizedMessage ?: "خطأ غير معروف"}")
         }
     }
 
     fun deleteNetworkNode(nodeId: String) {
         viewModelScope.launch {
-            repository.deleteNetworkNode(nodeId)
-            _toastEvent.emit("تم حذف النقطة بنجاح")
+            val result = repository.deleteNetworkNode(nodeId)
+            _toastEvent.emit(if (result.getOrDefault(false)) "تم حذف النقطة بنجاح" else "تعذر حذف النقطة: ${result.exceptionOrNull()?.localizedMessage ?: "خطأ غير معروف"}")
         }
     }
 
