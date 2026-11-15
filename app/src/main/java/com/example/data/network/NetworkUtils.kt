@@ -494,64 +494,64 @@ object NetworkUtils {
         }
 
         // 1. RouterOS MMM/dd/yyyy [HH:mm:ss] or MMM-dd-yyyy
-        val rosMonthFirst = Regex(
+        val rosMonthFirstRegex = Regex(
             """(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[/-](\d{1,2})[/-](\d{4})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?"""
-        ).find(text)
-        if (rosMonthFirst != null) {
-            val m = ROUTEROS_MONTH_MAP[rosMonthFirst.groupValues[1].lowercase(Locale.US)]
-            val d = rosMonthFirst.groupValues[2].toIntOrNull()
-            val y = rosMonthFirst.groupValues[3].toIntOrNull()
-            val hh = rosMonthFirst.groupValues[4].toIntOrNull() ?: 12
-            val mm = rosMonthFirst.groupValues[5].toIntOrNull() ?: 0
-            val ss = rosMonthFirst.groupValues[6].toIntOrNull() ?: 0
+        )
+        for (match in rosMonthFirstRegex.findAll(text)) {
+            val m = ROUTEROS_MONTH_MAP[match.groupValues[1].lowercase(Locale.US)]
+            val d = match.groupValues[2].toIntOrNull()
+            val y = match.groupValues[3].toIntOrNull()
+            val hh = match.groupValues[4].toIntOrNull() ?: 12
+            val mm = match.groupValues[5].toIntOrNull() ?: 0
+            val ss = match.groupValues[6].toIntOrNull() ?: 0
             if (m != null && d != null && y != null) {
                 buildEpoch(y, m, d, hh, mm, ss)?.let { return it }
             }
         }
 
         // 1b. dd/MMM/yyyy or dd-MMM-yyyy
-        val rosDayFirst = Regex(
+        val rosDayFirstRegex = Regex(
             """(?i)\b(\d{1,2})[/-](jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[/-](\d{4})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?"""
-        ).find(text)
-        if (rosDayFirst != null) {
-            val d = rosDayFirst.groupValues[1].toIntOrNull()
-            val m = ROUTEROS_MONTH_MAP[rosDayFirst.groupValues[2].lowercase(Locale.US)]
-            val y = rosDayFirst.groupValues[3].toIntOrNull()
-            val hh = rosDayFirst.groupValues[4].toIntOrNull() ?: 12
-            val mm = rosDayFirst.groupValues[5].toIntOrNull() ?: 0
-            val ss = rosDayFirst.groupValues[6].toIntOrNull() ?: 0
+        )
+        for (match in rosDayFirstRegex.findAll(text)) {
+            val d = match.groupValues[1].toIntOrNull()
+            val m = ROUTEROS_MONTH_MAP[match.groupValues[2].lowercase(Locale.US)]
+            val y = match.groupValues[3].toIntOrNull()
+            val hh = match.groupValues[4].toIntOrNull() ?: 12
+            val mm = match.groupValues[5].toIntOrNull() ?: 0
+            val ss = match.groupValues[6].toIntOrNull() ?: 0
             if (m != null && d != null && y != null) {
                 buildEpoch(y, m, d, hh, mm, ss)?.let { return it }
             }
         }
 
         // 2. ISO / yyyy-MM-dd or yyyy/MM/dd or yyyy.MM.dd [HH:mm[:ss]]
-        val isoMatch = Regex(
+        val isoRegex = Regex(
             """(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?"""
-        ).find(text)
-        if (isoMatch != null) {
-            val y = isoMatch.groupValues[1].toIntOrNull()
-            val m = isoMatch.groupValues[2].toIntOrNull()
-            val d = isoMatch.groupValues[3].toIntOrNull()
-            val hh = isoMatch.groupValues[4].toIntOrNull() ?: 12
-            val mm = isoMatch.groupValues[5].toIntOrNull() ?: 0
-            val ss = isoMatch.groupValues[6].toIntOrNull() ?: 0
+        )
+        for (match in isoRegex.findAll(text)) {
+            val y = match.groupValues[1].toIntOrNull()
+            val m = match.groupValues[2].toIntOrNull()
+            val d = match.groupValues[3].toIntOrNull()
+            val hh = match.groupValues[4].toIntOrNull() ?: 12
+            val mm = match.groupValues[5].toIntOrNull() ?: 0
+            val ss = match.groupValues[6].toIntOrNull() ?: 0
             if (y != null && m != null && d != null) {
                 buildEpoch(y, m, d, hh, mm, ss)?.let { return it }
             }
         }
 
         // 3. dd/MM/yyyy or MM/dd/yyyy (4-digit year)
-        val dmyMatch = Regex(
+        val dmyRegex = Regex(
             """\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?"""
-        ).find(text)
-        if (dmyMatch != null) {
-            val a = dmyMatch.groupValues[1].toIntOrNull()
-            val b = dmyMatch.groupValues[2].toIntOrNull()
-            val y = dmyMatch.groupValues[3].toIntOrNull()
-            val hh = dmyMatch.groupValues[4].toIntOrNull() ?: 12
-            val mm = dmyMatch.groupValues[5].toIntOrNull() ?: 0
-            val ss = dmyMatch.groupValues[6].toIntOrNull() ?: 0
+        )
+        for (match in dmyRegex.findAll(text)) {
+            val a = match.groupValues[1].toIntOrNull()
+            val b = match.groupValues[2].toIntOrNull()
+            val y = match.groupValues[3].toIntOrNull()
+            val hh = match.groupValues[4].toIntOrNull() ?: 12
+            val mm = match.groupValues[5].toIntOrNull() ?: 0
+            val ss = match.groupValues[6].toIntOrNull() ?: 0
             if (a != null && b != null && y != null) {
                 if (a > 12) {
                     buildEpoch(y, b, a, hh, mm, ss)?.let { return it }
@@ -567,13 +567,13 @@ object NetworkUtils {
         }
 
         // 4. Compact Mikhmon / 2-digit year dates: vc-123-10.15.25 or 15.10.25 or 15/10/25
-        val shortYearMatch = Regex(
+        val shortYearRegex = Regex(
             """(?:^|[^0-9])(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})(?!\d)"""
-        ).find(text)
-        if (shortYearMatch != null) {
-            val a = shortYearMatch.groupValues[1].toIntOrNull()
-            val b = shortYearMatch.groupValues[2].toIntOrNull()
-            val yy = shortYearMatch.groupValues[3].toIntOrNull()
+        )
+        for (match in shortYearRegex.findAll(text)) {
+            val a = match.groupValues[1].toIntOrNull()
+            val b = match.groupValues[2].toIntOrNull()
+            val yy = match.groupValues[3].toIntOrNull()
             if (a != null && b != null && yy != null && yy in 20..35) {
                 val y = 2000 + yy
                 val isMikhmonPrefix = text.contains("vc-", ignoreCase = true) || text.contains("up-", ignoreCase = true)
@@ -596,9 +596,9 @@ object NetworkUtils {
         }
 
         // 5. Numeric 10-digit or 13-digit Unix epoch
-        val epochMatch = Regex("""\b(1[5-9]\d{8,11}|20\d{8,11})\b""").find(text)
-        if (epochMatch != null) {
-            val rawEpoch = epochMatch.groupValues[1]
+        val epochRegex = Regex("""\b(1[5-9]\d{8,11}|20\d{8,11})\b""")
+        for (match in epochRegex.findAll(text)) {
+            val rawEpoch = match.groupValues[1]
             val num = rawEpoch.toLongOrNull()
             if (num != null) {
                 val ms = if (rawEpoch.length == 10) num * 1000L else num

@@ -71,6 +71,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -126,6 +127,9 @@ fun NetworkNodesScreen(
     val isHeartbeatScanning by viewModel.isHeartbeatScanning.collectAsStateWithLifecycle()
     val lastHeartbeatScanTime by viewModel.lastHeartbeatScanTime.collectAsStateWithLifecycle()
     val isClusteringEnabled by viewModel.isClusteringEnabled.collectAsStateWithLifecycle()
+    val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
+    val isSyncing = (connectionState as? com.example.data.model.ConnectionState.Connected)?.isSyncing == true
+    val isConnected = connectionState is com.example.data.model.ConnectionState.Connected
 
     var showAddNodeDialog by remember { mutableStateOf(false) }
     var showFullScreenTopology by remember { mutableStateOf(false) }
@@ -133,6 +137,14 @@ fun NetworkNodesScreen(
     var nodeToDelete by remember { mutableStateOf<NetworkNode?>(null) }
     var nodeToEdit by remember { mutableStateOf<NetworkNode?>(null) }
     var selectedDisplayTab by remember { mutableStateOf(0) }
+
+    // Auto-sync router nodes and heartbeat on entering this screen (or right after initial sync finishes)
+    LaunchedEffect(isConnected, isSyncing) {
+        if (isConnected && !isSyncing) {
+            viewModel.refreshData()
+            viewModel.runHeartbeatCheck(silent = true)
+        }
+    }
 
     val activeCount = allNodes.count { it.effectiveStatus == NodeStatus.ACTIVE }
     val offlineCount = allNodes.count { it.effectiveStatus == NodeStatus.OFFLINE }

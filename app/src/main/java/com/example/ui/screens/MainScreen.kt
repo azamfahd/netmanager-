@@ -95,6 +95,20 @@ fun MainScreen(
         }
     }
 
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshData()
+                viewModel.runHeartbeatCheck(silent = true)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     val connectedState = connectionState as? ConnectionState.Connected
     val routerTitle = connectedState?.routerName ?: "راوتر ميكروتك"
     val routerIp = connectedState?.ipAddress ?: ""
@@ -142,7 +156,10 @@ fun MainScreen(
                 },
                 actions = {
                     IconButton(
-                        onClick = { viewModel.refreshData() },
+                        onClick = {
+                            viewModel.refreshData(forceHistorySync = true)
+                            viewModel.runHeartbeatCheck(silent = true)
+                        },
                         modifier = Modifier.testTag("btn_top_refresh")
                     ) {
                         Icon(
@@ -163,8 +180,16 @@ fun MainScreen(
                     }
                     
                     StatusPill(
-                        text = if (connectedState?.isOffline == true) "أوفلاين" else "متصل",
-                        type = if (connectedState?.isOffline == true) StatusType.WARNING else StatusType.SUCCESS,
+                        text = when {
+                            connectedState?.isSyncing == true -> "جاري المزامنة..."
+                            connectedState?.isOffline == true -> "أوفلاين"
+                            else -> "متصل"
+                        },
+                        type = when {
+                            connectedState?.isSyncing == true -> StatusType.INFO
+                            connectedState?.isOffline == true -> StatusType.WARNING
+                            else -> StatusType.SUCCESS
+                        },
                         modifier = Modifier.padding(end = 8.dp)
                     )
                 }
@@ -193,6 +218,13 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            if (connectedState?.isSyncing == true) {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                )
+            }
             // Update Banner
             if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
                 val availableRelease = (updateCheckState as UpdateCheckState.UpdateAvailable).release
@@ -462,12 +494,23 @@ fun MainPagerContent(
     val tabScrollState = rememberScrollState()
     var showDashboardPrintDialog by remember { mutableStateOf(false) }
 
-    // Smoothly scroll the floating dock so that the selected tab is always in view
+    // Smoothly scroll the floating dock so that the selected tab is always in view and sync fresh data
     LaunchedEffect(pagerState.currentPage) {
         val totalTabs = MainTab.entries.size
         if (totalTabs > 1 && tabScrollState.maxValue > 0) {
             val targetScroll = (tabScrollState.maxValue.toFloat() * (pagerState.currentPage.toFloat() / (totalTabs - 1).toFloat())).toInt()
             tabScrollState.animateScrollTo(targetScroll)
+        }
+        val currentTab = MainTab.entries[pagerState.currentPage]
+        when (currentTab) {
+            MainTab.NODES -> {
+                viewModel.refreshData()
+                viewModel.runHeartbeatCheck(silent = true)
+            }
+            MainTab.ACTIVE_USERS, MainTab.CARDS, MainTab.PROFILES, MainTab.DASHBOARD -> {
+                viewModel.refreshData()
+            }
+            else -> {}
         }
     }
 
@@ -548,6 +591,7 @@ fun MainPagerContent(
                     viewModel = viewModel,
                     onNavigateToCards = { scope.launch { pagerState.animateScrollToPage(MainTab.CARDS.ordinal) } },
                     onNavigateToPosAgents = { scope.launch { pagerState.animateScrollToPage(MainTab.POS_AGENTS.ordinal) } },
+                    onTriggerSignIn = onTriggerSignIn,
                     modifier = Modifier.padding(bottom = 78.dp)
                 )
                 MainTab.LOGS -> SystemEventLogScreen(

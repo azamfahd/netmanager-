@@ -1,115 +1,246 @@
 {
-  "version": "1.1",
-  "collections": [
-    {
-      "name": "users/{uid}/routers",
-      "fields": {
-        "id": "string",
-        "name": "string",
-        "ipAddress": "string",
-        "port": "number",
-        "username": "string",
-        "useHttps": "boolean",
-        "isDemoMode": "boolean"
-      }
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authenticated operator root document.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "description": "Google account email" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["uid"]
     },
-    {
-      "name": "users/{uid}/batchHistory",
-      "fields": {
-        "id": "string",
-        "profileName": "string",
-        "count": "number",
-        "timestamp": "timestamp",
-        "comment": "string"
-      }
+    "MonthlyProfit": {
+      "title": "MonthlyProfit",
+      "description": "Validated monthly financial aggregate persisted sequentially by yearMonthSerial for Finance analytics.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Authenticated owner UID matching request.auth.uid" },
+        "monthKey": { "type": "string", "description": "Canonical YYYY-MM key matching document ID" },
+        "monthNameAr": { "type": "string", "description": "Arabic display name of month and year" },
+        "year": { "type": "integer", "description": "Calendar year (2020..2035)" },
+        "month": { "type": "integer", "description": "Calendar month (1..12)" },
+        "yearMonthSerial": { "type": "integer", "description": "Monotonic sequence key (year * 12 + month) for sequential ordering" },
+        "totalRevenue": { "type": "number", "description": "Non-negative total monthly revenue" },
+        "totalCost": { "type": "number", "description": "Non-negative total monthly card cost" },
+        "netProfit": { "type": "number", "description": "Non-negative net monthly profit" },
+        "soldCardsCount": { "type": "integer", "description": "Number of sold/used cards in month" },
+        "totalCardsCount": { "type": "integer", "description": "Total cards generated/attributed (>= soldCardsCount)" },
+        "topSellingProfile": { "type": "string", "description": "Top selling package profile name" },
+        "totalBytesConsumed": { "type": "integer", "description": "Total monthly bytes consumed (>= 0)" },
+        "packageBreakdown": { "type": "array", "description": "Bounded per-package sales breakdown maps (max 50)" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Immutable server creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server last update timestamp" }
+      },
+      "required": [
+        "userId",
+        "monthKey",
+        "monthNameAr",
+        "year",
+        "month",
+        "yearMonthSerial",
+        "totalRevenue",
+        "totalCost",
+        "netProfit",
+        "soldCardsCount",
+        "totalCardsCount",
+        "topSellingProfile",
+        "totalBytesConsumed",
+        "createdAt",
+        "updatedAt"
+      ]
     },
-    {
-      "name": "users/{uid}/posAgents",
-      "fields": {
-        "id": "string",
-        "name": "string",
-        "phone": "string",
-        "discountPercent": "number",
-        "balance": "number"
-      }
+    "PackagePricing": {
+      "title": "PackagePricing",
+      "description": "Custom cost and sale pricing per voucher package.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "profileName": { "type": "string" },
+        "costPrice": { "type": "number" },
+        "salePrice": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["profileName", "costPrice", "salePrice", "updatedAt"]
     },
-    {
-      "name": "users/{uid}/posCards",
-      "fields": {
-        "id": "string",
-        "agentId": "string",
-        "cardName": "string",
-        "profileName": "string",
-        "priceAmount": "number",
-        "isSold": "boolean",
-        "soldAt": "timestamp"
-      }
+    "RouterConfig": {
+      "title": "RouterConfig",
+      "description": "Saved MikroTik router connection settings.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "ipAddress": { "type": "string" },
+        "port": { "type": "integer" },
+        "username": { "type": "string" },
+        "useHttps": { "type": "boolean" },
+        "isDemoMode": { "type": "boolean" }
+      },
+      "required": ["id", "name", "ipAddress"]
     },
-    {
-      "name": "users/{uid}/posPayments",
-      "fields": {
-        "id": "string",
-        "agentId": "string",
-        "amount": "number",
-        "timestamp": "timestamp",
-        "note": "string"
-      }
+    "BatchHistory": {
+      "title": "BatchHistory",
+      "description": "Generated voucher batch metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "profileName": { "type": "string" },
+        "count": { "type": "integer" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "comment": { "type": "string" }
+      },
+      "required": ["id", "profileName", "count"]
     },
-    {
-      "name": "users/{uid}/packagePricing",
-      "fields": {
-        "profileName": "string",
-        "costPrice": "number",
-        "salePrice": "number",
-        "updatedAt": "timestamp"
-      }
+    "PosAgent": {
+      "title": "PosAgent",
+      "description": "Point of sale distributor agent.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "discountPercent": { "type": "number" },
+        "balance": { "type": "number" }
+      },
+      "required": ["id", "name", "discountPercent"]
     },
-    {
-      "name": "users/{uid}/sessionArchive",
-      "fields": {
-        "id": "string",
-        "username": "string",
-        "macAddress": "string",
-        "ipAddress": "string",
-        "loginTime": "string",
-        "logoutTime": "string",
-        "duration": "string",
-        "totalBytes": "number",
-        "timestamp": "timestamp"
-      }
+    "PosCard": {
+      "title": "PosCard",
+      "description": "Voucher card assigned to a POS agent.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "agentId": { "type": "string" },
+        "cardName": { "type": "string" },
+        "profileName": { "type": "string" },
+        "priceAmount": { "type": "number" },
+        "isSold": { "type": "boolean" },
+        "soldAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "cardName", "isSold"]
     },
-    {
-      "name": "users/{uid}/errorLogs",
-      "fields": {
-        "id": "string",
-        "operation": "string",
-        "errorMessage": "string",
-        "timestamp": "timestamp"
-      }
+    "PosPayment": {
+      "title": "PosPayment",
+      "description": "POS agent settlement payment.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "agentId": { "type": "string" },
+        "amount": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "note": { "type": "string" }
+      },
+      "required": ["id", "agentId", "amount"]
     },
-    {
-      "name": "users/{uid}/loginHistory",
-      "fields": {
-        "id": "string",
-        "username": "string",
-        "ipAddress": "string",
-        "macAddress": "string",
-        "timestamp": "timestamp",
-        "profile": "string"
-      }
+    "SessionArchive": {
+      "title": "SessionArchive",
+      "description": "Archived user session telemetry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "username": { "type": "string" },
+        "macAddress": { "type": "string" },
+        "ipAddress": { "type": "string" },
+        "loginTime": { "type": "string" },
+        "logoutTime": { "type": "string" },
+        "duration": { "type": "string" },
+        "totalBytes": { "type": "integer" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "username", "timestamp"]
     },
-    {
-      "name": "users/{uid}/systemLogs",
-      "fields": {
-        "id": "string",
-        "timestamp": "timestamp",
-        "actionType": "string",
-        "targetType": "string",
-        "targetName": "string",
-        "description": "string",
-        "status": "string",
-        "operatorUsername": "string"
-      }
+    "ErrorLog": {
+      "title": "ErrorLog",
+      "description": "Application/router error log entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "operation": { "type": "string" },
+        "errorMessage": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "operation", "timestamp"]
+    },
+    "LoginHistory": {
+      "title": "LoginHistory",
+      "description": "Hotspot subscriber login audit entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "username": { "type": "string" },
+        "ipAddress": { "type": "string" },
+        "macAddress": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "profile": { "type": "string" }
+      },
+      "required": ["id", "username", "timestamp"]
+    },
+    "SystemLog": {
+      "title": "SystemLog",
+      "description": "System management event log.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "actionType": { "type": "string" },
+        "targetType": { "type": "string" },
+        "targetName": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string" },
+        "operatorUsername": { "type": "string" }
+      },
+      "required": ["id", "actionType", "timestamp"]
     }
-  ]
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Per-user root container"
+    },
+    "/users/{userId}/monthlyProfits/{monthId}": {
+      "schema": { "$ref": "#/entities/MonthlyProfit" },
+      "description": "Sequential monthly profit and revenue aggregates indexed by yearMonthSerial"
+    },
+    "/users/{userId}/packagePricing/{pricingId}": {
+      "schema": { "$ref": "#/entities/PackagePricing" },
+      "description": "Per-package sale and cost prices"
+    },
+    "/users/{userId}/routers/{routerId}": {
+      "schema": { "$ref": "#/entities/RouterConfig" },
+      "description": "Saved routers"
+    },
+    "/users/{userId}/batchHistory/{batchId}": {
+      "schema": { "$ref": "#/entities/BatchHistory" },
+      "description": "Generated voucher batch records"
+    },
+    "/users/{userId}/posAgents/{agentId}": {
+      "schema": { "$ref": "#/entities/PosAgent" },
+      "description": "POS distributor agents"
+    },
+    "/users/{userId}/posCards/{cardId}": {
+      "schema": { "$ref": "#/entities/PosCard" },
+      "description": "POS assigned voucher cards"
+    },
+    "/users/{userId}/posPayments/{paymentId}": {
+      "schema": { "$ref": "#/entities/PosPayment" },
+      "description": "POS agent payment history"
+    },
+    "/users/{userId}/sessionArchive/{sessionId}": {
+      "schema": { "$ref": "#/entities/SessionArchive" },
+      "description": "Archived subscriber sessions"
+    },
+    "/users/{userId}/errorLogs/{logId}": {
+      "schema": { "$ref": "#/entities/ErrorLog" },
+      "description": "Error telemetry logs"
+    },
+    "/users/{userId}/loginHistory/{historyId}": {
+      "schema": { "$ref": "#/entities/LoginHistory" },
+      "description": "Subscriber login history"
+    },
+    "/users/{userId}/systemLogs/{logId}": {
+      "schema": { "$ref": "#/entities/SystemLog" },
+      "description": "System audit event logs"
+    }
+  }
 }

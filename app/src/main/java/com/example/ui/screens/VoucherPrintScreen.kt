@@ -250,6 +250,55 @@ fun VoucherPrintScreen(
                     }
                 },
                 actions = {
+                    var showHdPreview by remember { mutableStateOf(false) }
+
+                    // HD Preview Button
+                    IconButton(
+                        onClick = { showHdPreview = true },
+                        modifier = Modifier.testTag("hd_preview_top_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "معاينة الجودة العالية HD",
+                            tint = Color(0xFFFFA000)
+                        )
+                    }
+
+                    if (showHdPreview) {
+                        HdPreviewDialog(
+                            cards = cards,
+                            pageIndex = safePageIndex,
+                            config = currentConfig,
+                            onDismiss = { showHdPreview = false },
+                            onExportPdf = {
+                                onMarkPrinted?.invoke()
+                                Toast.makeText(context, "جاري إنشاء ملف PDF بدقة عالية...", Toast.LENGTH_SHORT).show()
+                                VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
+                                    if (file != null) {
+                                        VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
+                                    } else {
+                                        Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            onExportImage = {
+                                onMarkPrinted?.invoke()
+                                Toast.makeText(context, "جاري تصدير الصورة بجودة HD...", Toast.LENGTH_SHORT).show()
+                                VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
+                                    if (file != null) {
+                                        VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت عالية الدقة")
+                                    } else {
+                                        Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            onPrint = {
+                                onMarkPrinted?.invoke()
+                                VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                            }
+                        )
+                    }
+
                     // Export PDF Button
                     IconButton(
                         onClick = {
@@ -1476,6 +1525,161 @@ fun CustomizationControlPanel(
                 Icon(Icons.Default.Image, contentDescription = null, tint = Color(0xFF81D4FA), modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("تصدير كصورة", fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+/**
+ * High-Definition (HD) Preview Dialog to inspect cards layout and clarity before saving/exporting
+ */
+@Composable
+fun HdPreviewDialog(
+    cards: List<HotspotCard>,
+    pageIndex: Int,
+    config: CardDesignConfig,
+    onDismiss: () -> Unit,
+    onExportPdf: () -> Unit,
+    onExportImage: () -> Unit,
+    onPrint: () -> Unit
+) {
+    val context = LocalContext.current
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(pageIndex, config) {
+        isLoading = true
+        previewBitmap = withContext(Dispatchers.IO) {
+            VoucherPrintUtils.renderPageBitmap(context, cards, pageIndex, config, targetWidth = 1800)
+        }
+        isLoading = false
+    }
+
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = Color(0xFFFFA000))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "معاينة الجودة العالية (HD Preview) - صفحة ${pageIndex + 1}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "إغلاق")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Preview Canvas Box (Scrollable & Zoomable container)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .background(Color(0xFFE8EEF5), RoundedCornerShape(12.dp))
+                        .border(1.dp, Color(0xFFC0D0E0), RoundedCornerShape(12.dp))
+                        .padding(8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isLoading) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            androidx.compose.material3.CircularProgressIndicator(color = RouterBlue)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("جاري توليد معاينة الجودة العالية بدقة متناهية...", fontSize = 12.sp, color = Color.Gray)
+                        }
+                    } else if (previewBitmap != null) {
+                        val scrollStateX = rememberScrollState()
+                        val scrollStateY = rememberScrollState()
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .horizontalScroll(scrollStateX)
+                                .verticalScroll(scrollStateY),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Image(
+                                bitmap = previewBitmap!!.asImageBitmap(),
+                                contentDescription = "معاينة الصفحة عالية الدقة",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                    } else {
+                        Text("تعذر إنشاء المعاينة", color = Color.Red)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Bottom Actions
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            onDismiss()
+                            onExportImage()
+                        },
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("تصدير كصورة HD")
+                    }
+
+                    Button(
+                        onClick = {
+                            onDismiss()
+                            onExportPdf()
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("تصدير PDF")
+                    }
+
+                    Button(
+                        onClick = {
+                            onDismiss()
+                            onPrint()
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = RouterBlue)
+                    ) {
+                        Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("طباعة مباشرة")
+                    }
+                }
             }
         }
     }

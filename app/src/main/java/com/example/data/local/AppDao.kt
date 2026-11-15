@@ -173,8 +173,11 @@ interface AppDao {
     // ==========================================
     // Network Nodes & Heartbeat Status Storage
     // ==========================================
-    @Query("SELECT * FROM network_nodes ORDER BY lastCheckTime DESC")
-    fun getAllNetworkNodesFlow(): Flow<List<NetworkNodeEntity>>
+    @Query("SELECT * FROM network_nodes WHERE routerIp = :routerIp ORDER BY lastCheckTime DESC")
+    fun getNetworkNodesByRouterFlow(routerIp: String): Flow<List<NetworkNodeEntity>>
+
+    @Query("SELECT * FROM network_nodes WHERE routerIp = :routerIp")
+    suspend fun getNetworkNodesByRouterSync(routerIp: String): List<NetworkNodeEntity>
 
     @Query("SELECT * FROM network_nodes")
     suspend fun getAllNetworkNodesSync(): List<NetworkNodeEntity>
@@ -182,14 +185,26 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateNetworkNodes(nodes: List<NetworkNodeEntity>)
 
-    @Query("UPDATE network_nodes SET status = :status, isOnline = :isOnline, pingMs = :pingMs, lastCheckTime = :lastCheckTime WHERE id = :nodeId")
-    suspend fun updateNodeHeartbeat(nodeId: String, status: String, isOnline: Boolean, pingMs: Long, lastCheckTime: Long)
+    @Query("UPDATE network_nodes SET status = :status, isOnline = :isOnline, pingMs = :pingMs, lastCheckTime = :lastCheckTime WHERE routerIp = :routerIp AND id = :nodeId")
+    suspend fun updateNodeHeartbeat(routerIp: String, nodeId: String, status: String, isOnline: Boolean, pingMs: Long, lastCheckTime: Long)
 
-    @Query("DELETE FROM network_nodes WHERE id = :nodeId")
-    suspend fun deleteNetworkNodeEntity(nodeId: String)
+    @Query("DELETE FROM network_nodes WHERE routerIp = :routerIp AND id = :nodeId")
+    suspend fun deleteNetworkNodeEntity(routerIp: String, nodeId: String)
 
-    @Query("DELETE FROM network_nodes WHERE id = :nodeId OR (ipAddress != '' AND ipAddress = :ipAddress) OR (interfaceName != '' AND interfaceName = :interfaceName)")
-    suspend fun deleteNetworkNodesFlexible(nodeId: String, ipAddress: String, interfaceName: String)
+    @Query("DELETE FROM network_nodes WHERE routerIp = :routerIp AND (id = :nodeId OR (ipAddress != '' AND ipAddress = :ipAddress) OR (interfaceName != '' AND interfaceName = :interfaceName))")
+    suspend fun deleteNetworkNodesFlexible(routerIp: String, nodeId: String, ipAddress: String, interfaceName: String)
+
+    @Query("DELETE FROM network_nodes WHERE routerIp = :routerIp AND id NOT IN (:activeIds)")
+    suspend fun deleteStaleNodesForRouter(routerIp: String, activeIds: List<String>)
+
+    @Query("DELETE FROM network_nodes WHERE routerIp = :routerIp")
+    suspend fun deleteAllNodesForRouter(routerIp: String)
+
+    @Query("DELETE FROM network_nodes WHERE routerIp = ''")
+    suspend fun deleteUnscopedLegacyNodes()
+
+    @Query("DELETE FROM network_nodes WHERE id LIKE 'node_home_%' OR id LIKE 'demo_%' OR id = 'node_ap_main'")
+    suspend fun purgeDemoNodes()
 
     // ==========================================
     // System Event Logs (Add, Edit, Delete Operations)

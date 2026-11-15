@@ -1,21 +1,21 @@
 {
-  "firestore": {
-    "rules": "firestore.rules",
-    "database": "ai-studio-android-netmanag-9954c81a-f587-4081-8b0c-4e3dbae610d9"
-  },
+  "firestore": [
+    {
+      "database": "(default)",
+      "rules": "firestore.rules"
+    }
+  ],
   "emulators": {
-    "auth": {
-      "port": 9099
-    },
     "firestore": {
+      "host": "127.0.0.1",
       "port": 8085
     },
-    "ui": {
-      "enabled": true,
-      "port": 4000
+    "auth": {
+      "host": "127.0.0.1",
+      "port": 9099
     },
-    "hub": {
-      "port": 4400
+    "ui": {
+      "enabled": false
     }
   }
 }
