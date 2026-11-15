@@ -1212,7 +1212,7 @@ fun AgentDetailDialog(
                                 modifier = Modifier.fillMaxSize(),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                items(summary.assignedCards) { card ->
+                                items(summary.assignedCards, key = { "${it.id}_${it.cardName}" }) { card ->
                                     Card(
                                         colors = CardDefaults.cardColors(
                                             containerColor = if (card.isSold) StatusActiveGreenBg.copy(alpha = 0.3f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
@@ -1259,7 +1259,7 @@ fun AgentDetailDialog(
                                 modifier = Modifier.fillMaxSize(),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                items(summary.payments) { payment ->
+                                items(summary.payments, key = { "${it.id}_${it.paymentDate}" }) { payment ->
                                     Card(
                                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
                                         shape = RoundedCornerShape(10.dp)

@@ -8,7 +8,30 @@ data class CardBatchGroup(
     val timestamp: Long,
     val formattedDate: String,
     val totalValue: Double,
-    val cards: List<HotspotCard>
+    val cards: List<HotspotCard>,
+    val allBatchCards: List<HotspotCard> = cards,
+    val readyCards: List<HotspotCard> = cards,
+    val totalGeneratedCount: Int = cards.size,
+    val readyCount: Int = cards.size,
+    val activeCount: Int = 0,
+    val usedOfflineCount: Int = 0,
+    val expiredCount: Int = 0,
+    val isPrintedBefore: Boolean = false,
+    val batchNumber: Int = 0,
+    val sourceSystemLabel: String = ""
+)
+
+data class PrintableBatchOption(
+    val batchKey: String,
+    val title: String,
+    val profileName: String,
+    val price: String,
+    val timestamp: Long,
+    val formattedDate: String,
+    val readyCards: List<HotspotCard>,
+    val allCardsInBatch: List<HotspotCard>,
+    val isPrintedBefore: Boolean = false,
+    val isNewlyAdded: Boolean = false
 )
 
 data class RouterConnectionConfig(
@@ -132,7 +155,8 @@ data class HotspotCard(
     val disabled: Boolean = false,
     val price: String = "",
     val posAgent: String = "",
-    val cardType: String = "hotspot" // "hotspot" or "usermanager"
+    val cardType: String = "hotspot", // "hotspot" or "usermanager"
+    val createdAtHint: Long = 0L
 ) {
     val isUserManagerCard: Boolean
         get() = cardType.contains("usermanager", ignoreCase = true) || id.startsWith("um", ignoreCase = true) || id.startsWith("tum", ignoreCase = true)

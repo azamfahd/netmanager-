@@ -34,14 +34,37 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels {
         val database = AppDatabase.getInstance(applicationContext)
-        val db = FirebaseFirestore.getInstance()
+        // Failsafe: Ensure Firebase is initialized if Application.onCreate was not called yet
+        try {
+            android.util.Log.d("MainActivity", "Checking for default FirebaseApp instance")
+            com.google.firebase.FirebaseApp.getInstance()
+            android.util.Log.d("MainActivity", "Default FirebaseApp already initialized")
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Default FirebaseApp NOT initialized, attempting failsafe init with options: ${e.message}")
+            try {
+                val options = com.google.firebase.FirebaseOptions.Builder()
+                    .setApiKey("AIzaSyD2pA0c1Ec9BgwYTlkEzJTwJ2uzJPN977E")
+                    .setApplicationId("1:119789279212:android:9954c81af58740818b0c4e")
+                    .setProjectId("netmanager25")
+                    .build()
+                com.google.firebase.FirebaseApp.initializeApp(applicationContext, options)
+                android.util.Log.i("MainActivity", "Firebase failsafe initialization complete with options")
+            } catch (initEx: Exception) {
+                android.util.Log.e("MainActivity", "Firebase failsafe initialization FAILED: ${initEx.message}")
+            }
+        }
+        val db = try {
+            FirebaseFirestore.getInstance()
+        } catch (dbEx: Exception) {
+            android.util.Log.e("MainActivity", "CRITICAL: Could not get Firestore instance: ${dbEx.message}")
+            throw dbEx
+        }
         val repository = MikrotikRepository(db, database.appDao())
         MainViewModelFactory(repository, database, db, applicationContext)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        com.google.firebase.FirebaseApp.initializeApp(this)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {

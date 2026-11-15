@@ -41,6 +41,7 @@ import com.example.data.model.DetailedPackageProfitStat
 import com.example.data.model.MonthlyPackageSales
 import com.example.data.model.DailySalesPoint
 import com.example.data.util.AppUpdateManager
+import com.example.data.util.FinanceAnalyticsEngine
 import com.example.data.network.MikrotikRepository
 import com.example.data.network.NetworkUtils
 import kotlinx.coroutines.Job
@@ -56,6 +57,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
@@ -64,6 +67,7 @@ import org.json.JSONArray
 
 enum class CardFilter {
     ALL,
+    BATCHES,
     ACTIVE,
     UNUSED,
     EXPIRED,
@@ -293,10 +297,17 @@ class MainViewModel(
         return Firebase.auth.currentUser?.uid
     }
 
+    @Volatile
+    private var lastSnapshotSaveTimeMs: Long = 0L
+    @Volatile
+    private var lastSnapshotSignature: String = ""
+    private val lastArchivedSessionSignatures = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val lastActiveLoginStatsCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     private fun syncToCloud(collectionName: String, docId: String, data: Map<String, Any?>) {
+        val uid = getUserId() ?: return
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                val uid = getUserId() ?: return@launch
                 db.collection("users").document(uid).collection(collectionName).document(docId)
                     .set(data, SetOptions.merge())
                     .addOnFailureListener { e ->
@@ -363,21 +374,11 @@ class MainViewModel(
     }
 
     fun savePackagePricing(profileName: String, salePrice: Double, costPrice: Double) {
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                database.appDao().insertPackagePricing(
-                    com.example.data.local.PackagePricingEntity(
-                        profileName = profileName,
-                        salePrice = salePrice,
-                        costPrice = costPrice,
-                        updatedAt = System.currentTimeMillis()
-                    )
-                )
-                _toastEvent.emit("✅ تم حفظ أسعار الباقة $profileName بنجاح")
-            } catch (e: Exception) {
-                _toastEvent.emit("❌ فشل حفظ الأسعار: ${e.message}")
-            }
-        }
+        updatePackageCostAndPrice(
+            profileName = profileName,
+            costPrice = costPrice,
+            salePrice = salePrice
+        )
     }
 
     fun getSubscriberProfileFlow(username: String): kotlinx.coroutines.flow.Flow<com.example.data.model.SubscriberFullProfile> {
@@ -718,348 +719,100 @@ class MainViewModel(
         }
     }
 
-    val detailedPackageProfitStats: StateFlow<List<com.example.data.model.DetailedPackageProfitStat>> = combine(
-        cards, profiles, packagePricings, database.appDao().getAllCardAssignments(), _selectedTimeFilter
-    ) { cardList, profileList, pricingList, assignmentList, timeFilter ->
-        val now = System.currentTimeMillis()
-        val cal = java.util.Calendar.getInstance()
-        
-        // Start of Today
-        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-        cal.set(java.util.Calendar.MINUTE, 0)
-        cal.set(java.util.Calendar.SECOND, 0)
-        cal.set(java.util.Calendar.MILLISECOND, 0)
-        val startOfToday = cal.timeInMillis
-
-        // Start of Week (last 7 days)
-        val startOfWeek = startOfToday - (6 * 24 * 60 * 60 * 1000L)
-
-        // Start of Current Month
-        cal.timeInMillis = now
-        cal.set(java.util.Calendar.DAY_OF_MONTH, 1)
-        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-        cal.set(java.util.Calendar.MINUTE, 0)
-        cal.set(java.util.Calendar.SECOND, 0)
-        cal.set(java.util.Calendar.MILLISECOND, 0)
-        val startOfMonth = cal.timeInMillis
-
-        // Ensure only genuine profiles from the router or actual router cards are analyzed
-        val allProfileNames = if (profileList.isNotEmpty()) {
-            profileList.map { it.name }.filter { it.isNotBlank() }.distinct()
-        } else if (cardList.isNotEmpty()) {
-            cardList.map { it.profile }.filter { it.isNotBlank() }.distinct()
-        } else {
+    private val localCardsFlow = database.appDao().getAllLocalCardsFlow()
+    private val archivedSessionsFlow = database.appDao().getAllArchivedSessions()
+    private val initialMonthlyProfitRecordsFlow = flow {
+        val saved = try {
+            withContext(Dispatchers.IO) {
+                database.appDao().getAllMonthlyProfitRecordsSync()
+            }
+        } catch (_: Exception) {
             emptyList()
         }
+        emit(saved)
+    }
 
-        val rawStats = allProfileNames.map { profName ->
-            val profCards = cardList.filter { it.profile.equals(profName, ignoreCase = true) }
-            val profAssignments = assignmentList.filter { it.profileName.equals(profName, ignoreCase = true) }
-            val matchingProfile = profileList.find { it.name.equals(profName, ignoreCase = true) }
-            val savedPricing = pricingList.find { it.profileName.equals(profName, ignoreCase = true) }
-            val firstCardWithPrice = profCards.find { it.price.any { ch -> ch.isDigit() } }
+    private data class FinancePrimaryInputs(
+        val cards: List<HotspotCard>,
+        val profiles: List<HotspotProfile>,
+        val pricings: List<com.example.data.local.PackagePricingEntity>,
+        val assignments: List<PosCardAssignmentEntity>,
+        val batches: List<BatchHistoryEntity>
+    )
 
-            // Determine Sale and Cost Price (strictly from user custom pricing or real router metadata)
-            val salePrice = savedPricing?.salePrice
-                ?: matchingProfile?.priceNumber?.takeIf { it > 0 }
-                ?: matchingProfile?.price?.filter { it.isDigit() }?.toDoubleOrNull()?.takeIf { it > 0 }
-                ?: firstCardWithPrice?.price?.filter { it.isDigit() }?.toDoubleOrNull()?.takeIf { it > 0 }
-                ?: 0.0
+    private data class FinanceHistoryInputs(
+        val localCards: List<com.example.data.local.LocalCardEntity>,
+        val loginHistory: List<com.example.data.local.UserLoginHistoryEntity>,
+        val archivedSessions: List<com.example.data.local.SessionArchiveEntity>,
+        val savedMonthlyRecords: List<com.example.data.local.MonthlyProfitRecordEntity>
+    )
 
-            val costPrice = savedPricing?.costPrice
-                ?: matchingProfile?.costPrice?.takeIf { it > 0 }
-                ?: 0.0
+    private val financePrimaryInputsFlow = combine(
+        cards,
+        profiles,
+        packagePricings,
+        database.appDao().getAllCardAssignments(),
+        batchHistory
+    ) { cardList, profileList, pricingList, assignmentList, batchList ->
+        FinancePrimaryInputs(cardList, profileList, pricingList, assignmentList, batchList)
+    }
 
-            val profitPerCard = (salePrice - costPrice).coerceAtLeast(0.0)
-            val marginPercent = if (salePrice > 0) ((profitPerCard / salePrice) * 100.0) else 0.0
+    private val financeHistoryInputsFlow = combine(
+        localCardsFlow,
+        allLoginHistory,
+        archivedSessionsFlow,
+        initialMonthlyProfitRecordsFlow
+    ) { localCardList, loginList, sessionList, savedMonthlyList ->
+        FinanceHistoryInputs(localCardList, loginList, sessionList, savedMonthlyList)
+    }
 
-            val totalGenerated = maxOf(profCards.size, profAssignments.size)
-            val activeCount = profCards.count { it.isActive }
-            val unusedCount = profCards.count { it.isUnused }
-            val expiredCount = profCards.count { it.isExpired }
-
-            val soldInTimeWindow = when (timeFilter) {
-                com.example.data.model.TimeFilterRange.ALL -> {
-                    val fromCards = profCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L || it.bytesOut > 0L }
-                    val fromAssignments = profAssignments.count { it.isSold }
-                    maxOf(fromCards, fromAssignments)
-                }
-                com.example.data.model.TimeFilterRange.TODAY -> {
-                    val fromAssignments = profAssignments.count { it.isSold && it.soldAt >= startOfToday }
-                    maxOf(fromAssignments, activeCount)
-                }
-                com.example.data.model.TimeFilterRange.WEEK -> {
-                    val fromAssignments = profAssignments.count { it.isSold && it.soldAt >= startOfWeek }
-                    val fromCards = profCards.count { it.isActive || ((it.uptime.isNotBlank() && it.uptime != "0s") && !it.isExpired) }
-                    maxOf(fromAssignments, fromCards)
-                }
-                com.example.data.model.TimeFilterRange.MONTH -> {
-                    val fromAssignments = profAssignments.count { it.isSold && it.soldAt >= startOfMonth }
-                    val fromCards = profCards.count { it.isActive || (it.uptime.isNotBlank() && it.uptime != "0s") }
-                    maxOf(fromAssignments, fromCards)
-                }
-            }
-
-            val totalRev = soldInTimeWindow * salePrice
-            val totalCost = soldInTimeWindow * costPrice
-            val netProfit = (totalRev - totalCost).coerceAtLeast(0.0)
-
-            com.example.data.model.DetailedPackageProfitStat(
-                profileName = profName,
-                costPrice = costPrice,
-                salePrice = salePrice,
-                profitPerCard = profitPerCard,
-                profitMarginPercent = marginPercent,
-                totalCardsGenerated = totalGenerated,
-                soldCardsCount = soldInTimeWindow,
-                activeCardsCount = activeCount,
-                unusedCardsCount = unusedCount,
-                expiredCardsCount = expiredCount,
-                totalRevenue = totalRev,
-                totalCost = totalCost,
-                netProfit = netProfit,
-                profitSharePercent = 0f,
-                salesSharePercent = 0f
-            )
-        }
-
-        val totalNetworkProfit = rawStats.sumOf { it.netProfit }.coerceAtLeast(1.0)
-        val totalNetworkSold = rawStats.sumOf { it.soldCardsCount }.coerceAtLeast(1)
-
-        rawStats.map { stat ->
-            stat.copy(
-                profitSharePercent = ((stat.netProfit / totalNetworkProfit) * 100f).toFloat().coerceIn(0f, 100f),
-                salesSharePercent = ((stat.soldCardsCount.toFloat() / totalNetworkSold.toFloat()) * 100f).coerceIn(0f, 100f)
-            )
-        }.sortedWith(compareByDescending<com.example.data.model.DetailedPackageProfitStat> { it.netProfit }.thenByDescending { it.soldCardsCount })
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val detailedPackageProfitStats: StateFlow<List<com.example.data.model.DetailedPackageProfitStat>> = combine(
+        financePrimaryInputsFlow,
+        financeHistoryInputsFlow,
+        _selectedTimeFilter
+    ) { primary, history, timeFilter ->
+        FinanceAnalyticsEngine.computeDetailedPackageProfitStats(
+            cardList = primary.cards,
+            profileList = primary.profiles,
+            pricingList = primary.pricings,
+            assignmentList = primary.assignments,
+            timeFilter = timeFilter,
+            localCards = history.localCards,
+            loginHistory = history.loginHistory,
+            archivedSessions = history.archivedSessions,
+            batches = primary.batches
+        )
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val revenueAnalytics: StateFlow<com.example.data.model.RevenueAnalyticsSummary> = combine(
         detailedPackageProfitStats, cards, _selectedTimeFilter
     ) { stats, allCards, timeFilter ->
-        val grossSales = stats.sumOf { it.totalRevenue }
-        val totalCost = stats.sumOf { it.totalCost }
-        val netProfit = stats.sumOf { it.netProfit }
-        val totalGenerated = maxOf(stats.sumOf { it.totalCardsGenerated }, allCards.size)
-        var activeCount = 0
-        var unusedCount = 0
-        var expiredCount = 0
-        for (c in allCards) {
-            if (c.isActive) activeCount++
-            if (c.isUnused) unusedCount++
-            if (c.isExpired) expiredCount++
-        }
-
-        val activeRev = stats.sumOf { it.activeCardsCount * it.salePrice }
-        val inventoryVal = stats.sumOf { it.unusedCardsCount * it.salePrice }
-        val avgPrice = if (stats.isNotEmpty()) stats.map { it.salePrice }.average() else 0.0
-        val avgMargin = if (grossSales > 0) ((netProfit / grossSales) * 100.0) else 0.0
-
-        val topSelling = stats.filter { it.soldCardsCount > 0 }.maxByOrNull { it.soldCardsCount }
-        val topProfitable = stats.filter { it.netProfit > 0 }.maxByOrNull { it.netProfit }
-
-        com.example.data.model.RevenueAnalyticsSummary(
-            totalEstimatedRevenue = grossSales,
-            activeRevenue = activeRev,
-            availableInventoryValue = inventoryVal,
-            totalCardsCount = totalGenerated,
-            activeCardsCount = activeCount,
-            unusedCardsCount = unusedCount,
-            expiredCardsCount = expiredCount,
-            topSellingPackage = topSelling?.profileName ?: "لا توجد مبيعات بعد",
-            topSellingPackageCount = topSelling?.soldCardsCount ?: 0,
-            averageCardPrice = avgPrice,
-            totalCost = totalCost,
-            totalNetProfit = netProfit,
-            averageProfitMarginPercent = avgMargin,
-            topProfitablePackage = topProfitable?.profileName ?: "لا توجد أرباح بعد",
-            topProfitablePackageProfit = topProfitable?.netProfit ?: 0.0,
-            selectedTimeFilter = timeFilter
+        FinanceAnalyticsEngine.computeRevenueAnalyticsSummary(
+            stats = stats,
+            allCards = allCards,
+            timeFilter = timeFilter
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.RevenueAnalyticsSummary())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.RevenueAnalyticsSummary())
 
     val monthlySalesList: StateFlow<List<com.example.data.model.MonthlySalesSummary>> = combine(
-        cards, detailedPackageProfitStats, database.appDao().getAllCardAssignments(), batchHistory
-    ) { allCards, packageStats, assignments, batches ->
-        val now = System.currentTimeMillis()
-        val monthNamesAr = listOf(
-            "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
-            "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"
+        financePrimaryInputsFlow,
+        financeHistoryInputsFlow
+    ) { primary, history ->
+        FinanceAnalyticsEngine.computeMonthlySalesList(
+            allCards = primary.cards,
+            localCards = history.localCards,
+            profiles = primary.profiles,
+            pricings = primary.pricings,
+            assignments = primary.assignments,
+            batches = primary.batches,
+            loginHistory = history.loginHistory,
+            archivedSessions = history.archivedSessions,
+            savedMonthlyRecords = history.savedMonthlyRecords
         )
-
-        val rawMonthsList = mutableListOf<com.example.data.model.MonthlySalesSummary>()
-
-        for (monthOffset in 0..5) {
-            val mCal = java.util.Calendar.getInstance()
-            mCal.timeInMillis = now
-            mCal.add(java.util.Calendar.MONTH, -monthOffset)
-            val monthIndex = mCal.get(java.util.Calendar.MONTH)
-            val year = mCal.get(java.util.Calendar.YEAR)
-            val monthKey = "%04d-%02d".format(year, monthIndex + 1)
-            val monthLabel = "${monthNamesAr[monthIndex]} $year"
-            val isCurrent = monthOffset == 0
-
-            mCal.set(java.util.Calendar.DAY_OF_MONTH, 1)
-            mCal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-            mCal.set(java.util.Calendar.MINUTE, 0)
-            mCal.set(java.util.Calendar.SECOND, 0)
-            mCal.set(java.util.Calendar.MILLISECOND, 0)
-            val startOfM = mCal.timeInMillis
-
-            val maxDay = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-            mCal.set(java.util.Calendar.DAY_OF_MONTH, maxDay)
-            mCal.set(java.util.Calendar.HOUR_OF_DAY, 23)
-            mCal.set(java.util.Calendar.MINUTE, 59)
-            mCal.set(java.util.Calendar.SECOND, 59)
-            mCal.set(java.util.Calendar.MILLISECOND, 999)
-            val endOfM = mCal.timeInMillis
-
-            val monthAssignments = assignments.filter { it.assignedAt in startOfM..endOfM || (isCurrent && it.assignedAt <= endOfM) }
-            val soldInMonth = monthAssignments.count { it.isSold }
-
-            val avgCardPrice = if (packageStats.isNotEmpty()) packageStats.map { it.salePrice }.average().takeIf { it > 0 } ?: 0.0 else 0.0
-            val avgCostPrice = if (packageStats.isNotEmpty()) packageStats.map { it.costPrice }.average().takeIf { it > 0 } ?: 0.0 else 0.0
-
-            val totalGen = if (isCurrent) {
-                maxOf(allCards.size, monthAssignments.size)
-            } else {
-                val historicalBatches = batches.filter { it.createdAt in startOfM..endOfM }
-                if (historicalBatches.isNotEmpty()) {
-                    historicalBatches.sumOf { it.cardCount }
-                } else {
-                    0 // No heuristic fallbacks
-                }
-            }
-
-            val totalSold = if (isCurrent) {
-                val activeOrExpired = allCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L }
-                maxOf(activeOrExpired, soldInMonth)
-            } else {
-                monthAssignments.count { it.isSold } // Strictly from local DB history
-            }
-
-            val totalUnsold = (totalGen - totalSold).coerceAtLeast(0)
-            val revenue = totalSold * avgCardPrice
-            val cost = totalSold * avgCostPrice
-            val profit = (revenue - cost).coerceAtLeast(0.0)
-            val potentialUnsold = totalUnsold * avgCardPrice
-            val salesPct = if (totalGen > 0) ((totalSold.toFloat() / totalGen.toFloat()) * 100f).coerceIn(0f, 100f) else 0f
-            val targetRev = totalGen * avgCardPrice
-            val deficit = (targetRev - revenue).coerceAtLeast(0.0)
-
-            // Package breakdown for this month
-            val pkgBreakdown = if (packageStats.isNotEmpty()) {
-                packageStats.map { pkg ->
-                    val pkgSold = if (isCurrent) {
-                        allCards.count { it.profile.equals(pkg.profileName, ignoreCase = true) && (it.isActive || it.isExpired || it.bytesIn > 0L) }
-                    } else {
-                        val totalSalesWeight = maxOf(1, packageStats.sumOf { p: DetailedPackageProfitStat -> p.soldCardsCount })
-                        (totalSold * (pkg.soldCardsCount.toFloat() / totalSalesWeight)).toInt()
-                    }
-                    val pkgRev = pkgSold * pkg.salePrice
-                    val pkgProfit = pkgSold * pkg.profitPerCard
-                    val share = if (revenue > 0) ((pkgRev / revenue) * 100f).toFloat().coerceIn(0f, 100f) else 0f
-                    com.example.data.model.MonthlyPackageSales(
-                        packageName = pkg.profileName,
-                        cardsSold = pkgSold,
-                        totalRevenue = pkgRev,
-                        netProfit = pkgProfit,
-                        sharePercentage = share
-                    )
-                }.sortedByDescending { it.netProfit }
-            } else {
-                emptyList()
-            }
-
-            // Daily distribution - Improved: Use actual sales data from local DB
-            val dailyBreakdown = mutableListOf<com.example.data.model.DailySalesPoint>()
-            val daysInMonth = mCal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
-            
-            // Map assignments to days of the month for this specific month
-            val salesByDay = monthAssignments.filter { it.isSold && it.soldAt > 0L }.groupBy {
-                val cal = java.util.Calendar.getInstance().apply { timeInMillis = it.soldAt }
-                cal.get(java.util.Calendar.DAY_OF_MONTH)
-            }
-
-            for (day in 1..daysInMonth) {
-                val daySales = salesByDay[day] ?: emptyList()
-                val daySold = daySales.size
-                
-                // If it's a historical month with no DB assignments but we have a totalSold count,
-                // distribute the totalSold count more realistically or keep it simple.
-                // For accuracy, we prefer showing 0 if no records exist in local DB.
-                
-                if (daySold > 0 || (isCurrent && day <= java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_MONTH))) {
-                    val dayRev = daySales.sumOf { it.priceAmount }.takeIf { it > 0 } ?: (daySold * avgCardPrice)
-                    val dayCost = daySold * avgCostPrice
-                    dailyBreakdown.add(
-                        com.example.data.model.DailySalesPoint(
-                            dayNumber = day,
-                            dayLabel = "$day ${monthNamesAr[monthIndex]}",
-                            cardsSold = daySold,
-                            revenue = dayRev,
-                            profit = (dayRev - dayCost).coerceAtLeast(0.0)
-                        )
-                    )
-                }
-            }
-
-            rawMonthsList.add(
-                com.example.data.model.MonthlySalesSummary(
-                    monthKey = monthKey,
-                    monthName = monthLabel,
-                    totalCardsGenerated = totalGen,
-                    totalCardsSold = totalSold,
-                    totalCardsUnsold = totalUnsold,
-                    totalRevenue = revenue,
-                    totalCost = cost,
-                    netProfit = profit,
-                    potentialUnsoldValue = potentialUnsold,
-                    salesPercentage = salesPct,
-                    targetDeficit = deficit,
-                    isCurrentMonth = isCurrent,
-                    packageBreakdown = pkgBreakdown,
-                    dailyBreakdown = dailyBreakdown
-                )
-            )
-        }
-
-        // Calculate growth rate against previous chronological month
-        val finalMonths = rawMonthsList.mapIndexed { index, item ->
-            val prevMonth = rawMonthsList.getOrNull(index + 1)
-            val growth = if (prevMonth != null && prevMonth.netProfit > 0) {
-                ((item.netProfit - prevMonth.netProfit) / prevMonth.netProfit) * 100.0
-            } else {
-                0.0
-            }
-            item.copy(growthRatePercent = growth)
-        }
-
-        // Persist computed records to Room SQLite database in background
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val entities = finalMonths.map { m ->
-                    val topPkg = m.packageBreakdown.firstOrNull()?.packageName ?: ""
-                    com.example.data.local.MonthlyProfitRecordEntity(
-                        monthKey = m.monthKey,
-                        monthNameAr = m.monthName,
-                        year = m.monthKey.substringBefore("-").toIntOrNull() ?: 2026,
-                        month = m.monthKey.substringAfter("-").toIntOrNull() ?: 1,
-                        totalRevenue = m.totalRevenue,
-                        totalCost = m.totalCost,
-                        netProfit = m.netProfit,
-                        soldCardsCount = m.totalCardsSold,
-                        totalCardsCount = m.totalCardsGenerated,
-                        topSellingProfile = topPkg,
-                        lastUpdatedTimestamp = now
-                    )
-                }
-                database.appDao().insertOrUpdateMonthlyProfitRecords(entities)
-            } catch (_: Exception) {}
-        }
-
-        finalMonths
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val packageConsumptionStats: StateFlow<List<com.example.data.model.PackageConsumptionStat>> = combine(
         profiles, cards, activeUsers
@@ -1094,7 +847,8 @@ class MainViewModel(
                 revenueAmount = rev
             )
         }.sortedByDescending { it.totalBytes }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val peakHourStats: StateFlow<List<com.example.data.model.PeakHourStat>> = activeUsers.combine(userSessions) { users, _ ->
         val currentHour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
@@ -1181,7 +935,8 @@ class MainViewModel(
                 payments = agentPayments
             )
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private var previousActiveUsernames = emptySet<String>()
 
@@ -1212,31 +967,53 @@ class MainViewModel(
                 )
             }
 
-            // Clean up any predefined template names from package_pricing table to guarantee no fake packages appear
-            com.example.data.model.PREDEFINED_PACKAGE_TEMPLATES.forEach { tpl ->
-                val profName = tpl.title.split("(").first().trim()
-                database.appDao().deletePackagePricing(profName)
+            // Clean up legacy template-only rows only if no live router profile/card uses that name
+            val activeProfileNames = (profiles.value.map { it.name.trim().lowercase() } +
+                cards.value.map { it.profile.trim().lowercase() }).toSet()
+            if (activeProfileNames.isNotEmpty()) {
+                com.example.data.model.PREDEFINED_PACKAGE_TEMPLATES.forEach { tpl ->
+                    val profName = tpl.title.split("(").first().trim()
+                    if (!activeProfileNames.contains(profName.lowercase())) {
+                        database.appDao().deletePackagePricing(profName)
+                    }
+                }
             }
         } catch (_: Exception) {}
     }
 
     private suspend fun checkAndMarkSoldCards(cardList: List<HotspotCard>) {
-        val usedCards = cardList.filter {
-            (it.uptime.isNotBlank() && it.uptime != "0s") ||
+        val usedNames = cardList.asSequence()
+            .filter {
+                (it.uptime.isNotBlank() && it.uptime != "0s") ||
                     it.bytesIn > 0L ||
                     it.bytesOut > 0L ||
                     it.isExpired ||
                     it.isActive
-        }
-        if (usedCards.isNotEmpty()) {
-            val now = System.currentTimeMillis()
-            usedCards.forEach { card ->
-                database.appDao().markCardAsSold(card.name, now)
-                syncToCloud("posCards", card.name, mapOf(
-                    "isSold" to true,
-                    "soldAt" to com.google.firebase.Timestamp(java.util.Date(now))
-                ))
             }
+            .map { it.name }
+            .toList()
+        if (usedNames.isEmpty()) return
+
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val dao = database.appDao()
+                val unsoldAssigned = dao.getUnsoldAssignedCardNamesSync().toSet()
+                if (unsoldAssigned.isEmpty()) return@withContext
+                val newlySold = usedNames.filter { unsoldAssigned.contains(it) }
+                if (newlySold.isEmpty()) return@withContext
+
+                val now = System.currentTimeMillis()
+                newlySold.chunked(400).forEach { chunk ->
+                    dao.markCardsAsSoldBatch(chunk, now)
+                }
+                val soldTs = com.google.firebase.Timestamp(java.util.Date(now))
+                newlySold.forEach { cardName ->
+                    syncToCloud("posCards", cardName, mapOf(
+                        "isSold" to true,
+                        "soldAt" to soldTs
+                    ))
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -1259,7 +1036,8 @@ class MainViewModel(
             }
         }
         list
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val filteredUserSessions: StateFlow<List<com.example.data.model.UserSessionRecord>> = combine(
         allArchivedUserSessions, _sessionSearchQuery, _sessionFilter
@@ -1284,7 +1062,8 @@ class MainViewModel(
 
             matchesQuery && matchesFilter
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val filteredActivityEvents: StateFlow<List<com.example.data.model.UserActivityEvent>> = combine(
         activityEvents, _sessionSearchQuery
@@ -1431,7 +1210,8 @@ class MainViewModel(
             expiredCardsList = expiredSummaries,
             selectedTimeFilter = timeFilter
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.NetworkConsumptionReport())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.example.data.model.NetworkConsumptionReport())
 
     fun reactivateCardFromReport(cardId: String) {
         val target = cards.value.firstOrNull { it.id == cardId || it.name == cardId }
@@ -1528,7 +1308,8 @@ class MainViewModel(
             if (c.isExpiredValidity) expV++
         }
         CardStats(act, unused, exp, expQ, expV, distinct.size)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CardStats())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CardStats())
 
     val filteredCards: StateFlow<List<HotspotCard>> = combine(
         cards, activeUsers, _cardSearchQuery, _cardFilter, _cardSystemFilter
@@ -1545,7 +1326,7 @@ class MainViewModel(
             val isUnused = !isCurrentlyOnline && !isUsedOffline && !card.isExpired
 
             val matchesFilter = when (filter) {
-                CardFilter.ALL -> true
+                CardFilter.ALL, CardFilter.BATCHES -> true
                 CardFilter.ACTIVE -> isCurrentlyOnline && !card.isExpired
                 CardFilter.UNUSED -> isUnused
                 CardFilter.EXPIRED -> card.isExpired
@@ -1564,76 +1345,130 @@ class MainViewModel(
             compareByDescending<HotspotCard> { repository.getCardCreationTimestamp(it) }
                 .thenByDescending { it.id }
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val readyCardGroups: StateFlow<List<CardBatchGroup>> = combine(filteredCards, _cardFilter) { list, filter ->
-        if (filter != CardFilter.UNUSED || list.isEmpty()) return@combine emptyList()
-        
-        // Partition and Group in background
-        val commentCounts = list.groupingBy { it.comment }.eachCount()
-        val (rawBatchCards, _) = list.partition { card ->
-            val c = card.comment.lowercase()
-            when {
-                c.contains("فردي") -> false
-                c.contains("دفعة") || c.contains("batch") -> true
-                card.id.startsWith("gen_") -> true
-                card.comment.isNotBlank() && (commentCounts[card.comment] ?: 0) > 1 -> true
-                else -> false
-            }
+    private fun cardMatchesSearchAndSystem(
+        card: HotspotCard,
+        query: String,
+        systemFilter: CardSystemFilter,
+        extraTextMatch: Boolean = false
+    ): Boolean {
+        val matchesQuery = query.isBlank() || extraTextMatch ||
+                card.name.contains(query, ignoreCase = true) ||
+                card.comment.contains(query, ignoreCase = true) ||
+                card.profile.contains(query, ignoreCase = true)
+        val matchesSystem = when (systemFilter) {
+            CardSystemFilter.ALL -> true
+            CardSystemFilter.HOTSPOT -> card.isHotspotCard
+            CardSystemFilter.USER_MANAGER -> card.isUserManagerCard
         }
+        return matchesQuery && matchesSystem
+    }
 
-        rawBatchCards.groupBy { card ->
-            when {
-                card.comment.contains("دفعة") || card.comment.contains("batch") -> card.comment
-                card.id.startsWith("gen_") -> {
-                    val parts = card.id.split("_")
-                    if (parts.size >= 2) "batch_${parts[1]}_${card.profile}" else card.comment.ifBlank { "دفعة_${card.profile}" }
-                }
-                card.comment.isNotBlank() -> card.comment
-                else -> "batch_${card.profile}_${card.price}"
+    // Printable vouchers sheet & batch print tracking
+    private val printedBatchesPrefs = appContext?.getSharedPreferences("netmanager_printed_batches", Context.MODE_PRIVATE)
+    private val _printedBatchKeys = MutableStateFlow<Set<String>>(
+        printedBatchesPrefs?.getStringSet("printed_keys", emptySet())?.toSet() ?: emptySet()
+    )
+    private val _selectedPrintableBatchKey = MutableStateFlow<String?>(null)
+    val selectedPrintableBatchKey: StateFlow<String?> = _selectedPrintableBatchKey.asStateFlow()
+
+    private val _printableCards = MutableStateFlow<List<HotspotCard>>(emptyList())
+    val printableCards: StateFlow<List<HotspotCard>> = _printableCards.asStateFlow()
+
+    private val batchPartitionState: StateFlow<IndependentBatchPartitionResult> = combine(
+        cards, activeUsers, batchHistory, _printedBatchKeys
+    ) { allCards, liveActiveUsers, batches, printedKeys ->
+        val activeNamesLower = liveActiveUsers.map { it.user.lowercase() }.toSet()
+        partitionCardsIntoIndependentBatches(
+            allCards = allCards,
+            activeUserNamesLower = activeNamesLower,
+            batches = batches,
+            printedKeys = printedKeys,
+            timestampProvider = { repository.getCardCreationTimestamp(it) }
+        )
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), IndependentBatchPartitionResult())
+
+    val allBatchGroups: StateFlow<List<CardBatchGroup>> = combine(
+        batchPartitionState, _cardSearchQuery, _cardSystemFilter
+    ) { partition, query, systemFilter ->
+        partition.batchGroups.mapNotNull { batch ->
+            val batchHeaderMatches = query.isNotBlank() && (
+                batch.title.contains(query, ignoreCase = true) ||
+                    batch.profile.contains(query, ignoreCase = true)
+            )
+            val matchingAll = batch.allBatchCards.filter {
+                cardMatchesSearchAndSystem(it, query, systemFilter, batchHeaderMatches)
             }
-        }.map { (key, cardsInBatch) ->
-            val first = cardsInBatch.first()
-            val ts = cardsInBatch.maxOfOrNull { repository.getCardCreationTimestamp(it) } ?: 0L
-            val formattedDate = if (ts > 0L) NetworkUtils.formatArabicFullDateTime(ts) else "تاريخ محفوظ في الراوتر"
-            val title = when {
-                first.comment.isNotBlank() && first.comment != "دفعة كروت" -> first.comment
-                first.price.isNotBlank() -> "دفعة كروت (${first.profile}) - ${first.price}"
-                else -> "دفعة كروت (${first.profile})"
+            if (matchingAll.isEmpty()) return@mapNotNull null
+            val matchingReady = batch.readyCards.filter {
+                cardMatchesSearchAndSystem(it, query, systemFilter, batchHeaderMatches)
             }
-            val totalVal = cardsInBatch.sumOf { pStr ->
-                val cleaned = pStr.price.replace(",", "").filter { it.isDigit() || it == '.' }
-                cleaned.toDoubleOrNull() ?: 0.0
-            }
-            CardBatchGroup(
-                batchKey = key,
-                title = title,
-                profile = first.profile,
-                price = first.price,
-                timestamp = ts,
-                formattedDate = formattedDate,
-                totalValue = totalVal,
-                cards = cardsInBatch
+            val totalVal = matchingAll.sumOf { parseBatchPriceValue(it.price.ifBlank { batch.price }) }
+            batch.copy(
+                cards = matchingAll,
+                allBatchCards = matchingAll,
+                readyCards = matchingReady,
+                totalValue = totalVal
             )
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val readyIndividualCards: StateFlow<List<HotspotCard>> = combine(filteredCards, _cardFilter) { list, filter ->
-        if (filter != CardFilter.UNUSED || list.isEmpty()) return@combine emptyList()
-        
-        val commentCounts = list.groupingBy { it.comment }.eachCount()
-        val (_, rawIndividualCards) = list.partition { card ->
-            val c = card.comment.lowercase()
-            when {
-                c.contains("فردي") -> false
-                c.contains("دفعة") || c.contains("batch") -> true
-                card.id.startsWith("gen_") -> true
-                card.comment.isNotBlank() && (commentCounts[card.comment] ?: 0) > 1 -> true
-                else -> false
+    val allIndividualCards: StateFlow<List<HotspotCard>> = combine(
+        batchPartitionState, _cardSearchQuery, _cardSystemFilter
+    ) { partition, query, systemFilter ->
+        partition.ungroupedCards.filter {
+            cardMatchesSearchAndSystem(it, query, systemFilter)
+        }.sortedWith(
+            compareByDescending<HotspotCard> { repository.getCardCreationTimestamp(it) }
+                .thenByDescending { it.id }
+        )
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val readyCardGroups: StateFlow<List<CardBatchGroup>> = combine(
+        batchPartitionState, _cardFilter, _cardSearchQuery, _cardSystemFilter
+    ) { partition, filter, query, systemFilter ->
+        if (filter != CardFilter.UNUSED) return@combine emptyList()
+        partition.batchGroups.mapNotNull { batch ->
+            val batchHeaderMatches = query.isNotBlank() && (
+                batch.title.contains(query, ignoreCase = true) ||
+                    batch.profile.contains(query, ignoreCase = true)
+            )
+            val matchingReady = batch.readyCards.filter {
+                cardMatchesSearchAndSystem(it, query, systemFilter, batchHeaderMatches)
             }
+            if (matchingReady.isEmpty()) return@mapNotNull null
+            val readyVal = matchingReady.sumOf { parseBatchPriceValue(it.price.ifBlank { batch.price }) }
+            batch.copy(
+                cards = matchingReady,
+                readyCards = matchingReady,
+                totalValue = readyVal
+            )
         }
-        rawIndividualCards
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val readyIndividualCards: StateFlow<List<HotspotCard>> = combine(
+        batchPartitionState, activeUsers, _cardFilter, _cardSearchQuery, _cardSystemFilter
+    ) { partition, liveActiveUsers, filter, query, systemFilter ->
+        if (filter != CardFilter.UNUSED) return@combine emptyList()
+        val activeNamesLower = liveActiveUsers.map { it.user.lowercase() }.toSet()
+        partition.ungroupedCards.filter { card ->
+            val lower = card.name.lowercase()
+            val isReady = !activeNamesLower.contains(lower) &&
+                (card.uptime.isBlank() || card.uptime == "0s") &&
+                card.bytesIn == 0L && card.bytesOut == 0L && !card.isExpired
+            isReady && cardMatchesSearchAndSystem(card, query, systemFilter)
+        }.sortedWith(
+            compareByDescending<HotspotCard> { repository.getCardCreationTimestamp(it) }
+                .thenByDescending { it.id }
+        )
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val pagedFilteredCards: StateFlow<List<HotspotCard>> = combine(
         filteredCards, _cardDisplayLimit
@@ -1687,9 +1522,9 @@ class MainViewModel(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Printable vouchers sheet
-    private val _printableCards = MutableStateFlow<List<HotspotCard>>(emptyList())
-    val printableCards: StateFlow<List<HotspotCard>> = _printableCards.asStateFlow()
+    val printableBatchOptions: StateFlow<List<com.example.data.model.PrintableBatchOption>> =
+        batchPartitionState.map { it.printableOptions }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Auto-refresh loop
     private val _autoRefresh = MutableStateFlow(true)
@@ -1712,6 +1547,9 @@ class MainViewModel(
     }
 
     private var refreshJob: Job? = null
+    private var connectJob: Job? = null
+    private var consecutiveRefreshFailures = 0
+    private val seenRouterLogKeys = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
 
     // User message toasts / snackbars
     private val _toastEvent = MutableSharedFlow<String>()
@@ -1853,7 +1691,11 @@ class MainViewModel(
         saveToFavorites: Boolean = true,
         context: Context? = null
     ) {
-        viewModelScope.launch {
+        connectJob?.cancel()
+        stopAutoRefresh()
+        consecutiveRefreshFailures = 0
+        seenRouterLogKeys.clear()
+        connectJob = viewModelScope.launch {
             val targetContext = context ?: appContext
             _currentConfig.value = config
 
@@ -1994,6 +1836,9 @@ class MainViewModel(
     }
 
     fun disconnect() {
+        connectJob?.cancel()
+        connectJob = null
+        consecutiveRefreshFailures = 0
         stopAutoRefresh()
         repository.disconnect()
         _connectionState.value = ConnectionState.Disconnected
@@ -2012,8 +1857,10 @@ class MainViewModel(
                 _connectionState.value = currentConn.copy(isSyncing = true)
                 _toastEvent.emit("جاري محاولة الاتصال بالراوتر ومزامنة البيانات...")
                 val res = repository.refreshData()
+                val latestConn = _connectionState.value as? ConnectionState.Connected ?: return@launch
                 if (res.isSuccess) {
-                    _connectionState.value = currentConn.copy(
+                    consecutiveRefreshFailures = 0
+                    _connectionState.value = latestConn.copy(
                         isSyncing = false,
                         isOffline = false,
                         offlineReason = "",
@@ -2029,8 +1876,8 @@ class MainViewModel(
                     }
                 } else {
                     val err = res.exceptionOrNull()?.message ?: "الراوتر غير متاح حالياً"
-                    logApplicationError("SYNC_RETRY", err, "IP: ${currentConn.ipAddress}")
-                    _connectionState.value = currentConn.copy(
+                    logApplicationError("SYNC_RETRY", err, "IP: ${latestConn.ipAddress}")
+                    _connectionState.value = latestConn.copy(
                         isSyncing = false,
                         isOffline = true,
                         offlineReason = err
@@ -2047,40 +1894,65 @@ class MainViewModel(
         pauseAutoRefreshUntil = System.currentTimeMillis() + durationMs
     }
 
+    private var trafficPollJob: kotlinx.coroutines.Job? = null
+
     private fun startAutoRefresh() {
         stopAutoRefresh()
+        consecutiveRefreshFailures = 0
+        // Fast 3-second live traffic polling loop for real-time speed display
+        trafficPollJob = viewModelScope.launch {
+            while (isActive) {
+                delay(3000)
+                val currentConn = _connectionState.value
+                if (currentConn is ConnectionState.Connected && !currentConn.isOffline) {
+                    try {
+                        repository.pollLiveTrafficSpeeds()
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+
         refreshJob = viewModelScope.launch {
             while (isActive && _autoRefresh.value) {
-                // Increased delay to 8 seconds to prevent rapid overwrites and respect router processing time
+                // Background cycle every 8 seconds for overall router data
                 delay(8000)
-                
+
                 if (System.currentTimeMillis() < pauseAutoRefreshUntil) {
                     continue
                 }
-                
+
                 val currentConn = _connectionState.value
                 if (currentConn is ConnectionState.Connected) {
                     if (currentConn.isDemo) {
                         repository.refreshData()
                     } else {
                         val res = repository.refreshData()
+                        val latestConn = _connectionState.value as? ConnectionState.Connected ?: continue
                         if (res.isSuccess) {
-                            if (currentConn.isOffline) {
-                                _connectionState.value = currentConn.copy(
+                            consecutiveRefreshFailures = 0
+                            if (latestConn.isOffline) {
+                                _connectionState.value = latestConn.copy(
                                     isOffline = false,
                                     offlineReason = "",
                                     lastSyncTime = System.currentTimeMillis()
                                 )
                                 _toastEvent.emit("✅ تم استعادة الاتصال بالراوتر وتحديث البيانات بنجاح!")
                                 taskQueueManager.processPendingTasks(repository)
-                            } else if (pendingTasksCount.value > 0) {
-                                // Background automatic retry with exponential backoff
-                                taskQueueManager.processPendingTasks(repository)
+                            } else {
+                                _connectionState.value = latestConn.copy(
+                                    lastSyncTime = System.currentTimeMillis()
+                                )
+                                if (pendingTasksCount.value > 0) {
+                                    // Background automatic retry with exponential backoff
+                                    taskQueueManager.processPendingTasks(repository)
+                                }
                             }
                         } else {
-                            if (!currentConn.isOffline) {
+                            consecutiveRefreshFailures++
+                            // Require 2 consecutive failures before marking offline to avoid single-packet flapping
+                            if (consecutiveRefreshFailures >= 2 && !latestConn.isOffline) {
                                 val err = res.exceptionOrNull()?.message ?: "انقطاع مؤقت في الاتصال بالراوتر"
-                                _connectionState.value = currentConn.copy(
+                                _connectionState.value = latestConn.copy(
                                     isOffline = true,
                                     offlineReason = err
                                 )
@@ -2095,6 +1967,8 @@ class MainViewModel(
     private fun stopAutoRefresh() {
         refreshJob?.cancel()
         refreshJob = null
+        trafficPollJob?.cancel()
+        trafficPollJob = null
     }
 
     fun kickUser(user: HotspotActiveUser) {
@@ -2141,11 +2015,7 @@ class MainViewModel(
             // 1. Instant optimistic update
             val resetCard = card.copy(uptime = "0s", bytesIn = 0L, bytesOut = 0L, disabled = false)
             repository.updateLocalCard(resetCard)
-            try {
-                database.appDao().insertOrUpdateLocalCard(
-                    com.example.data.local.LocalCardEntity.fromHotspotCard(resetCard)
-                )
-            } catch (_: Exception) {}
+            repository.upsertLocalCardPreservingTimestamp(resetCard)
 
             // 2. Execute on router
             val result = repository.reactivateCard(card)
@@ -2166,11 +2036,7 @@ class MainViewModel(
             pauseAutoRefreshFor(6000)
             // 1. Instant optimistic update
             repository.updateLocalCard(updatedCard)
-            try {
-                database.appDao().insertOrUpdateLocalCard(
-                    com.example.data.local.LocalCardEntity.fromHotspotCard(updatedCard)
-                )
-            } catch (_: Exception) {}
+            repository.upsertLocalCardPreservingTimestamp(updatedCard)
 
             // 2. Execute on router
             val result = repository.updateCard(updatedCard)
@@ -2197,11 +2063,7 @@ class MainViewModel(
             if (targetCard != null) {
                 val updated = targetCard.copy(disabled = targetDisabled)
                 repository.updateLocalCard(updated)
-                try {
-                    database.appDao().insertOrUpdateLocalCard(
-                        com.example.data.local.LocalCardEntity.fromHotspotCard(updated)
-                    )
-                } catch (_: Exception) {}
+                repository.upsertLocalCardPreservingTimestamp(updated)
             }
 
             // 2. Execute on router
@@ -2218,6 +2080,8 @@ class MainViewModel(
             }
         }
     }
+
+    private var lastBatchTimestamp = 0L
 
     fun generateBatch(config: BatchGenerationConfig) {
         viewModelScope.launch {
@@ -2240,11 +2104,13 @@ class MainViewModel(
                 }
 
                 if (cards.isNotEmpty()) {
-                    // Save batch history
+                    // Save batch history with all generated card names for independent group separation & tracking
                     val jsonArr = JSONArray()
-                    cards.take(10).forEach { jsonArr.put(it.name) }
-                    val batchId = "batch_${System.currentTimeMillis()}"
-                    val timestamp = System.currentTimeMillis()
+                    cards.forEach { jsonArr.put(it.name) }
+                    val nowTs = System.currentTimeMillis()
+                    val timestamp = if (nowTs <= lastBatchTimestamp) lastBatchTimestamp + 1 else nowTs
+                    lastBatchTimestamp = timestamp
+                    val batchId = "batch_$timestamp"
                     database.appDao().insertBatch(
                         BatchHistoryEntity(
                             batchId = batchId,
@@ -2268,7 +2134,7 @@ class MainViewModel(
 
                     // If assigned to a POS Agent, save assignments
                     if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
-                        val priceNum = config.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                        val priceNum = parseBatchPriceValue(config.price).takeIf { it > 0.0 } ?: 200.0
                         val assignments = cards.map { card ->
                             val assignAt = System.currentTimeMillis()
                             val assignmentId = "assign_${card.name}_${assignAt}"
@@ -2302,6 +2168,15 @@ class MainViewModel(
 
                     // Set printable cards for instant preview
                     _printableCards.value = cards
+                    _selectedPrintableBatchKey.value = batchId
+
+                    // Ensure the newly generated batch is immediately visible in CardsScreen
+                    if (_cardFilter.value != CardFilter.ALL &&
+                        _cardFilter.value != CardFilter.BATCHES &&
+                        _cardFilter.value != CardFilter.UNUSED
+                    ) {
+                        _cardFilter.value = CardFilter.BATCHES
+                    }
                 }
             } else {
                 recordSystemEvent("إضافة", "دفعة كروت", config.batchComment.ifBlank { "دفعة كروت" }, "فشل توليد دفعة كروت في الراوتر", "FAILED", result.exceptionOrNull()?.message ?: "")
@@ -2324,7 +2199,7 @@ class MainViewModel(
                     "الباقة: ${card.profile}, كلمة المرور: ${card.password}, النظام: ${card.systemLabelAr}"
                 )
                 if (posAgentId > 0L && posAgentName.isNotBlank()) {
-                    val priceNum = card.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                    val priceNum = parseBatchPriceValue(card.price).takeIf { it > 0.0 } ?: 200.0
                     val assignment = PosCardAssignmentEntity(
                         agentId = posAgentId,
                         agentName = posAgentName,
@@ -2437,7 +2312,7 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             val assignments = cardsToAssign.map { card ->
-                val priceNum = card.price.filter { it.isDigit() }.toDoubleOrNull() ?: 200.0
+                val priceNum = parseBatchPriceValue(card.price).takeIf { it > 0.0 } ?: 200.0
                 PosCardAssignmentEntity(
                     agentId = agentId,
                     agentName = agentName,
@@ -2519,11 +2394,7 @@ class MainViewModel(
             // 1. Instant optimistic update in memory and local DB
             val activated = card.copy(disabled = false)
             repository.updateLocalCard(activated)
-            try {
-                database.appDao().insertOrUpdateLocalCard(
-                    com.example.data.local.LocalCardEntity.fromHotspotCard(activated)
-                )
-            } catch (_: Exception) {}
+            repository.upsertLocalCardPreservingTimestamp(activated)
 
             // 2. Execute on router in background
             val res = repository.verifyAndActivateCard(card)
@@ -2554,8 +2425,25 @@ class MainViewModel(
         }
     }
 
-    fun setPrintableCards(cardsToPrint: List<HotspotCard>) {
+    fun setPrintableCards(cardsToPrint: List<HotspotCard>, batchKey: String? = null) {
         _printableCards.value = cardsToPrint
+        _selectedPrintableBatchKey.value = batchKey
+    }
+
+    fun markBatchAsPrinted(batchKey: String) {
+        if (batchKey.isBlank()) return
+        val updated = _printedBatchKeys.value + batchKey
+        _printedBatchKeys.value = updated
+        try {
+            printedBatchesPrefs?.edit()?.putStringSet("printed_keys", updated)?.apply()
+        } catch (_: Exception) {}
+    }
+
+    fun markCurrentBatchAsPrinted() {
+        val currentKey = _selectedPrintableBatchKey.value
+        if (!currentKey.isNullOrBlank()) {
+            markBatchAsPrinted(currentKey)
+        }
     }
 
     fun deleteSavedRouter(id: Long) {
@@ -2734,53 +2622,78 @@ class MainViewModel(
             val ctx = appContext
             if (ctx != null) {
                 viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    com.example.data.local.RouterCacheManager.saveSnapshot(
-                        context = ctx,
-                        ipAddress = snapshot.ipAddress,
-                        routerName = snapshot.routerName,
-                        resource = snapshot.resource,
-                        routerBoard = snapshot.routerBoard,
-                        cards = snapshot.cards,
-                        profiles = snapshot.profiles,
-                        activeUsers = snapshot.activeUsers,
-                        servers = snapshot.servers,
-                        nodes = snapshot.nodes,
-                        logs = snapshot.logs,
-                        ipBindings = snapshot.ipBindings
-                    )
-                    
-                    // Persist logs to Room
+                    val hasMeaningfulData = snapshot.cards.isNotEmpty() ||
+                        snapshot.activeUsers.isNotEmpty() ||
+                        snapshot.nodes.isNotEmpty() ||
+                        snapshot.profiles.isNotEmpty()
+                    if (hasMeaningfulData) {
+                        val nowMs = System.currentTimeMillis()
+                        val sig = "${snapshot.ipAddress}|${snapshot.cards.size}|${snapshot.profiles.size}|${snapshot.activeUsers.size}|${snapshot.nodes.size}"
+                        if (sig != lastSnapshotSignature || (nowMs - lastSnapshotSaveTimeMs) >= 30_000L) {
+                            lastSnapshotSignature = sig
+                            lastSnapshotSaveTimeMs = nowMs
+                            com.example.data.local.RouterCacheManager.saveSnapshot(
+                                context = ctx,
+                                ipAddress = snapshot.ipAddress,
+                                routerName = snapshot.routerName,
+                                resource = snapshot.resource,
+                                routerBoard = snapshot.routerBoard,
+                                cards = snapshot.cards,
+                                profiles = snapshot.profiles,
+                                activeUsers = snapshot.activeUsers,
+                                servers = snapshot.servers,
+                                nodes = snapshot.nodes,
+                                logs = snapshot.logs,
+                                ipBindings = snapshot.ipBindings
+                            )
+                        }
+                    }
+
+                    // Persist only unseen logs to Room & Cloud so 8s refreshes do not flood DB/Firestore
                     val dao = database.appDao()
                     snapshot.logs.forEach { log ->
-                        val timestamp = System.currentTimeMillis()
-                        val insertedId = dao.insertSystemEventLog(
-                            SystemEventLogEntity(
-                                actionType = if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام",
-                                targetType = "راوتر",
-                                targetName = "سجل خارجي",
-                                description = log.message,
-                                details = "Topic: ${log.topics}",
-                                timestamp = timestamp
+                        val logKey = "${log.time}|${log.topics}|${log.message}"
+                        val isNewLog = synchronized(seenRouterLogKeys) {
+                            if (seenRouterLogKeys.size > 500) {
+                                val first = seenRouterLogKeys.firstOrNull()
+                                if (first != null) seenRouterLogKeys.remove(first)
+                            }
+                            seenRouterLogKeys.add(logKey)
+                        }
+                        if (isNewLog && log.message.isNotBlank()) {
+                            val timestamp = System.currentTimeMillis()
+                            val insertedId = dao.insertSystemEventLog(
+                                SystemEventLogEntity(
+                                    actionType = if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام",
+                                    targetType = "راوتر",
+                                    targetName = "سجل خارجي",
+                                    description = log.message,
+                                    details = "Topic: ${log.topics}",
+                                    timestamp = timestamp
+                                )
                             )
-                        )
-                        
-                        // Sync to Cloud
-                        syncToCloud("systemLogs", insertedId.toString(), mapOf(
-                            "id" to insertedId.toString(),
-                            "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
-                            "actionType" to (if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام"),
-                            "targetType" to "راوتر",
-                            "targetName" to "سجل خارجي",
-                            "description" to log.message,
-                            "status" to "INFO",
-                            "operatorUsername" to "system"
-                        ))
+
+                            syncToCloud("systemLogs", insertedId.toString(), mapOf(
+                                "id" to insertedId.toString(),
+                                "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
+                                "actionType" to (if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام"),
+                                "targetType" to "راوتر",
+                                "targetName" to "سجل خارجي",
+                                "description" to log.message,
+                                "status" to "INFO",
+                                "operatorUsername" to "system"
+                            ))
+                        }
                     }
                 }
             }
         }
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                // Remove legacy synthetic sess_card_* archive snapshots that poisoned historical months
+                database.appDao().deleteLegacyCardSnapshotSessions()
+            } catch (_: Exception) {}
             repository.initializeFromLocalDatabase()
             val ctx = appContext
             if (ctx != null) {
@@ -2835,6 +2748,45 @@ class MainViewModel(
             }
         }
 
+        // Monthly Profit Records Persistence Collector (loop-free, never clobbers non-zero history with zeros)
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            monthlySalesList
+                .collectLatest { months ->
+                    if (months.isEmpty()) return@collectLatest
+                    try {
+                        val existingByKey = database.appDao().getAllMonthlyProfitRecordsSync().associateBy { it.monthKey }
+                        val ts = System.currentTimeMillis()
+                        val entities = months.mapNotNull { m ->
+                            val isZero = m.totalRevenue == 0.0 && m.totalCardsSold == 0 && m.totalCardsGenerated == 0 && m.totalBytesConsumed == 0L
+                            val prev = existingByKey[m.monthKey]
+                            val prevHasData = prev != null && (prev.totalRevenue > 0.0 || prev.soldCardsCount > 0 || prev.totalCardsCount > 0 || prev.totalBytesConsumed > 0L)
+                            if (isZero && prevHasData) {
+                                null
+                            } else {
+                                val topPkg = m.packageBreakdown.firstOrNull()?.packageName ?: ""
+                                com.example.data.local.MonthlyProfitRecordEntity(
+                                    monthKey = m.monthKey,
+                                    monthNameAr = m.monthName,
+                                    year = m.monthKey.substringBefore("-").toIntOrNull() ?: 2026,
+                                    month = m.monthKey.substringAfter("-").toIntOrNull() ?: 1,
+                                    totalRevenue = m.totalRevenue,
+                                    totalCost = m.totalCost,
+                                    netProfit = m.netProfit,
+                                    soldCardsCount = m.totalCardsSold,
+                                    totalCardsCount = m.totalCardsGenerated,
+                                    topSellingProfile = topPkg,
+                                    totalBytesConsumed = m.totalBytesConsumed,
+                                    lastUpdatedTimestamp = ts
+                                )
+                            }
+                        }
+                        if (entities.isNotEmpty()) {
+                            database.appDao().insertOrUpdateMonthlyProfitRecords(entities)
+                        }
+                    } catch (_: Exception) {}
+                }
+        }
+
         viewModelScope.launch {
             delay(2500)
             checkForUpdates(isManual = false)
@@ -2845,23 +2797,35 @@ class MainViewModel(
                 checkAndMarkSoldCards(cardList)
             }
         }
-        viewModelScope.launch {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             activeUsers.collectLatest { activeList ->
                 val now = System.currentTimeMillis()
                 val nowFormatted = com.example.data.network.NetworkUtils.formatArabicFullDateTime(now)
                 val currentCards = cards.value
+                val dao = database.appDao()
 
                 if (activeList.isNotEmpty()) {
-                    activeList.forEach { user ->
-                        database.appDao().markCardAsSold(user.user, now)
-                        syncToCloud("posCards", user.user, mapOf(
-                            "isSold" to true,
-                            "soldAt" to com.google.firebase.Timestamp(java.util.Date(now))
-                        ))
+                    try {
+                        val unsoldAssigned = dao.getUnsoldAssignedCardNamesSync().toSet()
+                        val newlySoldActive = activeList.map { it.user }.filter { unsoldAssigned.contains(it) }
+                        if (newlySoldActive.isNotEmpty()) {
+                            newlySoldActive.chunked(400).forEach { chunk ->
+                                dao.markCardsAsSoldBatch(chunk, now)
+                            }
+                            val soldTs = com.google.firebase.Timestamp(java.util.Date(now))
+                            newlySoldActive.forEach { cardName ->
+                                syncToCloud("posCards", cardName, mapOf(
+                                    "isSold" to true,
+                                    "soldAt" to soldTs
+                                ))
+                            }
+                        }
+                    } catch (_: Exception) {}
 
+                    activeList.forEach { user ->
                         // Persistent subscriber login tracking (تاريخ تسجيل الدخول والأجهزة والأوقات)
                         try {
-                            val activeLogin = database.appDao().getActiveLoginForUser(user.user)
+                            val activeLogin = dao.getActiveLoginForUser(user.user)
                             val card = currentCards.firstOrNull { it.name == user.user }
                             val cardProf = card?.profile?.ifBlank { "افتراضي" } ?: "افتراضي"
                             val cardPrice = card?.price?.ifBlank { "غير محدد" } ?: "غير محدد"
@@ -2889,9 +2853,8 @@ class MainViewModel(
                                     packageLimitBytes = quotaLimitBytes,
                                     timestamp = now
                                 )
-                                val insertedId = database.appDao().insertLoginHistory(loginEntity)
-                                
-                                // Sync to Cloud
+                                val insertedId = dao.insertLoginHistory(loginEntity)
+
                                 syncToCloud("loginHistory", insertedId.toString(), mapOf(
                                     "id" to insertedId.toString(),
                                     "username" to user.user,
@@ -2901,25 +2864,31 @@ class MainViewModel(
                                     "profile" to cardProf
                                 ))
                             } else {
-                                database.appDao().updateActiveLoginStats(
-                                    username = user.user,
-                                    bytesIn = user.bytesIn,
-                                    bytesOut = user.bytesOut,
-                                    totalBytes = user.bytesIn + user.bytesOut,
-                                    duration = user.uptime.ifBlank { "0s" }
-                                )
+                                val statsSig = "${user.bytesIn}|${user.bytesOut}|${user.uptime}"
+                                if (lastActiveLoginStatsCache[user.user] != statsSig) {
+                                    lastActiveLoginStatsCache[user.user] = statsSig
+                                    dao.updateActiveLoginStats(
+                                        username = user.user,
+                                        bytesIn = user.bytesIn,
+                                        bytesOut = user.bytesOut,
+                                        totalBytes = user.bytesIn + user.bytesOut,
+                                        duration = user.uptime.ifBlank { "0s" }
+                                    )
+                                }
                             }
                         } catch (_: Exception) {}
                     }
                 }
 
-                // Detect users who disconnected since last check to archive their logout and reason
+                // Detect users who disconnected since last check ONLY when actively online (never during offline drops)
+                val isOnlineConnected = _connectionState.value.let { it is ConnectionState.Connected && !it.isOffline }
                 val currentNames = activeList.map { it.user }.toSet()
-                if (previousActiveUsernames.isNotEmpty()) {
+                if (isOnlineConnected && previousActiveUsernames.isNotEmpty()) {
                     val disconnectedNames = previousActiveUsernames - currentNames
                     if (disconnectedNames.isNotEmpty()) {
                         val logoutTimeFormatted = com.example.data.network.NetworkUtils.formatArabicFullDateTime(System.currentTimeMillis())
                         disconnectedNames.forEach { discoName ->
+                            lastActiveLoginStatsCache.remove(discoName)
                             val matchingCard = currentCards.firstOrNull { it.name == discoName }
                             val isQuotaOver = matchingCard != null && matchingCard.limitBytesTotal > 0L && (matchingCard.bytesIn + matchingCard.bytesOut) >= matchingCard.limitBytesTotal
                             val isTimeOver = matchingCard != null && matchingCard.limitUptime.isNotBlank() && matchingCard.uptime == matchingCard.limitUptime
@@ -2931,13 +2900,13 @@ class MainViewModel(
                             }
                             try {
                                 val targetSessionId = "sess_active_$discoName"
-                                database.appDao().markSessionOffline(targetSessionId, logoutTimeFormatted, reason, isQuotaOver)
+                                dao.markSessionOffline(targetSessionId, logoutTimeFormatted, reason, isQuotaOver)
 
                                 val bytesIn = matchingCard?.bytesIn ?: 0L
                                 val bytesOut = matchingCard?.bytesOut ?: 0L
                                 val duration = matchingCard?.uptime ?: "0s"
                                 val telemetry = repository.getLastKnownTelemetryForUser(discoName)
-                                database.appDao().finalizeUserLogin(
+                                dao.finalizeUserLogin(
                                     username = discoName,
                                     logoutTime = logoutTimeFormatted,
                                     duration = duration,
@@ -2956,15 +2925,24 @@ class MainViewModel(
                         }
                     }
                 }
-                previousActiveUsernames = currentNames
+                if (isOnlineConnected || activeList.isNotEmpty()) {
+                    previousActiveUsernames = currentNames
+                }
             }
         }
-        viewModelScope.launch {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             userSessions.collectLatest { sessionList ->
-                if (sessionList.isNotEmpty()) {
+                // Only archive real sessions (never overwrite history with synthetic sess_card_* inventory rows)
+                val realSessions = sessionList.filter { !it.id.startsWith("sess_card_") }
+                if (realSessions.isNotEmpty()) {
                     try {
-                        val entities = sessionList.map { session ->
-                            val archiveAt = System.currentTimeMillis()
+                        val now = System.currentTimeMillis()
+                        val changedEntities = mutableListOf<com.example.data.local.SessionArchiveEntity>()
+                        for (session in realSessions) {
+                            val sig = "${session.isOnline}|${session.duration}|${session.totalBytes}|${session.logoutTime}"
+                            if (lastArchivedSessionSignatures[session.id] == sig) continue
+                            lastArchivedSessionSignatures[session.id] = sig
+
                             val entity = com.example.data.local.SessionArchiveEntity(
                                 sessionId = session.id,
                                 username = session.username,
@@ -2986,10 +2964,10 @@ class MainViewModel(
                                 deviceCategory = session.deviceInfo.category.name,
                                 packageLimitBytes = session.packageLimitBytes,
                                 isQuotaExhausted = session.isQuotaExhausted,
-                                timestamp = archiveAt
+                                timestamp = now
                             )
-                            
-                            // Sync to Cloud
+                            changedEntities.add(entity)
+
                             syncToCloud("sessionArchive", session.id, mapOf(
                                 "id" to session.id,
                                 "username" to session.username,
@@ -2999,11 +2977,12 @@ class MainViewModel(
                                 "logoutTime" to session.logoutTime,
                                 "duration" to session.duration,
                                 "totalBytes" to session.totalBytes,
-                                "timestamp" to com.google.firebase.Timestamp(java.util.Date(archiveAt))
+                                "timestamp" to com.google.firebase.Timestamp(java.util.Date(now))
                             ))
-                            entity
                         }
-                        database.appDao().insertOrUpdateSessions(entities)
+                        if (changedEntities.isNotEmpty()) {
+                            database.appDao().insertOrUpdateSessions(changedEntities)
+                        }
                     } catch (_: Exception) {}
                 }
             }
@@ -3017,7 +2996,290 @@ class MainViewModel(
         super.onCleared()
         stopAutoRefresh()
     }
+
+    companion object {
+        internal fun parseBatchPriceValue(priceStr: String): Double {
+            return FinanceAnalyticsEngine.parsePriceValue(priceStr)
+        }
+
+        internal fun partitionCardsIntoIndependentBatches(
+            allCards: List<HotspotCard>,
+            activeUserNamesLower: Set<String>,
+            batches: List<BatchHistoryEntity>,
+            printedKeys: Set<String>,
+            timestampProvider: (HotspotCard) -> Long
+        ): IndependentBatchPartitionResult {
+            val distinctCards = allCards.distinctBy { it.name.lowercase() }
+            if (distinctCards.isEmpty()) {
+                return IndependentBatchPartitionResult()
+            }
+
+            fun isCardReady(card: HotspotCard): Boolean {
+                val lower = card.name.lowercase()
+                return !activeUserNamesLower.contains(lower) &&
+                    (card.uptime.isBlank() || card.uptime == "0s") &&
+                    card.bytesIn == 0L && card.bytesOut == 0L && !card.isExpired
+            }
+
+            fun computeBatchGroup(
+                batchKey: String,
+                title: String,
+                profile: String,
+                price: String,
+                timestamp: Long,
+                formattedDate: String,
+                cardsInBatch: List<HotspotCard>,
+                expectedCount: Int,
+                batchNumber: Int
+            ): Pair<CardBatchGroup, com.example.data.model.PrintableBatchOption> {
+                val normalized = cardsInBatch.map { card ->
+                    if (card.price.isBlank() && price.isNotBlank()) card.copy(price = price) else card
+                }
+                val readyList = normalized.filter(::isCardReady)
+                var activeCnt = 0
+                var usedOfflineCnt = 0
+                var expiredCnt = 0
+                for (c in normalized) {
+                    val lower = c.name.lowercase()
+                    when {
+                        c.isExpired -> expiredCnt++
+                        activeUserNamesLower.contains(lower) -> activeCnt++
+                        !isCardReady(c) -> usedOfflineCnt++
+                    }
+                }
+                val totalVal = normalized.sumOf { parseBatchPriceValue(it.price.ifBlank { price }) }
+                val isPrinted = printedKeys.contains(batchKey)
+                val firstCard = normalized.first()
+                val resolvedProfile = profile.ifBlank { firstCard.profile }
+                val resolvedPrice = price.ifBlank { firstCard.price }
+                val hasUm = normalized.any { it.isUserManagerCard }
+                val hasHs = normalized.any { it.isHotspotCard }
+                val sysLabel = when {
+                    hasUm && hasHs -> "مختلط"
+                    hasUm -> "يوزرمانجر"
+                    else -> "هوتسبوت"
+                }
+
+                val group = CardBatchGroup(
+                    batchKey = batchKey,
+                    title = title,
+                    profile = resolvedProfile,
+                    price = resolvedPrice,
+                    timestamp = timestamp,
+                    formattedDate = formattedDate,
+                    totalValue = totalVal,
+                    cards = normalized,
+                    allBatchCards = normalized,
+                    readyCards = readyList,
+                    totalGeneratedCount = maxOf(expectedCount, normalized.size),
+                    readyCount = readyList.size,
+                    activeCount = activeCnt,
+                    usedOfflineCount = usedOfflineCnt,
+                    expiredCount = expiredCnt,
+                    isPrintedBefore = isPrinted,
+                    batchNumber = batchNumber,
+                    sourceSystemLabel = sysLabel
+                )
+                val printOption = com.example.data.model.PrintableBatchOption(
+                    batchKey = batchKey,
+                    title = if (batchNumber > 0) "#$batchNumber • $title" else title,
+                    profileName = resolvedProfile,
+                    price = resolvedPrice,
+                    timestamp = timestamp,
+                    formattedDate = formattedDate,
+                    readyCards = readyList,
+                    allCardsInBatch = normalized,
+                    isPrintedBefore = isPrinted,
+                    isNewlyAdded = !isPrinted && readyList.isNotEmpty()
+                )
+                return group to printOption
+            }
+
+            // Pre-parse explicit card sets for each saved BatchHistoryEntity
+            val parsedNamesByBatchId = mutableMapOf<String, Set<String>>()
+            val allExplicitSavedNames = mutableSetOf<String>()
+            batches.forEach { batch ->
+                val names = mutableSetOf<String>()
+                if (batch.cardsJson.isNotBlank()) {
+                    try {
+                        val arr = JSONArray(batch.cardsJson)
+                        for (i in 0 until arr.length()) {
+                            val n = arr.optString(i, "").trim().lowercase()
+                            if (n.isNotBlank()) {
+                                names.add(n)
+                                allExplicitSavedNames.add(n)
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+                parsedNamesByBatchId[batch.batchId] = names
+            }
+
+            val batchNumberById = batches
+                .sortedWith(compareBy<BatchHistoryEntity> { it.createdAt }.thenBy { it.batchId })
+                .mapIndexed { idx, batch -> batch.batchId to (idx + 1) }
+                .toMap()
+
+            val consumedNames = mutableSetOf<String>()
+            val batchGroups = mutableListOf<CardBatchGroup>()
+            val printOptions = mutableListOf<com.example.data.model.PrintableBatchOption>()
+
+            // 1. Strictly isolate every saved BatchHistoryEntity into its own independent group
+            batches.sortedWith(
+                compareByDescending<BatchHistoryEntity> { it.createdAt }
+                    .thenByDescending { it.batchId }
+            ).forEach { batch ->
+                val savedNames = parsedNamesByBatchId[batch.batchId].orEmpty()
+                val directMatches = distinctCards.filter {
+                    val lower = it.name.lowercase()
+                    !consumedNames.contains(lower) && savedNames.contains(lower)
+                }.toMutableList()
+
+                // Fallback strictly for legacy DB entries where cardsJson was truncated to 10 names
+                if (savedNames.size < batch.cardCount && directMatches.size < batch.cardCount) {
+                    val needed = (batch.cardCount - directMatches.size).coerceAtLeast(0)
+                    val extraMatches = distinctCards.filter { card ->
+                        val lower = card.name.lowercase()
+                        if (consumedNames.contains(lower) || savedNames.contains(lower)) return@filter false
+                        // Never steal cards explicitly recorded under another batch
+                        if (allExplicitSavedNames.contains(lower)) return@filter false
+                        val matchesCommentAndProfile = batch.name.isNotBlank() &&
+                            card.comment.equals(batch.name, ignoreCase = true) &&
+                            card.profile.equals(batch.profileName, ignoreCase = true)
+                        val cardTs = timestampProvider(card)
+                        val matchesTimestampAndProfile = cardTs > 0L &&
+                            kotlin.math.abs(cardTs - batch.createdAt) <= 120_000L &&
+                            card.profile.equals(batch.profileName, ignoreCase = true)
+                        matchesCommentAndProfile || matchesTimestampAndProfile
+                    }.take(needed)
+                    directMatches.addAll(extraMatches)
+                }
+
+                if (directMatches.isNotEmpty()) {
+                    directMatches.forEach { consumedNames.add(it.name.lowercase()) }
+                    val formattedDate = if (batch.createdAt > 0L) {
+                        NetworkUtils.formatArabicFullDateTime(batch.createdAt)
+                    } else {
+                        "دفعة مسجلة"
+                    }
+                    val title = batch.name.ifBlank { "دفعة (${batch.profileName})" }
+                    val (group, opt) = computeBatchGroup(
+                        batchKey = batch.batchId,
+                        title = title,
+                        profile = batch.profileName,
+                        price = batch.price,
+                        timestamp = batch.createdAt,
+                        formattedDate = formattedDate,
+                        cardsInBatch = directMatches,
+                        expectedCount = batch.cardCount,
+                        batchNumber = batchNumberById[batch.batchId] ?: 0
+                    )
+                    batchGroups.add(group)
+                    printOptions.add(opt)
+                }
+            }
+
+            // 2. Group remaining batch-like router cards WITHOUT merging separate batches generated at different times
+            val remainingCards = distinctCards.filter { !consumedNames.contains(it.name.lowercase()) }
+            val commentCounts = remainingCards.groupingBy { it.comment.trim() }.eachCount()
+            val remainingBatchCards = remainingCards.filter { card ->
+                val c = card.comment.lowercase()
+                when {
+                    c.contains("فردي") -> false
+                    c.contains("دفعة") || c.contains("batch") -> true
+                    card.id.startsWith("gen_") -> true
+                    card.comment.isNotBlank() && (commentCounts[card.comment.trim()] ?: 0) > 1 -> true
+                    else -> false
+                }
+            }
+
+            // Partition into gen_-timestamped batches vs time-clustered router groups
+            val routerClusters = linkedMapOf<String, List<HotspotCard>>()
+            val (genCards, nonGenCards) = remainingBatchCards.partition {
+                it.id.startsWith("gen_") && (it.id.split("_").getOrNull(1)?.toLongOrNull() != null)
+            }
+
+            genCards.groupBy { card ->
+                val genTs = card.id.split("_").getOrNull(1)?.toLongOrNull() ?: 0L
+                val bucket = genTs / 5_000L
+                "router_gen_${bucket}_${card.profile.trim().lowercase()}"
+            }.forEach { (k, list) ->
+                routerClusters[k] = list
+            }
+
+            nonGenCards.groupBy { card ->
+                card.comment.trim().lowercase() to card.profile.trim().lowercase()
+            }.forEach { (pairKey, cardsInPair) ->
+                val sortedByTime = cardsInPair.sortedBy { timestampProvider(it) }
+                var clusterIdx = 0
+                var currentCluster = mutableListOf<HotspotCard>()
+                var prevTs = 0L
+                for (card in sortedByTime) {
+                    val ts = timestampProvider(card)
+                    if (currentCluster.isNotEmpty() && prevTs > 0L && ts > 0L && kotlin.math.abs(ts - prevTs) > 120_000L) {
+                        val clusterKey = "router_grp_${pairKey.first.hashCode()}_${pairKey.second.hashCode()}_$clusterIdx"
+                        routerClusters[clusterKey] = currentCluster
+                        clusterIdx++
+                        currentCluster = mutableListOf()
+                    }
+                    currentCluster.add(card)
+                    if (ts > 0L) prevTs = ts
+                }
+                if (currentCluster.isNotEmpty()) {
+                    val clusterKey = "router_grp_${pairKey.first.hashCode()}_${pairKey.second.hashCode()}_$clusterIdx"
+                    routerClusters[clusterKey] = currentCluster
+                }
+            }
+
+            routerClusters.forEach { (key, cardsInGroup) ->
+                cardsInGroup.forEach { consumedNames.add(it.name.lowercase()) }
+                val first = cardsInGroup.first()
+                val ts = cardsInGroup.maxOfOrNull { timestampProvider(it) } ?: 0L
+                val formattedDate = if (ts > 0L) NetworkUtils.formatArabicFullDateTime(ts) else "تاريخ محفوظ في الراوتر"
+                val title = when {
+                    first.comment.isNotBlank() && first.comment != "دفعة كروت" -> first.comment
+                    first.price.isNotBlank() -> "مجموعة (${first.profile}) - ${first.price}"
+                    else -> "مجموعة (${first.profile})"
+                }
+                val (group, opt) = computeBatchGroup(
+                    batchKey = key,
+                    title = title,
+                    profile = first.profile,
+                    price = first.price,
+                    timestamp = ts,
+                    formattedDate = formattedDate,
+                    cardsInBatch = cardsInGroup,
+                    expectedCount = cardsInGroup.size,
+                    batchNumber = 0
+                )
+                batchGroups.add(group)
+                printOptions.add(opt)
+            }
+
+            val ungrouped = distinctCards.filter { !consumedNames.contains(it.name.lowercase()) }
+            val sortedGroups = batchGroups.sortedWith(
+                compareByDescending<CardBatchGroup> { it.timestamp }
+                    .thenByDescending { it.batchNumber }
+                    .thenByDescending { it.batchKey }
+            )
+            val sortedPrintOptions = printOptions.sortedWith(
+                compareByDescending<com.example.data.model.PrintableBatchOption> { it.isNewlyAdded }
+                    .thenByDescending { it.timestamp }
+            )
+            return IndependentBatchPartitionResult(
+                batchGroups = sortedGroups,
+                ungroupedCards = ungrouped,
+                printableOptions = sortedPrintOptions
+            )
+        }
+    }
 }
+
+data class IndependentBatchPartitionResult(
+    val batchGroups: List<CardBatchGroup> = emptyList(),
+    val ungroupedCards: List<HotspotCard> = emptyList(),
+    val printableOptions: List<com.example.data.model.PrintableBatchOption> = emptyList()
+)
 
 class MainViewModelFactory(
     private val repository: MikrotikRepository,

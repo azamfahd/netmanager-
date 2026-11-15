@@ -79,6 +79,7 @@ import com.example.ui.theme.CyberGreenBright
 import com.example.ui.theme.CyberGreenNeon
 import com.example.ui.theme.CyberGreenPrimary
 import com.example.ui.theme.NetworkCyan
+import com.example.ui.theme.StatusActiveGreen
 import com.example.ui.theme.StatusErrorRed
 import com.example.ui.viewmodel.MainViewModel
 
@@ -88,6 +89,7 @@ fun DashboardScreen(
     onNavigateToActiveUsers: () -> Unit,
     onNavigateToCards: () -> Unit,
     onNavigateToProfiles: () -> Unit,
+    onNavigateToNodes: () -> Unit,
     onOpenBatchGenerator: () -> Unit,
     onOpenPrintScreen: () -> Unit,
     onNavigateToFinance: () -> Unit = {},
@@ -145,27 +147,29 @@ fun DashboardScreen(
             )
         }
 
-        // 3. Network Health & Nodes Mini Summary (ملخص المنظومة والأبراج)
+        // 3. Advanced Network Nodes & Towers Summary Card (قسم الأبراج ونقاط البث الاحترافي)
         item {
-            CyberSystemSummaryRow(
-                onlineNodesCount = networkNodes.count { it.isOnline },
-                totalNodesCount = networkNodes.size,
-                activeUsersCount = activeUsers.size,
-                availableCardsCount = cards.count { !it.isActive && !it.isExpired }
+            CyberTowersSummaryCard(
+                networkNodes = networkNodes,
+                onNavigateToNodes = onNavigateToNodes
             )
         }
 
         // 4. Interactive 2x2 Cyber Metrics Matrix (مصفوفة الإحصائيات الذكية)
         item {
+            val totalClientsAcrossNodes = remember(networkNodes) { networkNodes.sumOf { it.connectedUsers } }
             CyberMetricsMatrix(
                 activeUsersCount = activeUsers.size,
+                onlineNodesCount = onlineNodesCount,
                 totalCardsCount = cards.size,
-                availableCardsCount = cards.count { !it.isActive && !it.isExpired },
+                availableCardsCount = availableCardsCount,
                 cpuLoad = resource.cpuLoad,
                 freeMemoryBytes = resource.freeMemoryBytes,
                 totalMemoryBytes = resource.totalMemoryBytes,
                 onActiveUsersClick = onNavigateToActiveUsers,
-                onCardsClick = onNavigateToCards
+                onCardsClick = onNavigateToCards,
+                onNodesClick = onNavigateToNodes,
+                nodesSubtitle = "$totalClientsAcrossNodes مشترك عبر الأبراج"
             )
         }
 
@@ -701,28 +705,55 @@ private fun CyberTrafficHudCard(
                     )
                 }
 
-                Surface(
-                    color = CyberGreenBright.copy(alpha = 0.12f),
-                    shape = RoundedCornerShape(8.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    val totalSpeedKbps = rxSpeedKbps + txSpeedKbps
+                    val (qualityLabel, qualityColor, qualityBg) = when {
+                        totalSpeedKbps >= 10240.0 -> Triple("السرعة: ممتازة وقوية جداً ⚡", Color(0xFF00E676), Color(0xFF00E676).copy(alpha = 0.15f))
+                        totalSpeedKbps >= 3072.0 -> Triple("السرعة: جيدة ومستقرة 📶", Color(0xFF00E5FF), Color(0xFF00E5FF).copy(alpha = 0.15f))
+                        totalSpeedKbps >= 512.0 -> Triple("السرعة: متوسطة / مقبولة", Color(0xFFFFB300), Color(0xFFFFB300).copy(alpha = 0.15f))
+                        else -> Triple("السرعة: ضعيفة أو هادئة", Color(0xFF9E9E9E), Color(0xFF9E9E9E).copy(alpha = 0.15f))
+                    }
+
+                    Surface(
+                        color = qualityBg,
+                        shape = RoundedCornerShape(8.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(CyberGreenNeon)
-                        )
                         Text(
-                            text = "بث فوري",
+                            text = qualityLabel,
                             style = MaterialTheme.typography.labelSmall,
-                            color = CyberGreenBright,
+                            color = qualityColor,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp)
                         )
+                    }
+
+                    Surface(
+                        color = CyberGreenBright.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(CyberGreenNeon)
+                            )
+                            Text(
+                                text = "مباشر",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyberGreenBright,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp
+                            )
+                        }
                     }
                 }
             }
@@ -830,68 +861,139 @@ private fun CyberSpeedMeter(
 }
 
 /**
- * 3. Cyber System Summary Strip
+ * 3. Advanced Cyber Towers & Distribution Nodes Summary Card (بطاقة أبراج ونقاط البث الاحترافية)
  */
 @Composable
-private fun CyberSystemSummaryRow(
-    onlineNodesCount: Int,
-    totalNodesCount: Int,
-    activeUsersCount: Int,
-    availableCardsCount: Int
+private fun CyberTowersSummaryCard(
+    networkNodes: List<com.example.data.model.NetworkNode>,
+    onNavigateToNodes: () -> Unit
 ) {
+    val onlineCount = networkNodes.count { it.isOnline }
+    val totalCount = networkNodes.size
+    val towersCount = networkNodes.count { it.nodeType == com.example.data.model.NetworkNodeType.MAIN_TOWER }
+    val distCount = networkNodes.count { it.nodeType == com.example.data.model.NetworkNodeType.DISTRIBUTION }
+    val homeCount = networkNodes.count { it.nodeType == com.example.data.model.NetworkNodeType.HOME_NODE }
+    val totalClients = networkNodes.sumOf { it.connectedUsers }
+
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onNavigateToNodes() },
+        shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+            containerColor = MaterialTheme.colorScheme.surface
         ),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+        border = BorderStroke(1.dp, NetworkCyan.copy(alpha = 0.3f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Nodes Status
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.CellTower,
-                    contentDescription = null,
-                    tint = CyberGreenPrimary,
-                    modifier = Modifier.size(16.dp)
-                )
-                Text(
-                    text = "الأبراج: $onlineNodesCount/$totalNodesCount نشط",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(NetworkCyan.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CellTower,
+                            contentDescription = null,
+                            tint = NetworkCyan,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "قسم الأبراج ونقاط البث",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "حالة أبراج التوزيع وربط الشبكة اللاسلكية",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Surface(
+                    color = (if (onlineCount == totalCount && totalCount > 0) StatusActiveGreen else StatusErrorRed).copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = "$onlineCount/$totalCount متصل",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (onlineCount == totalCount && totalCount > 0) StatusActiveGreen else StatusErrorRed,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
             }
 
-            // Cards Status
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.ConfirmationNumber,
-                    contentDescription = null,
-                    tint = NetworkCyan,
-                    modifier = Modifier.size(16.dp)
-                )
-                Text(
-                    text = "الكروت: $availableCardsCount جاهز للبيع",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text("الأبراج الرئيسية", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$towersCount برج", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text("نقاط التوزيع", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$distCount نقطة", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text("المشتركين/العملاء", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$totalClients عميل", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = CyberGreenBright)
+                    }
+                }
+            }
+
+            OutlinedButton(
+                onClick = onNavigateToNodes,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.CellTower, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("استعراض خريطة الشبكة والأبراج بالكامل", fontWeight = FontWeight.Bold, fontSize = 12.sp)
             }
         }
     }
 }
+
 
 /**
  * 4. Interactive 2x2 Cyber Metrics Matrix
@@ -899,13 +1001,16 @@ private fun CyberSystemSummaryRow(
 @Composable
 private fun CyberMetricsMatrix(
     activeUsersCount: Int,
+    onlineNodesCount: Int,
     totalCardsCount: Int,
     availableCardsCount: Int,
     cpuLoad: Int,
     freeMemoryBytes: Long,
     totalMemoryBytes: Long,
     onActiveUsersClick: () -> Unit,
-    onCardsClick: () -> Unit
+    onCardsClick: () -> Unit,
+    onNodesClick: () -> Unit,
+    nodesSubtitle: String = "نقطة بث نشطة"
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -916,7 +1021,7 @@ private fun CyberMetricsMatrix(
             CyberStatCard(
                 title = "المستخدمين النشطين",
                 value = "$activeUsersCount",
-                subtitle = "متصلون الآن بالهوتسبوت",
+                subtitle = "متصلون الآن",
                 icon = Icons.Default.Group,
                 accentColor = CyberGreenBright,
                 modifier = Modifier
@@ -925,17 +1030,17 @@ private fun CyberMetricsMatrix(
                 testTag = "metric_active_users"
             )
 
-            // Total Cards Card
+            // Towers & Nodes Card (The new requested shortcut)
             CyberStatCard(
-                title = "إجمالي الكروت",
-                value = "$totalCardsCount",
-                subtitle = "$availableCardsCount كرت متاح للبيع",
-                icon = Icons.Default.ConfirmationNumber,
+                title = "الأبراج والنقاط",
+                value = "$onlineNodesCount",
+                subtitle = nodesSubtitle,
+                icon = Icons.Default.CellTower,
                 accentColor = NetworkCyan,
                 modifier = Modifier
                     .weight(1f)
-                    .clickable { onCardsClick() },
-                testTag = "metric_total_cards"
+                    .clickable { onNodesClick() },
+                testTag = "metric_network_nodes_shortcut"
             )
         }
 
@@ -943,33 +1048,46 @@ private fun CyberMetricsMatrix(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // Total Cards Card
+            CyberStatCard(
+                title = "إجمالي الكروت",
+                value = "$totalCardsCount",
+                subtitle = "$availableCardsCount كرت متاح",
+                icon = Icons.Default.ConfirmationNumber,
+                accentColor = Color(0xFFFFA000), // Amber
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable { onCardsClick() },
+                testTag = "metric_total_cards"
+            )
+
             // CPU Load Card
             val validCpu = cpuLoad.coerceIn(0, 100)
             val cpuColor = if (validCpu > 75) StatusErrorRed else CyberGreenBright
             CyberProgressCard(
-                title = "استهلاك المعالج CPU",
+                title = "المعالج CPU",
                 percentage = validCpu,
-                detailText = "حمل المعالج: $validCpu%",
+                detailText = "$validCpu%",
                 accentColor = cpuColor,
                 icon = Icons.Default.Memory,
                 modifier = Modifier.weight(1f)
             )
-
-            // RAM Memory Card
-            val memUsedPercent = if (totalMemoryBytes > 0L) {
-                ((totalMemoryBytes - freeMemoryBytes).toFloat() / totalMemoryBytes * 100f).toInt().coerceIn(1, 99)
-            } else {
-                35
-            }
-            CyberProgressCard(
-                title = "استهلاك الذاكرة RAM",
-                percentage = memUsedPercent,
-                detailText = "${NetworkUtils.formatBytes(freeMemoryBytes)} متاح",
-                accentColor = NetworkCyan,
-                icon = Icons.Default.Storage,
-                modifier = Modifier.weight(1f)
-            )
         }
+
+        // RAM Memory Card (Moved to full width bottom row for better balance)
+        val memUsedPercent = if (totalMemoryBytes > 0L) {
+            ((totalMemoryBytes - freeMemoryBytes).toFloat() / totalMemoryBytes * 100f).toInt().coerceIn(1, 99)
+        } else {
+            35
+        }
+        CyberProgressCard(
+            title = "استهلاك الذاكرة RAM",
+            percentage = memUsedPercent,
+            detailText = "${NetworkUtils.formatBytes(freeMemoryBytes)} متاح من ${NetworkUtils.formatBytes(totalMemoryBytes)}",
+            accentColor = NetworkCyan,
+            icon = Icons.Default.Storage,
+            modifier = Modifier.fillMaxWidth()
+        )
     }
 }
 
