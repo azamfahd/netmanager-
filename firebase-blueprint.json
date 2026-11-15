@@ -1,0 +1,115 @@
+{
+  "version": "1.1",
+  "collections": [
+    {
+      "name": "users/{uid}/routers",
+      "fields": {
+        "id": "string",
+        "name": "string",
+        "ipAddress": "string",
+        "port": "number",
+        "username": "string",
+        "useHttps": "boolean",
+        "isDemoMode": "boolean"
+      }
+    },
+    {
+      "name": "users/{uid}/batchHistory",
+      "fields": {
+        "id": "string",
+        "profileName": "string",
+        "count": "number",
+        "timestamp": "timestamp",
+        "comment": "string"
+      }
+    },
+    {
+      "name": "users/{uid}/posAgents",
+      "fields": {
+        "id": "string",
+        "name": "string",
+        "phone": "string",
+        "discountPercent": "number",
+        "balance": "number"
+      }
+    },
+    {
+      "name": "users/{uid}/posCards",
+      "fields": {
+        "id": "string",
+        "agentId": "string",
+        "cardName": "string",
+        "profileName": "string",
+        "priceAmount": "number",
+        "isSold": "boolean",
+        "soldAt": "timestamp"
+      }
+    },
+    {
+      "name": "users/{uid}/posPayments",
+      "fields": {
+        "id": "string",
+        "agentId": "string",
+        "amount": "number",
+        "timestamp": "timestamp",
+        "note": "string"
+      }
+    },
+    {
+      "name": "users/{uid}/packagePricing",
+      "fields": {
+        "profileName": "string",
+        "costPrice": "number",
+        "salePrice": "number",
+        "updatedAt": "timestamp"
+      }
+    },
+    {
+      "name": "users/{uid}/sessionArchive",
+      "fields": {
+        "id": "string",
+        "username": "string",
+        "macAddress": "string",
+        "ipAddress": "string",
+        "loginTime": "string",
+        "logoutTime": "string",
+        "duration": "string",
+        "totalBytes": "number",
+        "timestamp": "timestamp"
+      }
+    },
+    {
+      "name": "users/{uid}/errorLogs",
+      "fields": {
+        "id": "string",
+        "operation": "string",
+        "errorMessage": "string",
+        "timestamp": "timestamp"
+      }
+    },
+    {
+      "name": "users/{uid}/loginHistory",
+      "fields": {
+        "id": "string",
+        "username": "string",
+        "ipAddress": "string",
+        "macAddress": "string",
+        "timestamp": "timestamp",
+        "profile": "string"
+      }
+    },
+    {
+      "name": "users/{uid}/systemLogs",
+      "fields": {
+        "id": "string",
+        "timestamp": "timestamp",
+        "actionType": "string",
+        "targetType": "string",
+        "targetName": "string",
+        "description": "string",
+        "status": "string",
+        "operatorUsername": "string"
+      }
+    }
+  ]
+}

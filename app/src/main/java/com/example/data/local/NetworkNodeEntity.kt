@@ -3,13 +3,10 @@ package com.example.data.local
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-@Entity(
-    tableName = "network_nodes",
-    primaryKeys = ["id", "routerIp"]
-)
+@Entity(tableName = "network_nodes")
 data class NetworkNodeEntity(
+    @PrimaryKey
     val id: String,
-    val routerIp: String = "",
     val name: String,
     val ipAddress: String,
     val macAddress: String = "64:D1:54:3B:88:12",
@@ -43,13 +40,9 @@ data class NetworkNodeEntity(
     val lastCheckTime: Long = System.currentTimeMillis()
 ) {
     companion object {
-        fun fromNetworkNode(
-            node: com.example.data.model.NetworkNode,
-            routerIp: String = ""
-        ): NetworkNodeEntity {
+        fun fromNetworkNode(node: com.example.data.model.NetworkNode): NetworkNodeEntity {
             return NetworkNodeEntity(
                 id = node.id,
-                routerIp = routerIp.trim(),
                 name = node.name,
                 ipAddress = node.ipAddress,
                 macAddress = node.macAddress,
@@ -114,7 +107,6 @@ data class NetworkNodeEntity(
             frequency = frequency,
             channelWidth = channelWidth,
             ssid = ssid,
-            firmwareVersion = firmwareVersion,
             vlanId = vlanId,
             parentInterface = parentInterface,
             lastSeenTime = lastSeenTime,

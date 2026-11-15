@@ -25,62 +25,70 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RouterTaskEntity::class,
         MaterializedSummaryEntity::class
     ],
-    version = 19,
+    version = 17,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun appDao(): AppDao
 
     companion object {
-        val MIGRATION_18_19 = object : Migration(18, 19) {
+        @Volatile
+        private var INSTANCE: AppDatabase? = null
+
+        val MIGRATION_15_16 = object : Migration(15, 16) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL(
-                    """
-                    CREATE TABLE IF NOT EXISTS network_nodes_new (
-                        id TEXT NOT NULL,
-                        routerIp TEXT NOT NULL,
-                        name TEXT NOT NULL,
-                        ipAddress TEXT NOT NULL,
-                        macAddress TEXT NOT NULL,
-                        interfaceName TEXT NOT NULL,
-                        model TEXT NOT NULL,
-                        role TEXT NOT NULL,
-                        nodeType TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        parentTowerId TEXT,
-                        parentTowerName TEXT,
-                        isOnline INTEGER NOT NULL,
-                        pingMs INTEGER NOT NULL,
-                        connectedUsers INTEGER NOT NULL,
-                        uptime TEXT NOT NULL,
-                        rxSpeedKbps REAL NOT NULL,
-                        txSpeedKbps REAL NOT NULL,
-                        totalBytesConsumed INTEGER NOT NULL,
-                        signalDbm TEXT NOT NULL,
-                        location TEXT NOT NULL,
-                        cpuLoadPercent INTEGER NOT NULL,
-                        memoryUsagePercent INTEGER NOT NULL,
-                        temperature TEXT NOT NULL,
-                        voltage TEXT NOT NULL,
-                        frequency TEXT NOT NULL,
-                        channelWidth TEXT NOT NULL,
-                        ssid TEXT NOT NULL,
-                        firmwareVersion TEXT NOT NULL,
-                        vlanId INTEGER,
-                        parentInterface TEXT,
-                        lastSeenTime INTEGER NOT NULL,
-                        lastCheckTime INTEGER NOT NULL,
-                        PRIMARY KEY(id, routerIp)
-                    )
-                    """.trimIndent()
-                )
-                db.execSQL("DROP TABLE IF EXISTS network_nodes")
-                db.execSQL("ALTER TABLE network_nodes_new RENAME TO network_nodes")
+                // Indices for local_cards
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_local_cards_createdTimestamp` ON `local_cards` (`createdTimestamp`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_local_cards_profile` ON `local_cards` (`profile`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_local_cards_disabled` ON `local_cards` (`disabled`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_local_cards_sourceSystem` ON `local_cards` (`sourceSystem`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_local_cards_cardId` ON `local_cards` (`cardId`)")
+
+                // Indices for pos_card_assignments
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_pos_card_assignments_cardName` ON `pos_card_assignments` (`cardName`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_pos_card_assignments_soldAt` ON `pos_card_assignments` (`soldAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_pos_card_assignments_agentId_isSold` ON `pos_card_assignments` (`agentId`, `isSold`)")
+
+                // Indices for router_task_queue
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_router_task_queue_status` ON `router_task_queue` (`status`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_router_task_queue_nextAttemptTimestamp` ON `router_task_queue` (`nextAttemptTimestamp`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_router_task_queue_status_nextAttemptTimestamp` ON `router_task_queue` (`status`, `nextAttemptTimestamp`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_router_task_queue_cardName` ON `router_task_queue` (`cardName`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_router_task_queue_createdAt` ON `router_task_queue` (`createdAt`)")
             }
         }
 
-        @Volatile
-        private var INSTANCE: AppDatabase? = null
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val existingColumns = mutableSetOf<String>()
+                try {
+                    val cursor = db.query("PRAGMA table_info(network_nodes)")
+                    while (cursor.moveToNext()) {
+                        val nameIdx = cursor.getColumnIndex("name")
+                        if (nameIdx >= 0) {
+                            existingColumns.add(cursor.getString(nameIdx))
+                        }
+                    }
+                    cursor.close()
+                } catch (_: Exception) {}
+
+                if (!existingColumns.contains("firmwareVersion")) {
+                    try {
+                        db.execSQL("ALTER TABLE `network_nodes` ADD COLUMN `firmwareVersion` TEXT NOT NULL DEFAULT ''")
+                    } catch (_: Exception) {}
+                }
+                if (!existingColumns.contains("vlanId")) {
+                    try {
+                        db.execSQL("ALTER TABLE `network_nodes` ADD COLUMN `vlanId` INTEGER DEFAULT NULL")
+                    } catch (_: Exception) {}
+                }
+                if (!existingColumns.contains("parentInterface")) {
+                    try {
+                        db.execSQL("ALTER TABLE `network_nodes` ADD COLUMN `parentInterface` TEXT DEFAULT NULL")
+                    } catch (_: Exception) {}
+                }
+            }
+        }
 
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -89,8 +97,8 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "netmanager_database"
                 )
-                    .addMigrations(MIGRATION_18_19)
-                    .fallbackToDestructiveMigration()
+                    .addMigrations(MIGRATION_15_16, MIGRATION_16_17)
+                    .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                 INSTANCE = instance
                 instance

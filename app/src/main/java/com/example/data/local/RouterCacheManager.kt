@@ -47,7 +47,6 @@ object RouterCacheManager {
         return File(context.filesDir, "router_snapshot_$sanitizedIp.json")
     }
 
-    @Synchronized
     fun saveSnapshot(
         context: Context,
         ipAddress: String,
@@ -78,12 +77,6 @@ object RouterCacheManager {
                     put("freeMemoryBytes", resource.freeMemoryBytes)
                     put("totalMemoryBytes", resource.totalMemoryBytes)
                     put("architecture", resource.architecture)
-                    put("rxSpeedKbps", resource.rxSpeedKbps)
-                    put("txSpeedKbps", resource.txSpeedKbps)
-                    put("voltage", resource.voltage)
-                    put("temperature", resource.temperature)
-                    put("cpuFrequency", resource.cpuFrequency)
-                    put("hddFreeBytes", resource.hddFreeBytes)
                 })
 
                 put("routerBoard", JSONObject().apply {
@@ -111,7 +104,6 @@ object RouterCacheManager {
                             put("price", c.price)
                             put("posAgent", c.posAgent)
                             put("cardType", c.cardType)
-                            put("createdAtHint", c.createdAtHint)
                         })
                     }
                 })
@@ -123,17 +115,10 @@ object RouterCacheManager {
                             put("name", p.name)
                             put("sharedUsers", p.sharedUsers)
                             put("rateLimit", p.rateLimit)
-                            put("sessionTimeout", p.sessionTimeout)
-                            put("keepaliveTimeout", p.keepaliveTimeout)
-                            put("uploadLimit", p.uploadLimit)
-                            put("downloadLimit", p.downloadLimit)
                             put("validity", p.validity)
                             put("price", p.price)
                             put("dataLimit", p.dataLimit)
                             put("source", p.source)
-                            put("comment", p.comment)
-                            put("priceNumber", p.priceNumber)
-                            put("costPrice", p.costPrice)
                         })
                     }
                 })
@@ -201,8 +186,6 @@ object RouterCacheManager {
                             put("channelWidth", n.channelWidth)
                             put("ssid", n.ssid)
                             put("firmwareVersion", n.firmwareVersion)
-                            put("vlanId", n.vlanId ?: -1)
-                            put("parentInterface", n.parentInterface ?: "")
                             put("lastSeenTime", n.lastSeenTime)
                             put("lastCheckTime", n.lastCheckTime)
                         })
@@ -228,7 +211,6 @@ object RouterCacheManager {
                             put("address", b.address)
                             put("type", b.type)
                             put("comment", b.comment)
-                            put("disabled", b.disabled)
                         })
                     }
                 })
@@ -244,7 +226,6 @@ object RouterCacheManager {
         } catch (e: Exception) {}
     }
 
-    @Synchronized
     fun loadSnapshot(context: Context, ipAddress: String): RouterSnapshot? {
         try {
             val file = getCacheFile(context, ipAddress)
@@ -270,13 +251,7 @@ object RouterCacheManager {
                 cpuLoad = resObj?.optInt("cpuLoad", 0) ?: 0,
                 freeMemoryBytes = resObj?.optLong("freeMemoryBytes", 0L) ?: 0L,
                 totalMemoryBytes = resObj?.optLong("totalMemoryBytes", 0L) ?: 0L,
-                architecture = resObj?.optString("architecture", "") ?: "",
-                rxSpeedKbps = resObj?.optDouble("rxSpeedKbps", 0.0) ?: 0.0,
-                txSpeedKbps = resObj?.optDouble("txSpeedKbps", 0.0) ?: 0.0,
-                voltage = resObj?.optString("voltage", "24.1 V") ?: "24.1 V",
-                temperature = resObj?.optString("temperature", "42°C") ?: "42°C",
-                cpuFrequency = resObj?.optString("cpuFrequency", "1400 MHz") ?: "1400 MHz",
-                hddFreeBytes = resObj?.optLong("hddFreeBytes", 0L) ?: 0L
+                architecture = resObj?.optString("architecture", "") ?: ""
             )
 
             val rbObj = root.optJSONObject("routerBoard")
@@ -290,11 +265,7 @@ object RouterCacheManager {
 
             val legacyDemoCards = setOf("784912", "319405", "849201", "651829", "492018", "910283", "182940", "502914", "390124")
             val legacyDemoProfiles = setOf("1 Hour - 500MB", "Daily - 2000MB", "Weekly - 10GB", "Monthly - VIP 30GB")
-            val legacyDemoNodes = setOf(
-                "node_ap_main", "node_ap_east", "node_ap_west", "node_ap_north",
-                "node_starlink", "node_home_modem_1", "node_home_modem_2",
-                "node_home_1", "node_home_2", "node_home_3", "node_home_4"
-            )
+            val legacyDemoNodes = setOf("node_ap_main", "node_ap_east", "node_home_modem_1", "node_home_modem_2")
 
             val cardsList = mutableListOf<HotspotCard>()
             val cArr = root.optJSONArray("cards") ?: JSONArray()
@@ -319,8 +290,7 @@ object RouterCacheManager {
                         disabled = o.optBoolean("disabled", false),
                         price = o.optString("price", ""),
                         posAgent = o.optString("posAgent", ""),
-                        cardType = o.optString("cardType", "hotspot"),
-                        createdAtHint = o.optLong("createdAtHint", 0L)
+                        cardType = o.optString("cardType", "hotspot")
                     )
                 )
             }
@@ -339,17 +309,10 @@ object RouterCacheManager {
                         name = profName,
                         sharedUsers = o.optInt("sharedUsers", 1),
                         rateLimit = o.optString("rateLimit", ""),
-                        sessionTimeout = o.optString("sessionTimeout", "1d"),
-                        keepaliveTimeout = o.optString("keepaliveTimeout", "5m"),
-                        uploadLimit = o.optString("uploadLimit", ""),
-                        downloadLimit = o.optString("downloadLimit", ""),
                         validity = o.optString("validity", ""),
                         price = o.optString("price", ""),
                         dataLimit = o.optString("dataLimit", ""),
-                        source = o.optString("source", "hotspot"),
-                        comment = o.optString("comment", ""),
-                        priceNumber = o.optDouble("priceNumber", 0.0),
-                        costPrice = o.optDouble("costPrice", 0.0)
+                        source = o.optString("source", "hotspot")
                     )
                 )
             }
@@ -397,7 +360,7 @@ object RouterCacheManager {
             for (i in 0 until nArr.length()) {
                 val o = nArr.getJSONObject(i)
                 val nodeId = o.optString("id", "")
-                if (!isDemoSnapshot && (legacyDemoNodes.contains(nodeId) || nodeId.startsWith("node_home_") || nodeId.startsWith("demo_"))) {
+                if (!isDemoSnapshot && legacyDemoNodes.contains(nodeId)) {
                     continue
                 }
                 val nRole = o.optString("role", "")
@@ -455,8 +418,6 @@ object RouterCacheManager {
                         channelWidth = o.optString("channelWidth", ""),
                         ssid = o.optString("ssid", ""),
                         firmwareVersion = o.optString("firmwareVersion", ""),
-                        vlanId = o.optInt("vlanId", -1).takeIf { it > 0 },
-                        parentInterface = o.optString("parentInterface", "").ifBlank { null },
                         lastSeenTime = o.optLong("lastSeenTime", System.currentTimeMillis()),
                         lastCheckTime = o.optLong("lastCheckTime", System.currentTimeMillis())
                     )
@@ -487,8 +448,7 @@ object RouterCacheManager {
                         macAddress = o.optString("macAddress", ""),
                         address = o.optString("address", ""),
                         type = o.optString("type", "bypassed"),
-                        comment = o.optString("comment", ""),
-                        disabled = o.optBoolean("disabled", false)
+                        comment = o.optString("comment", "")
                     )
                 )
             }
@@ -549,7 +509,6 @@ object RouterCacheManager {
         }
     }
 
-    @Synchronized
     fun getLatestSnapshot(context: Context): RouterSnapshot? {
         val files = mutableListOf<File>()
         context.filesDir.listFiles { _, name -> name.startsWith("router_snapshot_") && name.endsWith(".json") }?.let {
@@ -578,7 +537,6 @@ object RouterCacheManager {
         return latestSnapshot
     }
 
-    @Synchronized
     fun getAllCachedSnapshots(context: Context): List<RouterSnapshot> {
         val files = mutableListOf<File>()
         context.filesDir.listFiles { _, name -> name.startsWith("router_snapshot_") && name.endsWith(".json") }?.let {
@@ -598,7 +556,6 @@ object RouterCacheManager {
         return result.sortedByDescending { it.timestamp }
     }
 
-    @Synchronized
     fun clearCacheForRouter(context: Context, ipAddress: String): Boolean {
         return try {
             val sanitized = ipAddress.replace(Regex("[^a-zA-Z0-9_]"), "_")
@@ -611,108 +568,4 @@ object RouterCacheManager {
             false
         }
     }
-
-    /**
-     * Computes a deterministic 64-bit FNV-1a content signature across all cached snapshot sections
-     * (including individual field values, not just list sizes) so any edit/consumption/node change
-     * is immediately detected even when element counts stay identical.
-     */
-    fun computeSnapshotSignature(snapshot: RouterSnapshot): String {
-        var h = -3750763034362895579L // 0xcbf29ce484222325UL.toLong()
-        val prime = 1099511628211L
-
-        fun mixStr(s: String) {
-            for (i in 0 until s.length) {
-                h = (h xor s[i].code.toLong()) * prime
-            }
-            h = (h xor 0xFFL) * prime
-        }
-
-        fun mixLong(v: Long) {
-            mixStr(v.toString())
-        }
-
-        fun mixInt(v: Int) {
-            mixStr(v.toString())
-        }
-
-        fun mixDouble(v: Double) {
-            mixStr(v.toString())
-        }
-
-        fun mixBool(v: Boolean) {
-            h = (h xor (if (v) 1L else 0L)) * prime
-        }
-
-        mixStr(snapshot.ipAddress)
-        mixStr(snapshot.routerName)
-        mixBool(snapshot.isDemo)
-
-        val r = snapshot.resource
-        mixStr(r.uptime); mixStr(r.version); mixStr(r.boardName)
-        mixInt(r.cpuLoad); mixLong(r.freeMemoryBytes); mixLong(r.totalMemoryBytes)
-        mixDouble(r.rxSpeedKbps); mixDouble(r.txSpeedKbps)
-        mixStr(r.voltage); mixStr(r.temperature); mixStr(r.cpuFrequency); mixLong(r.hddFreeBytes)
-
-        val rb = snapshot.routerBoard
-        mixStr(rb.model); mixStr(rb.serialNumber); mixStr(rb.currentFirmware); mixStr(rb.upgradeFirmware); mixBool(rb.routerboard)
-
-        mixInt(snapshot.cards.size)
-        snapshot.cards.forEach { c ->
-            mixStr(c.id); mixStr(c.name); mixStr(c.password); mixStr(c.profile)
-            mixStr(c.uptime); mixLong(c.bytesIn); mixLong(c.bytesOut)
-            mixStr(c.limitUptime); mixLong(c.limitBytesTotal); mixStr(c.comment)
-            mixBool(c.disabled); mixStr(c.price); mixStr(c.posAgent); mixStr(c.cardType); mixBool(c.isActive)
-        }
-
-        mixInt(snapshot.profiles.size)
-        snapshot.profiles.forEach { p ->
-            mixStr(p.id); mixStr(p.name); mixStr(p.rateLimit); mixInt(p.sharedUsers)
-            mixStr(p.validity); mixStr(p.price); mixDouble(p.priceNumber); mixDouble(p.costPrice)
-            mixStr(p.sessionTimeout); mixStr(p.keepaliveTimeout); mixStr(p.uploadLimit); mixStr(p.downloadLimit)
-            mixStr(p.dataLimit); mixStr(p.source); mixStr(p.comment)
-        }
-
-        mixInt(snapshot.activeUsers.size)
-        snapshot.activeUsers.forEach { u ->
-            mixStr(u.id); mixStr(u.user); mixStr(u.address); mixStr(u.macAddress)
-            mixStr(u.uptime); mixLong(u.bytesIn); mixLong(u.bytesOut)
-            mixStr(u.hostName); mixStr(u.nodeName); mixStr(u.serverName); mixStr(u.deviceModel)
-        }
-
-        mixInt(snapshot.servers.size)
-        snapshot.servers.forEach { s ->
-            mixStr(s.id); mixStr(s.name); mixStr(s.interfaceName); mixStr(s.addressPool)
-            mixStr(s.profile); mixInt(s.addressesPerMac); mixBool(s.disabled)
-        }
-
-        mixInt(snapshot.nodes.size)
-        snapshot.nodes.forEach { n ->
-            mixStr(n.id); mixStr(n.name); mixStr(n.ipAddress); mixStr(n.macAddress); mixStr(n.interfaceName)
-            mixStr(n.model); mixStr(n.role); mixStr(n.nodeType.name); mixStr(n.effectiveStatus.name)
-            mixStr(n.parentTowerId.orEmpty()); mixStr(n.parentTowerName.orEmpty()); mixBool(n.isOnline); mixLong(n.pingMs)
-            mixInt(n.connectedUsers); mixStr(n.uptime); mixDouble(n.rxSpeedKbps); mixDouble(n.txSpeedKbps)
-            mixLong(n.totalBytesConsumed); mixInt(n.vlanId ?: -1); mixStr(n.parentInterface.orEmpty()); mixStr(n.firmwareVersion)
-        }
-
-        mixInt(snapshot.ipBindings.size)
-        snapshot.ipBindings.forEach { b ->
-            mixStr(b.id); mixStr(b.macAddress); mixStr(b.address)
-            mixStr(b.type); mixStr(b.comment); mixBool(b.disabled)
-        }
-
-        return "${snapshot.ipAddress}|$h"
-    }
-
-    fun hasPersistableData(snapshot: RouterSnapshot): Boolean {
-        return snapshot.cards.isNotEmpty() ||
-            snapshot.activeUsers.isNotEmpty() ||
-            snapshot.nodes.isNotEmpty() ||
-            snapshot.profiles.isNotEmpty() ||
-            snapshot.servers.isNotEmpty() ||
-            snapshot.ipBindings.isNotEmpty() ||
-            snapshot.resource.boardName.isNotBlank() ||
-            snapshot.resource.version.isNotBlank()
-    }
 }
-

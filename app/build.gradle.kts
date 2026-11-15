@@ -1,10 +1,9 @@
-import java.time.Duration
-
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.secrets)
+  alias(libs.plugins.google.services)
   alias(libs.plugins.kotlin.serialization)
 }
 
@@ -122,12 +121,12 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   ksp(libs.androidx.room.compiler)
-}
-
-tasks.withType<Test> {
-  failFast = true
-  timeout.set(Duration.ofMinutes(2))
-  testLogging {
-    events("passed", "failed", "skipped")
-  }
+  
+  // Firebase & Auth
+  implementation(platform(libs.firebase.bom))
+  implementation(libs.firebase.firestore)
+  implementation(libs.firebase.auth)
+  implementation(libs.androidx.credentials)
+  implementation(libs.androidx.credentials.play.services)
+  implementation(libs.googleid)
 }

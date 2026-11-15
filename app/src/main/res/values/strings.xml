@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">NetManager</string>
+    <string name="default_web_client_id" translatable="false">258365159100-5fj8qid089l2ia976mlb0lrbai2jb521.apps.googleusercontent.com</string>
 </resources>

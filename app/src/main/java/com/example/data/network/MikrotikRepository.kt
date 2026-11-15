@@ -12,6 +12,7 @@ import com.example.data.model.HotspotProfile
 import com.example.data.local.SystemEventLogEntity
 import com.example.data.model.IpBinding
 import com.example.data.model.RouterConnectionConfig
+import com.google.firebase.firestore.FirebaseFirestore
 import com.example.data.model.RouterResource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,9 +27,6 @@ import kotlinx.coroutines.launch
 
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -50,24 +48,15 @@ data class UserKnownTelemetry(
 )
 
 class MikrotikRepository(
+    private val db: FirebaseFirestore,
     private val appDao: com.example.data.local.AppDao? = null
 ) {
 
     private val repositoryScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
     private val cardTimestampCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private val umEarliestSessionTimestamps = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    @Volatile
-    private var lastUmHistoryFetchMs: Long = 0L
-    @Volatile
-    private var lastSyncedUmSessionsSignature: Int = 0
 
     fun getCardCreationTimestamp(card: HotspotCard): Long {
         val cached = cardTimestampCache[card.name]
-        val explicit = extractExplicitTimestamp(card)
-        if (explicit != null && (cached == null || explicit < cached)) {
-            cardTimestampCache[card.name] = explicit
-            return explicit
-        }
         if (cached != null && cached > 0L) return cached
 
         val resolved = resolveCardTimestamp(card)
@@ -75,11 +64,7 @@ class MikrotikRepository(
         return resolved
     }
 
-    private fun extractExplicitTimestamp(card: HotspotCard): Long? {
-        if (card.createdAtHint in 1577836800000L..2082758400000L) {
-            return card.createdAtHint
-        }
-
+    private fun resolveCardTimestamp(card: HotspotCard): Long {
         val id = card.id
         val match = Regex("""(?:gen_|card_|c_|tum_|um_)?(\d{10,13})""").find(id)
         if (match != null) {
@@ -90,20 +75,26 @@ class MikrotikRepository(
             }
         }
 
-        if (card.comment.isNotBlank()) {
-            NetworkUtils.parseRouterDateToEpoch(card.comment)?.let { return it }
+        val comment = card.comment
+        if (comment.isNotBlank()) {
+            val dateMatch = Regex("""(\d{4})[-/](\d{1,2})[-/](\d{1,2})""").find(comment)
+            if (dateMatch != null) {
+                try {
+                    val (y, m, d) = dateMatch.destructured
+                    val cal = java.util.Calendar.getInstance()
+                    cal.set(y.toInt(), m.toInt() - 1, d.toInt(), 12, 0, 0)
+                    return cal.timeInMillis
+                } catch (_: Exception) {}
+            }
+            val epochMatch = Regex("""\b(17\d{8,11})\b""").find(comment)
+            if (epochMatch != null) {
+                val num = epochMatch.value.toLongOrNull()
+                if (num != null) {
+                    val ms = if (epochMatch.value.length == 10) num * 1000L else num
+                    if (ms in 1577836800000L..2082758400000L) return ms
+                }
+            }
         }
-
-        val umTs = umEarliestSessionTimestamps[card.name.trim().lowercase()]
-        if (umTs != null && umTs in 1577836800000L..2082758400000L) {
-            return umTs
-        }
-
-        return null
-    }
-
-    private fun resolveCardTimestamp(card: HotspotCard): Long {
-        extractExplicitTimestamp(card)?.let { return it }
 
         val uptimeSec = parseUptimeToSeconds(card.uptime)
         if (uptimeSec > 0L) {
@@ -126,13 +117,7 @@ class MikrotikRepository(
             val existing = dao.getAllLocalCardsSync().associateBy { it.name }
             val entities = cards.map { card ->
                 val prevEntity = existing[card.name]
-                val explicitTs = extractExplicitTimestamp(card)
-                val prevTs = prevEntity?.createdTimestamp?.takeIf { it > 0L }
-                val createdTs = when {
-                    explicitTs != null && (prevTs == null || explicitTs < prevTs) -> explicitTs
-                    prevTs != null -> prevTs
-                    else -> getCardCreationTimestamp(card)
-                }
+                val createdTs = prevEntity?.createdTimestamp?.takeIf { it > 0L } ?: getCardCreationTimestamp(card)
                 cardTimestampCache[card.name] = createdTs
                 com.example.data.local.LocalCardEntity.fromHotspotCard(
                     card = card,
@@ -141,182 +126,33 @@ class MikrotikRepository(
                 )
             }
             dao.insertOrUpdateLocalCards(entities)
-            if (cards.isEmpty()) {
-                dao.clearAllLocalCards()
-            } else {
-                val liveNames = cards.map { it.name }.toSet()
-                existing.keys.filter { !liveNames.contains(it) }.forEach { staleName ->
-                    dao.deleteLocalCardByName(staleName)
-                }
-            }
         } catch (_: Exception) {}
     }
 
-    private suspend fun processHistoricalUmSessions(sessions: List<com.example.data.local.SessionArchiveEntity>) {
-        if (sessions.isEmpty()) return
-        try {
-            var earliestChanged = false
-            for (s in sessions) {
-                val uKey = s.username.trim().lowercase()
-                if (uKey.isBlank() || s.timestamp !in 1577836800000L..2082758400000L) continue
-                val prev = umEarliestSessionTimestamps[uKey]
-                if (prev == null || s.timestamp < prev) {
-                    umEarliestSessionTimestamps[uKey] = s.timestamp
-                    earliestChanged = true
-                }
-                val cached = cardTimestampCache[s.username]
-                if (cached == null || s.timestamp < cached) {
-                    cardTimestampCache[s.username] = s.timestamp
-                }
-            }
-            val sig = sessions.size * 31 + (sessions.firstOrNull()?.sessionId?.hashCode() ?: 0) + (sessions.lastOrNull()?.timestamp?.hashCode() ?: 0)
-            if (sig != lastSyncedUmSessionsSignature || earliestChanged) {
-                lastSyncedUmSessionsSignature = sig
-                appDao?.insertOrUpdateSessions(sessions)
-            }
-        } catch (_: Exception) {}
-    }
-
-    private fun fetchRestUmUserProfiles(baseUrl: String, credential: String): Map<String, Pair<String, String>> {
-        val result = mutableMapOf<String, Pair<String, String>>()
-        val endpoints = listOf(
-            "$baseUrl/rest/user-manager/user-profile",
-            "$baseUrl/rest/tool/user-manager/user-profile"
-        )
-        for (url in endpoints) {
-            try {
-                val req = Request.Builder().url(url).header("Authorization", credential).build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val arr = JSONArray(resp.body?.string() ?: "[]")
-                        for (i in 0 until arr.length()) {
-                            val obj = arr.optJSONObject(i) ?: continue
-                            val uName = obj.optString("user").ifBlank { obj.optString("username") }.trim()
-                            val pName = obj.optString("profile").trim()
-                            val endRaw = obj.optString("end-time").ifBlank { obj.optString("till-time") }.trim()
-                            val state = obj.optString("state").lowercase()
-                            if (uName.isNotBlank() && pName.isNotBlank()) {
-                                val key = uName.lowercase()
-                                val existing = result[key]
-                                if (existing == null || state == "running-active" || state == "running") {
-                                    result[key] = pName to endRaw
-                                }
-                            }
-                        }
-                        if (result.isNotEmpty()) return result
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-        return result
-    }
-
-    private suspend fun fetchRestUserManagerSessions(baseUrl: String, credential: String) {
-        if (appDao == null) return
-        val endpoints = listOf(
-            "$baseUrl/rest/user-manager/session",
-            "$baseUrl/rest/tool/user-manager/session"
-        )
-        for (url in endpoints) {
-            try {
-                val req = Request.Builder().url(url).header("Authorization", credential).build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val arr = JSONArray(resp.body?.string() ?: "[]")
-                        if (arr.length() > 0) {
-                            val parsed = mutableListOf<com.example.data.local.SessionArchiveEntity>()
-                            for (i in 0 until arr.length()) {
-                                val obj = arr.optJSONObject(i) ?: continue
-                                val username = obj.optString("user").ifBlank { obj.optString("username") }.trim()
-                                if (username.isBlank()) continue
-                                val fromRaw = obj.optString("from-time").ifBlank { obj.optString("started").ifBlank { obj.optString("start-time") } }
-                                val tillRaw = obj.optString("till-time").ifBlank { obj.optString("ended").ifBlank { obj.optString("end-time") } }
-                                val isActive = obj.optBoolean("active", false) || obj.optString("active").equals("true", true)
-                                val ts = NetworkUtils.parseRouterDateToEpoch(fromRaw)
-                                    ?: NetworkUtils.parseRouterDateToEpoch(tillRaw)
-                                    ?: if (isActive) System.currentTimeMillis() else 0L
-                                if (ts <= 0L) continue
-                                val downUsed = NetworkUtils.parseSizeToBytes(
-                                    obj.optString("download").ifBlank { obj.optString("download-used").ifBlank { obj.optString("bytes-out", "0") } }
-                                )
-                                val upUsed = NetworkUtils.parseSizeToBytes(
-                                    obj.optString("upload").ifBlank { obj.optString("upload-used").ifBlank { obj.optString("bytes-in", "0") } }
-                                )
-                                val rawId = obj.optString(".id").ifBlank { "${fromRaw}_${tillRaw}_$i" }
-                                parsed.add(
-                                    com.example.data.local.SessionArchiveEntity(
-                                        sessionId = "um_sess_${username}_$rawId",
-                                        username = username,
-                                        ipAddress = obj.optString("user-ip").ifBlank { obj.optString("ip-address") },
-                                        macAddress = obj.optString("calling-station-id").ifBlank { obj.optString("mac-address") }.uppercase(),
-                                        isOnline = isActive,
-                                        loginTime = if (fromRaw.isNotBlank()) NetworkUtils.formatArabicFullDateTimeFromString(fromRaw, ts) else NetworkUtils.formatArabicFullDateTime(ts),
-                                        logoutTime = if (isActive) "متصل حالياً" else if (tillRaw.isNotBlank()) NetworkUtils.formatArabicFullDateTimeFromString(tillRaw, ts) else "جلسة مكتملة",
-                                        duration = obj.optString("uptime", "0s"),
-                                        bytesIn = upUsed,
-                                        bytesOut = downUsed,
-                                        totalBytes = upUsed + downUsed,
-                                        terminateReason = obj.optString("terminate-cause").ifBlank { obj.optString("status").ifBlank { if (isActive) "جلسة نشطة" else "جلسة يوزرمانجر" } },
-                                        profile = obj.optString("profile").ifBlank { obj.optString("actual-profile") },
-                                        nodeName = obj.optString("nas-ip-address").ifBlank { "UserManager" },
-                                        timestamp = ts
-                                    )
-                                )
-                            }
-                            if (parsed.isNotEmpty()) {
-                                processHistoricalUmSessions(parsed)
-                                return
-                            }
-                        }
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-    }
-
-    suspend fun upsertLocalCardPreservingTimestamp(
-        card: HotspotCard,
-        source: String = if (card.isUserManagerCard) "usermanager" else "hotspot"
-    ) {
+    suspend fun initializeFromLocalDatabase() {
         val dao = appDao ?: return
         try {
-            val existingTs = cardTimestampCache[card.name]?.takeIf { it > 0L }
-                ?: dao.getLocalCardByName(card.name)?.createdTimestamp?.takeIf { it > 0L }
-                ?: getCardCreationTimestamp(card)
-            cardTimestampCache[card.name] = existingTs
-            dao.insertOrUpdateLocalCard(
-                com.example.data.local.LocalCardEntity.fromHotspotCard(
-                    card = card,
-                    existingCreatedTs = existingTs,
-                    source = source
-                )
-            )
-        } catch (_: Exception) {}
-    }
-
-    suspend fun initializeFromLocalDatabase(skipInMemoryRestore: Boolean = false) {
-        val dao = appDao ?: return
-        try {
-            dao.purgeDemoNodes()
-            dao.deleteUnscopedLegacyNodes()
-
-            if (!skipInMemoryRestore) {
-                // Fallback Local Cards Cache only when no per-router snapshot was restored
-                val localCards = dao.getAllLocalCardsSync()
-                if (localCards.isNotEmpty()) {
-                    localCards.forEach {
-                        if (it.createdTimestamp > 0L) {
-                            cardTimestampCache[it.name] = it.createdTimestamp
-                        }
+            // 1. Local Cards Cache
+            val localCards = dao.getAllLocalCardsSync()
+            if (localCards.isNotEmpty()) {
+                localCards.forEach {
+                    if (it.createdTimestamp > 0L) {
+                        cardTimestampCache[it.name] = it.createdTimestamp
                     }
-                    val cardsList = sortCardsByNewestFirst(localCards.map { it.toHotspotCard() })
-                    if (_cards.value.isEmpty()) {
-                        _cards.value = cardsList
-                    }
+                }
+                val cardsList = sortCardsByNewestFirst(localCards.map { it.toHotspotCard() })
+                if (_cards.value.isEmpty()) {
+                    _cards.value = cardsList
                 }
             }
 
-            // Cached Materialized Summary
+            // 2. Local Network Nodes Cache
+            val localNodes = dao.getAllNetworkNodesSync()
+            if (localNodes.isNotEmpty() && _networkNodes.value.isEmpty()) {
+                _networkNodes.value = localNodes.map { it.toNetworkNode() }
+            }
+
+            // 3. Cached Materialized Summary
             val cachedSummary = dao.getMaterializedSummary()
             if (cachedSummary != null) {
                 Log.d("MikrotikRepository", "Loaded cached materialized summary: rev=${cachedSummary.totalEstimatedRevenue}")
@@ -334,37 +170,17 @@ class MikrotikRepository(
         .writeTimeout(20, TimeUnit.SECONDS)
         .build()
 
-    private val probeHttpClient = httpClient.newBuilder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
-        .build()
-
     private val routerOsApiClient = RouterOsApiClient()
-    @Volatile
     private var isApiSocketMode = false
 
-    @Volatile
     private var activeConfig: RouterConnectionConfig? = null
-    @Volatile
-    private var activeRouterIp: String = ""
-    private val syncMutex = Mutex()
-    private var initialSyncJob: Job? = null
-    @Volatile
-    private var connectionSessionId: Long = 0L
-    @Volatile
-    private var lastFullSyncTimeMs: Long = 0L
     private val customAddedNodes = mutableListOf<com.example.data.model.NetworkNode>()
     private val deletedNodeIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val deletedNodeKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    private fun currentRouterIp(): String {
-        return activeConfig?.ipAddress?.trim().orEmpty().ifBlank { activeRouterIp }
-    }
-
     var onDataRefreshedListener: ((com.example.data.local.RouterSnapshot) -> Unit)? = null
 
     fun restoreFromSnapshot(snapshot: com.example.data.local.RouterSnapshot) {
-        activeRouterIp = snapshot.ipAddress.trim()
         _resourceState.value = snapshot.resource
         _routerBoardInfo.value = snapshot.routerBoard
         _cards.value = snapshot.cards
@@ -373,7 +189,9 @@ class MikrotikRepository(
         _hotspotServers.value = snapshot.servers
         _networkNodes.value = snapshot.nodes
         _systemLogs.value = snapshot.logs
-        _ipBindings.value = snapshot.ipBindings
+        if (snapshot.ipBindings.isNotEmpty()) {
+            _ipBindings.value = snapshot.ipBindings
+        }
     }
 
     fun getCurrentSnapshot(ipAddress: String, routerName: String): com.example.data.local.RouterSnapshot {
@@ -397,21 +215,6 @@ class MikrotikRepository(
         onDataRefreshedListener?.invoke(getCurrentSnapshot(config.ipAddress, config.name.ifBlank { "راوتر MikroTik" }))
     }
 
-    fun setOfflineConfig(config: RouterConnectionConfig) {
-        activeConfig = config.copy(
-            ipAddress = config.ipAddress.trim(),
-            username = config.username.trim(),
-            password = config.password.trim()
-        )
-        activeRouterIp = config.ipAddress.trim()
-        lastFullSyncTimeMs = 0L
-        isApiSocketMode = false
-    }
-
-    fun isSessionEstablished(): Boolean {
-        return activeConfig != null && (isApiSocketMode || lastFullSyncTimeMs > 0L || activeConfig?.isDemoMode == true)
-    }
-
     // State Holders
     private val _resourceState = MutableStateFlow(RouterResource())
     val resourceState: StateFlow<RouterResource> = _resourceState.asStateFlow()
@@ -431,20 +234,9 @@ class MikrotikRepository(
     private val _interfaceStats = MutableStateFlow<List<com.example.data.model.InterfaceStats>>(emptyList())
     val interfaceStats: StateFlow<List<com.example.data.model.InterfaceStats>> = _interfaceStats.asStateFlow()
 
-    // Real-Time Traffic Calculation Tracking (Professional Sliding Window Smoothing)
-    @Volatile
+    // Real-Time Traffic Calculation Tracking
     private var lastTrafficCalculationTimeMs: Long = 0L
-    private val lastInterfaceBytesMap = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Long>>() // name -> (rxBytes, txBytes)
-    private val rxSpeedWindow = mutableListOf<Double>()
-    private val txSpeedWindow = mutableListOf<Double>()
-    private val WINDOW_SIZE = 4 // Average over last 4 polls to smooth out jitter
-
-    private fun resetTrafficCalculationState() {
-        lastTrafficCalculationTimeMs = 0L
-        lastInterfaceBytesMap.clear()
-        synchronized(rxSpeedWindow) { rxSpeedWindow.clear() }
-        synchronized(txSpeedWindow) { txSpeedWindow.clear() }
-    }
+    private val lastInterfaceBytesMap = mutableMapOf<String, Pair<Long, Long>>() // name -> (rxBytes, txBytes)
 
     private val _activeUsers = MutableStateFlow<List<HotspotActiveUser>>(emptyList())
     val activeUsers: StateFlow<List<HotspotActiveUser>> = _activeUsers.asStateFlow()
@@ -532,10 +324,7 @@ class MikrotikRepository(
     }
 
     fun getLastKnownTelemetryForUser(username: String): UserKnownTelemetry? {
-        return lastKnownUserTelemetry[username]
-            ?: lastKnownUserTelemetry.values.firstOrNull {
-                it.deviceInfo.modelName.contains(username, ignoreCase = true) || it.hostName == username
-            }
+        return lastKnownUserTelemetry.values.firstOrNull { it.deviceInfo.modelName.contains(username, ignoreCase = true) || it.hostName == username }
     }
 
 
@@ -566,28 +355,6 @@ class MikrotikRepository(
     }
 
     fun populateDemoData() {
-        _resourceState.value = RouterResource(
-            uptime = "5d 14h 22m",
-            version = "7.14.2 (stable)",
-            boardName = "MikroTik RB4011iGS+ (Demo)",
-            cpuLoad = 18,
-            freeMemoryBytes = 512L * 1024L * 1024L,
-            totalMemoryBytes = 1024L * 1024L * 1024L,
-            architecture = "arm64",
-            cpuFrequency = "1400 MHz",
-            hddFreeBytes = 420L * 1024L * 1024L,
-            voltage = "24.1 V",
-            temperature = "42°C",
-            rxSpeedKbps = 8400.0,
-            txSpeedKbps = 3200.0
-        )
-        _routerBoardInfo.value = com.example.data.model.RouterBoardInfo(
-            model = "RB4011iGS+5HacQ2HnD",
-            serialNumber = "DEMO99887766",
-            currentFirmware = "7.14.2",
-            upgradeFirmware = "7.14.2",
-            routerboard = true
-        )
         // Initialize default realistic profiles
         _profiles.value = listOf(
             HotspotProfile("1", "1 Hour - 500MB", rateLimit = "2M/2M", sharedUsers = 1, sessionTimeout = "1h", price = "200 ر.ي"),
@@ -1129,68 +896,35 @@ class MikrotikRepository(
     suspend fun verifyAndConnect(config: RouterConnectionConfig): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                initialSyncJob?.cancel()
-                val sessionId = ++connectionSessionId
-                lastUmHistoryFetchMs = 0L
-                lastSyncedUmSessionsSignature = 0
-                cardTimestampCache.clear()
-                umEarliestSessionTimestamps.clear()
-                resetTrafficCalculationState()
-                _lastSyncError.value = null
-
-                lastFullSyncTimeMs = 0L
                 val cleanConfig = config.copy(
                     ipAddress = config.ipAddress.trim(),
                     username = config.username.trim(),
                     password = config.password.trim()
                 )
-                val isDifferentRouter = activeRouterIp.isNotBlank() &&
-                    !activeRouterIp.equals(cleanConfig.ipAddress, ignoreCase = true)
                 activeConfig = cleanConfig
-                activeRouterIp = cleanConfig.ipAddress
-
                 if (cleanConfig.isDemoMode) {
-                    routerOsApiClient.disconnect()
-                    isApiSocketMode = false
-                    customAddedNodes.clear()
-                    deletedNodeIds.clear()
-                    deletedNodeKeys.clear()
                     delay(300)
                     populateDemoData()
                     adaptDataToConfig(cleanConfig)
                     return@withContext Result.success(true)
                 }
 
-                // Clear state if switching away from demo mode or connecting to a different router IP
+                // Clear demo data only if previous data was demo mode
                 val isPreviousDemo = _resourceState.value.boardName.contains("Demo", ignoreCase = true) ||
-                    _cards.value.any { it.id.startsWith("demo_") } ||
-                    _networkNodes.value.any { it.id.startsWith("node_home_") || it.id == "node_ap_main" }
-                if (isPreviousDemo || isDifferentRouter) {
-                    _resourceState.value = RouterResource()
-                    _routerBoardInfo.value = com.example.data.model.RouterBoardInfo()
+                    _cards.value.any { it.id.startsWith("demo_") }
+                if (isPreviousDemo) {
                     _cards.value = emptyList()
                     _activeUsers.value = emptyList()
                     _profiles.value = emptyList()
                     _ipBindings.value = emptyList()
                     _networkNodes.value = emptyList()
-                    _hotspotServers.value = emptyList()
-                    _ipPools.value = emptyList()
-                    _interfaceStats.value = emptyList()
                     _userSessions.value = emptyList()
                     _activityEvents.value = emptyList()
                     _adminUsers.value = emptyList()
                     _auditLogs.value = emptyList()
                     _systemLogs.value = emptyList()
                     _bandwidthHistory.value = emptyList()
-                    customAddedNodes.clear()
-                    deletedNodeIds.clear()
-                    deletedNodeKeys.clear()
-                    lastKnownUserTelemetry.clear()
                 }
-                try {
-                    appDao?.purgeDemoNodes()
-                    appDao?.deleteUnscopedLegacyNodes()
-                } catch (_: Exception) {}
 
                 // 1. If user explicitly specified port 8728, connect directly via native RouterOS API socket
                 if (cleanConfig.port == 8728) {
@@ -1203,22 +937,8 @@ class MikrotikRepository(
                     if (socketResult.isSuccess) {
                         isApiSocketMode = true
                         performFastInitialHandshake()
-                        var initialSyncError: Exception? = null
-                        syncMutex.withLock {
-                            if (connectionSessionId == sessionId && activeConfig != null) {
-                                try {
-                                    fetchLiveRouterDataFromSocket()
-                                } catch (e: Exception) {
-                                    _lastSyncError.value = e.message
-                                    initialSyncError = e
-                                }
-                            }
-                        }
-                        return@withContext if (initialSyncError != null) {
-                            Result.failure(initialSyncError!!)
-                        } else {
-                            Result.success(true)
-                        }
+                        repositoryScope.launch { fetchLiveRouterDataFromSocket() }
+                        return@withContext Result.success(true)
                     } else {
                         return@withContext socketResult
                     }
@@ -1226,11 +946,11 @@ class MikrotikRepository(
 
                 // 2. If port 80 / 443: Attempt RouterOS v7 REST API first
                 var restConnected = false
-                var restSyncError: Exception? = null
                 val protocol = if (cleanConfig.useHttps) "https" else "http"
                 val baseUrl = "$protocol://${cleanConfig.ipAddress}:${cleanConfig.port}"
                 val credential = Credentials.basic(cleanConfig.username, cleanConfig.password)
 
+                // Caching the successfully detected connection type
                 if (cleanConfig.port != 8728) {
                     try {
                         val request = Request.Builder()
@@ -1238,65 +958,36 @@ class MikrotikRepository(
                             .header("Authorization", credential)
                             .build()
 
-                        probeHttpClient.newCall(request).execute().use { response ->
-                            if (response.isSuccessful) {
-                                val body = response.body?.string().orEmpty()
-                                if (body.trimStart().startsWith("{")) {
-                                    parseResource(body)
-                                    routerOsApiClient.disconnect()
-                                    isApiSocketMode = false
-                                    restConnected = true
-                                    syncMutex.withLock {
-                                        if (connectionSessionId == sessionId && activeConfig != null) {
-                                            try {
-                                                fetchLiveRouterData(baseUrl, credential)
-                                            } catch (e: Exception) {
-                                                _lastSyncError.value = e.message
-                                                restSyncError = e
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        val response = httpClient.newCall(request).execute()
+                        if (response.isSuccessful) {
+                            val body = response.body?.string() ?: ""
+                            parseResource(body)
+                            isApiSocketMode = false
+                            restConnected = true
+                            repositoryScope.launch { fetchLiveRouterData(baseUrl, credential) }
                         }
                     } catch (_: Exception) {}
                 }
 
                 if (restConnected) {
-                    return@withContext if (restSyncError != null) {
-                        Result.failure(restSyncError!!)
-                    } else {
-                        Result.success(true)
-                    }
+                    return@withContext Result.success(true)
                 }
 
                 // 3. AUTOMATIC FALLBACK TO NATIVE ROUTEROS API (PORT 8728):
+                // If REST is 404 (common on RouterOS v6.x or routers without /rest mapped),
+                // seamlessly connect via MikroTik's native RouterOS API on port 8728!
                 val socketResult = routerOsApiClient.connectAndLogin(
-                    host = cleanConfig.ipAddress,
+                    host = config.ipAddress,
                     port = 8728,
-                    username = cleanConfig.username,
-                    password = cleanConfig.password
+                    username = config.username,
+                    password = config.password
                 )
 
                 if (socketResult.isSuccess) {
                     isApiSocketMode = true
                     performFastInitialHandshake()
-                    var initialSyncError: Exception? = null
-                    syncMutex.withLock {
-                        if (connectionSessionId == sessionId && activeConfig != null) {
-                            try {
-                                fetchLiveRouterDataFromSocket()
-                            } catch (e: Exception) {
-                                _lastSyncError.value = e.message
-                                initialSyncError = e
-                            }
-                        }
-                    }
-                    return@withContext if (initialSyncError != null) {
-                        Result.failure(initialSyncError!!)
-                    } else {
-                        Result.success(true)
-                    }
+                    repositoryScope.launch { fetchLiveRouterDataFromSocket() }
+                    return@withContext Result.success(true)
                 }
 
                 // If both REST and API Socket failed, give a clear explanation
@@ -1304,7 +995,7 @@ class MikrotikRepository(
                 val errorMsg = if (socketErr.contains("بيانات الدخول") || socketErr.contains("المصادقة") || socketErr.contains("كلمة المرور")) {
                     socketErr
                 } else {
-                    "تعذر الاتصال بعنوان الراوتر (${cleanConfig.ipAddress}:${cleanConfig.port}). يرجى التأكد من تفعيل خدمة API في الراوتر عبر Winbox من القائمة: IP -> Services -> api، وتأكد من أن هاتفك متصل بشبكة الواي فاي التابعة للراوتر."
+                    "تعذر الاتصال بعنوان الراوتر (${config.ipAddress}:${config.port}). يرجى التأكد من تفعيل خدمة API في الراوتر عبر Winbox من القائمة: IP -> Services -> api، وتأكد من أن هاتفك متصل بشبكة الواي فاي التابعة للراوتر."
                 }
 
                 Result.failure(Exception(errorMsg))
@@ -1321,13 +1012,8 @@ class MikrotikRepository(
             val resResult = routerOsApiClient.getSystemResource()
             if (resResult.isSuccess) {
                 val res = resResult.getOrThrow()
-                val formattedBoard = when {
-                    realIdentity.isNotBlank() && res.boardName.isNotBlank() -> "$realIdentity (${res.boardName})"
-                    realIdentity.isNotBlank() -> realIdentity
-                    else -> res.boardName
-                }
                 _resourceState.value = res.copy(
-                    boardName = formattedBoard,
+                    boardName = if (realIdentity.isNotBlank()) "$realIdentity (${res.boardName})" else res.boardName,
                     rxSpeedKbps = _resourceState.value.rxSpeedKbps,
                     txSpeedKbps = _resourceState.value.txSpeedKbps
                 )
@@ -1337,55 +1023,27 @@ class MikrotikRepository(
 
     private suspend fun fetchLiveRouterDataFromSocket() {
         withContext(Dispatchers.IO) {
-            if (activeConfig == null) return@withContext
-
             // PHASE 1: Interactive & Essential Data (Fast)
+            // Fetch system identity, resources, health, servers and active users first
             val identityResult = routerOsApiClient.getSystemIdentity()
             val realIdentity = identityResult.getOrNull().orEmpty()
-
+            
             val resResult = routerOsApiClient.getSystemResource()
             val healthMap = routerOsApiClient.getSystemHealth().getOrDefault(emptyMap())
-            val healthVolt = healthMap["voltage"]?.takeIf { it.isNotBlank() }?.let { "$it V" }
-                ?: healthMap["voltage-sensor"]?.takeIf { it.isNotBlank() }?.let { "$it V" }
-                ?: "غير متاح"
-            val healthTemp = healthMap["temperature"]?.takeIf { it.isNotBlank() }?.let { "$it°C" }
-                ?: healthMap["cpu-temperature"]?.takeIf { it.isNotBlank() }?.let { "$it°C" }
-                ?: "غير متاح"
+            val healthVolt = healthMap["voltage"]?.let { "$it V" } ?: healthMap["voltage-sensor"]?.let { "$it V" } ?: "24.1 V"
+            val healthTemp = healthMap["temperature"]?.let { "$it°C" } ?: healthMap["cpu-temperature"]?.let { "$it°C" } ?: "42°C"
 
             if (resResult.isSuccess) {
                 val res = resResult.getOrThrow()
-                val formattedBoard = when {
-                    realIdentity.isNotBlank() && res.boardName.isNotBlank() -> "$realIdentity (${res.boardName})"
-                    realIdentity.isNotBlank() -> realIdentity
-                    else -> res.boardName
-                }
                 _resourceState.value = res.copy(
-                    boardName = formattedBoard,
+                    boardName = if (realIdentity.isNotBlank()) "$realIdentity (${res.boardName})" else res.boardName,
                     voltage = healthVolt,
-                    temperature = healthTemp,
-                    rxSpeedKbps = _resourceState.value.rxSpeedKbps,
-                    txSpeedKbps = _resourceState.value.txSpeedKbps
+                    temperature = healthTemp
                 )
             }
 
-            routerOsApiClient.getRouterBoardInfo().getOrNull()?.let { _routerBoardInfo.value = it }
-
-            routerOsApiClient.getHotspotServers().getOrNull()?.let { servers ->
-                _hotspotServers.value = servers
-            }
-            routerOsApiClient.getIpPools().getOrNull()?.let { pools ->
-                _ipPools.value = pools
-            }
-            val profilesRes = routerOsApiClient.getHotspotProfiles()
-            profilesRes.getOrNull()?.let { profs ->
-                _profiles.value = profs
-            }
-            routerOsApiClient.getIpBindings().getOrNull()?.let { bindings ->
-                _ipBindings.value = bindings
-            }
-            routerOsApiClient.getRouterUsers().getOrNull()?.let { admins ->
-                _adminUsers.value = admins
-            }
+            routerOsApiClient.getHotspotServers().getOrNull()?.let { _hotspotServers.value = it }
+            routerOsApiClient.getHotspotProfiles().getOrNull()?.let { _profiles.value = it }
 
             // Fetch Active Users (High priority for network management)
             val activeResult = routerOsApiClient.getActiveHotspotUsers()
@@ -1393,117 +1051,49 @@ class MikrotikRepository(
                 _activeUsers.value = activeResult.getOrThrow()
             }
 
-            // PHASE 2: Bulk Data & Topology
-            yield()
+            // Immediately notify that basic UI is ready
+            notifyDataRefreshed()
 
+            // PHASE 2: Heavy & Background Data (Deferred)
+            // Now fetch the bulk data like Cards, Logs, etc.
+            yield() // Allow other coroutines to run
+            
+            // 1. Fetch Hotspot Cards + User-Manager Database (Bulk operation)
             val hotspotCardsRes = routerOsApiClient.getHotspotUsers()
             val umCardsRes = routerOsApiClient.getUserManagerUsers()
             val hotspotCards = hotspotCardsRes.getOrNull()
             val umCards = umCardsRes.getOrNull()
-
+            
             if (hotspotCards != null || umCards != null) {
                 val combinedCards = mutableListOf<HotspotCard>()
-                if (hotspotCards != null) {
-                    combinedCards.addAll(hotspotCards)
-                } else {
-                    // Preserve existing Hotspot cards if Hotspot fetch transiently failed
-                    combinedCards.addAll(_cards.value.filter { !it.isUserManagerCard })
-                }
-
+                hotspotCards?.let { combinedCards.addAll(it) }
                 val existingCardNames = combinedCards.map { it.name }.toSet()
-                if (umCards != null) {
-                    umCards.forEach { umCard ->
-                        if (!existingCardNames.contains(umCard.name)) {
-                            combinedCards.add(umCard)
-                        }
-                    }
-                } else {
-                    // Preserve existing UserManager cards if UM fetch transiently failed
-                    _cards.value.filter { it.isUserManagerCard }.forEach { umCard ->
-                        if (!existingCardNames.contains(umCard.name)) {
-                            combinedCards.add(umCard)
-                        }
+                umCards?.forEach { umCard ->
+                    if (!existingCardNames.contains(umCard.name)) {
+                        combinedCards.add(umCard)
                     }
                 }
-
                 val sortedCards = sortCardsByNewestFirst(combinedCards.distinctBy { it.name })
-                _cards.value = sortedCards
-                syncCardsToRoom(sortedCards)
-            }
-
-            // 2. Fetch Network Nodes infrastructure & Interface traffic stats
-            val interfaceStatsRes = routerOsApiClient.getInterfaceStats()
-            if (interfaceStatsRes.isSuccess) {
-                val ifList = interfaceStatsRes.getOrThrow()
-                _interfaceStats.value = ifList
-                if (ifList.isNotEmpty()) {
-                    calculateAndUpdateLiveTrafficSpeeds(ifList)
+                if (sortedCards.isNotEmpty()) {
+                    _cards.value = sortedCards
+                    syncCardsToRoom(sortedCards)
                 }
             }
 
-            // If all core probes failed, the router connection is genuinely down — propagate error!
-            if (resResult.isFailure && activeResult.isFailure && interfaceStatsRes.isFailure) {
-                throw (resResult.exceptionOrNull()
-                    ?: activeResult.exceptionOrNull()
-                    ?: interfaceStatsRes.exceptionOrNull()
-                    ?: Exception("انقطع الاتصال بالراوتر عبر منفذ API"))
-            }
-
-            // Update topology whenever interface stats were successfully retrieved (even if empty)
-            if (interfaceStatsRes.isSuccess) {
-                val bridgeHosts = routerOsApiClient.getBridgeHosts().getOrDefault(emptyList())
-                val hotspotHosts = routerOsApiClient.getHotspotHosts().getOrDefault(emptyList())
-                val wirelessRegs = routerOsApiClient.getWirelessRegistrations().getOrDefault(emptyList())
-                val ipAddressesList = routerOsApiClient.getRouterAddresses().getOrDefault(emptyList())
-                val wirelessList = routerOsApiClient.getWirelessInterfaces().getOrDefault(emptyList())
-                val vlanList = routerOsApiClient.getVlanInterfaces().getOrDefault(emptyList())
-                val neighborsList = routerOsApiClient.getDiscoveredNeighbors().getOrDefault(emptyList()).toMutableList()
-                val romonNeighbors = routerOsApiClient.getRomonNeighbors().getOrDefault(emptyList())
-                romonNeighbors.forEach { rn ->
-                    val mac = rn["mac-address"].orEmpty()
-                    if (mac.isNotBlank() && neighborsList.none { it["mac-address"].equals(mac, ignoreCase = true) }) {
-                        neighborsList.add(rn)
-                    }
-                }
-
-                val socketMacToInterface = mutableMapOf<String, String>()
-                bridgeHosts.forEach { hostMap ->
-                    val mac = (hostMap["mac-address"] ?: "").uppercase().trim()
-                    val onIf = hostMap["on-interface"] ?: hostMap["interface"] ?: ""
-                    if (mac.isNotBlank() && onIf.isNotBlank()) {
-                        socketMacToInterface[mac] = onIf
-                    }
-                }
-                hotspotHosts.forEach { hostMap ->
-                    val mac = (hostMap["mac-address"] ?: "").uppercase().trim()
-                    val onIf = hostMap["interface"] ?: hostMap["bridge-port"] ?: ""
-                    if (mac.isNotBlank() && onIf.isNotBlank()) {
-                        socketMacToInterface[mac] = onIf
-                    }
-                }
-
-                activeConfig?.let {
-                    syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, socketMacToInterface, wirelessRegs, vlanList, ipAddressesList)
-                }
-            }
+            // 2. Fetch Network Nodes infrastructure
+            val bridgeHosts = routerOsApiClient.getBridgeHosts().getOrDefault(emptyList())
+            val wirelessRegs = routerOsApiClient.getWirelessRegistrations().getOrDefault(emptyList())
+            val ipAddressesList = routerOsApiClient.getRouterAddresses().getOrDefault(emptyList())
+            val wirelessList = routerOsApiClient.getWirelessInterfaces().getOrDefault(emptyList())
+            val neighborsList = routerOsApiClient.getDiscoveredNeighbors().getOrDefault(emptyList()).toMutableList()
+            
+            // Re-sync sessions and topology with full network context
+            activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, emptyMap(), wirelessRegs, emptyList(), ipAddressesList) }
 
             // 3. Fetch Logs (Limit for performance)
             routerOsApiClient.getSystemLogs(limit = 60).getOrNull()?.let { _systemLogs.value = it }
-
-            lastFullSyncTimeMs = System.currentTimeMillis()
+            
             notifyDataRefreshed()
-
-            // Throttled non-blocking ingestion of historical UserManager sessions AFTER live state/nodes publish
-            val nowMs = System.currentTimeMillis()
-            if (lastUmHistoryFetchMs == 0L || (nowMs - lastUmHistoryFetchMs) >= 180_000L) {
-                lastUmHistoryFetchMs = nowMs
-                try {
-                    val umSessions = routerOsApiClient.getUserManagerSessions().getOrNull().orEmpty()
-                    if (umSessions.isNotEmpty()) {
-                        processHistoricalUmSessions(umSessions)
-                    }
-                } catch (_: Exception) {}
-            }
         }
     }
 
@@ -1511,17 +1101,13 @@ class MikrotikRepository(
         try {
             val json = JSONObject(jsonString)
             _resourceState.value = RouterResource(
-                uptime = json.optString("uptime", "0s"),
-                version = json.optString("version", ""),
-                boardName = json.optString("board-name", ""),
-                cpuLoad = json.optInt("cpu-load", 0),
-                freeMemoryBytes = json.optLong("free-memory", 0L),
-                totalMemoryBytes = json.optLong("total-memory", 0L),
-                architecture = json.optString("architecture-name", ""),
-                cpuFrequency = json.optString("cpu-frequency", "").let { if (it.isNotBlank() && !it.endsWith("MHz", true)) "$it MHz" else it },
-                hddFreeBytes = json.optLong("free-hdd-space", 0L),
-                voltage = _resourceState.value.voltage,
-                temperature = _resourceState.value.temperature,
+                uptime = json.optString("uptime", "1d 2h"),
+                version = json.optString("version", "RouterOS v7"),
+                boardName = json.optString("board-name", "MikroTik Router"),
+                cpuLoad = json.optInt("cpu-load", 15),
+                freeMemoryBytes = json.optLong("free-memory", 500 * 1024 * 1024L),
+                totalMemoryBytes = json.optLong("total-memory", 1024 * 1024 * 1024L),
+                architecture = json.optString("architecture-name", "arm64"),
                 rxSpeedKbps = _resourceState.value.rxSpeedKbps,
                 txSpeedKbps = _resourceState.value.txSpeedKbps
             )
@@ -1535,21 +1121,14 @@ class MikrotikRepository(
                 var realIdentity = ""
                 try {
                     val idReq = Request.Builder().url("$baseUrl/rest/system/identity").header("Authorization", credential).build()
-                    httpClient.newCall(idReq).execute().use { idResp ->
-                        if (idResp.isSuccessful) {
-                            val idObj = JSONObject(idResp.body?.string() ?: "{}")
-                            realIdentity = idObj.optString("name", "")
-                            if (realIdentity.isNotBlank()) {
-                                val baseBoard = _resourceState.value.boardName
-                                val formattedBoard = if (baseBoard.isNotBlank() && !baseBoard.startsWith("$realIdentity ")) {
-                                    "$realIdentity ($baseBoard)"
-                                } else {
-                                    realIdentity
-                                }
-                                _resourceState.value = _resourceState.value.copy(
-                                    boardName = formattedBoard
-                                )
-                            }
+                    val idResp = httpClient.newCall(idReq).execute()
+                    if (idResp.isSuccessful) {
+                        val idObj = JSONObject(idResp.body?.string() ?: "{}")
+                        realIdentity = idObj.optString("name", "")
+                        if (realIdentity.isNotBlank()) {
+                            _resourceState.value = _resourceState.value.copy(
+                                boardName = "$realIdentity (${_resourceState.value.boardName})"
+                            )
                         }
                     }
                 } catch (_: Exception) {}
@@ -1557,101 +1136,97 @@ class MikrotikRepository(
                 // Fetch RouterBOARD info
                 try {
                     val rbReq = Request.Builder().url("$baseUrl/rest/system/routerboard").header("Authorization", credential).build()
-                    httpClient.newCall(rbReq).execute().use { rbResp ->
-                        if (rbResp.isSuccessful) {
-                            val rbObj = JSONObject(rbResp.body?.string() ?: "{}")
-                            _routerBoardInfo.value = com.example.data.model.RouterBoardInfo(
-                                model = rbObj.optString("model", ""),
-                                serialNumber = rbObj.optString("serial-number", ""),
-                                currentFirmware = rbObj.optString("current-firmware", ""),
-                                upgradeFirmware = rbObj.optString("upgrade-firmware", ""),
-                                routerboard = rbObj.optBoolean("routerboard", false)
-                            )
-                        }
+                    val rbResp = httpClient.newCall(rbReq).execute()
+                    if (rbResp.isSuccessful) {
+                        val rbObj = JSONObject(rbResp.body?.string() ?: "{}")
+                        _routerBoardInfo.value = com.example.data.model.RouterBoardInfo(
+                            model = rbObj.optString("model", "MikroTik Router"),
+                            serialNumber = rbObj.optString("serial-number", ""),
+                            currentFirmware = rbObj.optString("current-firmware", ""),
+                            upgradeFirmware = rbObj.optString("upgrade-firmware", ""),
+                            routerboard = rbObj.optBoolean("routerboard", true)
+                        )
                     }
                 } catch (_: Exception) {}
 
                 // Fetch Health Sensors
                 try {
                     val hReq = Request.Builder().url("$baseUrl/rest/system/health").header("Authorization", credential).build()
-                    httpClient.newCall(hReq).execute().use { hResp ->
-                        if (hResp.isSuccessful) {
-                            val hArr = JSONArray(hResp.body?.string() ?: "[]")
-                            var volt = "غير متاح"
-                            var temp = "غير متاح"
-                            for (i in 0 until hArr.length()) {
-                                val o = hArr.getJSONObject(i)
-                                val name = o.optString("name", "")
-                                val value = o.optString("value", "")
-                                if (value.isNotBlank()) {
-                                    if (name.contains("voltage", ignoreCase = true)) volt = "$value V"
-                                    if (name.contains("temperature", ignoreCase = true)) temp = "$value°C"
-                                }
-                            }
-                            _resourceState.value = _resourceState.value.copy(voltage = volt, temperature = temp)
+                    val hResp = httpClient.newCall(hReq).execute()
+                    if (hResp.isSuccessful) {
+                        val hArr = JSONArray(hResp.body?.string() ?: "[]")
+                        var volt = "24.1 V"
+                        var temp = "42°C"
+                        for (i in 0 until hArr.length()) {
+                            val o = hArr.getJSONObject(i)
+                            val name = o.optString("name", "")
+                            val value = o.optString("value", "")
+                            if (name.contains("voltage", ignoreCase = true)) volt = "$value V"
+                            if (name.contains("temperature", ignoreCase = true)) temp = "$value°C"
                         }
+                        _resourceState.value = _resourceState.value.copy(voltage = volt, temperature = temp)
                     }
                 } catch (_: Exception) {}
 
                 // Fetch System Logs
                 try {
                     val lReq = Request.Builder().url("$baseUrl/rest/log").header("Authorization", credential).build()
-                    httpClient.newCall(lReq).execute().use { lResp ->
-                        if (lResp.isSuccessful) {
-                            val lArr = JSONArray(lResp.body?.string() ?: "[]")
-                            val logList = mutableListOf<com.example.data.model.SystemLogEntry>()
-                            for (i in 0 until lArr.length()) {
-                                val o = lArr.getJSONObject(i)
-                                logList.add(
-                                    com.example.data.model.SystemLogEntry(
-                                        id = o.optString(".id", "l$i"),
-                                        time = o.optString("time", ""),
-                                        topics = o.optString("topics", "info"),
-                                        message = o.optString("message", "")
-                                    )
+                    val lResp = httpClient.newCall(lReq).execute()
+                    if (lResp.isSuccessful) {
+                        val lArr = JSONArray(lResp.body?.string() ?: "[]")
+                        val logList = mutableListOf<com.example.data.model.SystemLogEntry>()
+                        for (i in 0 until lArr.length()) {
+                            val o = lArr.getJSONObject(i)
+                            logList.add(
+                                com.example.data.model.SystemLogEntry(
+                                    id = o.optString(".id", "l$i"),
+                                    time = o.optString("time", ""),
+                                    topics = o.optString("topics", "info"),
+                                    message = o.optString("message", "")
                                 )
-                            }
-                            _systemLogs.value = logList.takeLast(40).reversed()
+                            )
                         }
+                        _systemLogs.value = logList.takeLast(40).reversed()
                     }
                 } catch (_: Exception) {}
 
                 // Fetch Router Users (/rest/user)
                 try {
                     val uReq = Request.Builder().url("$baseUrl/rest/user").header("Authorization", credential).build()
-                    httpClient.newCall(uReq).execute().use { uResp ->
-                        if (uResp.isSuccessful) {
-                            val uArr = JSONArray(uResp.body?.string() ?: "[]")
-                            val userList = mutableListOf<com.example.data.model.AdminUser>()
-                            for (i in 0 until uArr.length()) {
-                                val o = uArr.getJSONObject(i)
-                                val username = o.optString("name", "admin")
-                                val group = o.optString("group", "full")
-                                val roleName = when (group.lowercase()) {
-                                    "full" -> "مدير عام (Full Admin)"
-                                    "write" -> "مشرف كروت"
-                                    "read" -> "مراقب"
-                                    else -> group
-                                }
-                                val permissions = if (group.lowercase() == "full") {
-                                    listOf("إدارة كاملة", "توليد كروت", "تعديل الأسعار", "إدارة السيرفرات", "تعديل الصلاحيات")
-                                } else {
-                                    listOf("عرض الجلسات", "مراقبة الاستهلاك")
-                                }
-                                userList.add(
-                                    com.example.data.model.AdminUser(
-                                        id = o.optString(".id", "u_$i"),
-                                        username = username,
-                                        fullName = o.optString("comment", "").ifBlank { username },
-                                        role = roleName,
-                                        permissions = permissions,
-                                        lastActiveTime = o.optString("last-logged-in", "نشط"),
-                                        ipAddress = o.optString("address", "192.168.88.1"),
-                                        isActive = !o.optBoolean("disabled", false),
-                                        password = ""
-                                    )
-                                )
+                    val uResp = httpClient.newCall(uReq).execute()
+                    if (uResp.isSuccessful) {
+                        val uArr = JSONArray(uResp.body?.string() ?: "[]")
+                        val userList = mutableListOf<com.example.data.model.AdminUser>()
+                        for (i in 0 until uArr.length()) {
+                            val o = uArr.getJSONObject(i)
+                            val username = o.optString("name", "admin")
+                            val group = o.optString("group", "full")
+                            val roleName = when (group.lowercase()) {
+                                "full" -> "مدير عام (Full Admin)"
+                                "write" -> "مشرف كروت"
+                                "read" -> "مراقب"
+                                else -> group
                             }
+                            val permissions = if (group.lowercase() == "full") {
+                                listOf("إدارة كاملة", "توليد كروت", "تعديل الأسعار", "إدارة السيرفرات", "تعديل الصلاحيات")
+                            } else {
+                                listOf("عرض الجلسات", "مراقبة الاستهلاك")
+                            }
+                            userList.add(
+                                com.example.data.model.AdminUser(
+                                    id = o.optString(".id", "u_$i"),
+                                    username = username,
+                                    fullName = o.optString("comment", "").ifBlank { username },
+                                    role = roleName,
+                                    permissions = permissions,
+                                    lastActiveTime = o.optString("last-logged-in", "نشط"),
+                                    ipAddress = o.optString("address", "192.168.88.1"),
+                                    isActive = !o.optBoolean("disabled", false),
+                                    password = ""
+                                )
+                            )
+                        }
+                        if (userList.isNotEmpty()) {
                             _adminUsers.value = userList
                         }
                     }
@@ -1660,47 +1235,45 @@ class MikrotikRepository(
                 // Fetch Hotspot Servers & IP Pools
                 try {
                     val sReq = Request.Builder().url("$baseUrl/rest/ip/hotspot").header("Authorization", credential).build()
-                    httpClient.newCall(sReq).execute().use { sResp ->
-                        if (sResp.isSuccessful) {
-                            val sArr = JSONArray(sResp.body?.string() ?: "[]")
-                            val serverList = mutableListOf<com.example.data.model.HotspotServerInfo>()
-                            for (i in 0 until sArr.length()) {
-                                val o = sArr.getJSONObject(i)
-                                serverList.add(
-                                    com.example.data.model.HotspotServerInfo(
-                                        id = o.optString(".id", "hs$i"),
-                                        name = o.optString("name", "hotspot1"),
-                                        interfaceName = o.optString("interface", "all"),
-                                        profile = o.optString("profile", "default"),
-                                        addressPool = o.optString("address-pool", ""),
-                                        addressesPerMac = o.optInt("addresses-per-mac", 1),
-                                        disabled = o.optBoolean("disabled", false)
-                                    )
+                    val sResp = httpClient.newCall(sReq).execute()
+                    if (sResp.isSuccessful) {
+                        val sArr = JSONArray(sResp.body?.string() ?: "[]")
+                        val serverList = mutableListOf<com.example.data.model.HotspotServerInfo>()
+                        for (i in 0 until sArr.length()) {
+                            val o = sArr.getJSONObject(i)
+                            serverList.add(
+                                com.example.data.model.HotspotServerInfo(
+                                    id = o.optString(".id", "hs$i"),
+                                    name = o.optString("name", "hotspot1"),
+                                    interfaceName = o.optString("interface", "all"),
+                                    profile = o.optString("profile", "default"),
+                                    addressPool = o.optString("address-pool", ""),
+                                    addressesPerMac = o.optInt("addresses-per-mac", 1),
+                                    disabled = o.optBoolean("disabled", false)
                                 )
-                            }
-                            _hotspotServers.value = serverList
+                            )
                         }
+                        _hotspotServers.value = serverList
                     }
                 } catch (_: Exception) {}
 
                 try {
                     val pReq = Request.Builder().url("$baseUrl/rest/ip/pool").header("Authorization", credential).build()
-                    httpClient.newCall(pReq).execute().use { pResp ->
-                        if (pResp.isSuccessful) {
-                            val pArr = JSONArray(pResp.body?.string() ?: "[]")
-                            val poolList = mutableListOf<com.example.data.model.IpPoolInfo>()
-                            for (i in 0 until pArr.length()) {
-                                val o = pArr.getJSONObject(i)
-                                poolList.add(
-                                    com.example.data.model.IpPoolInfo(
-                                        id = o.optString(".id", "pool$i"),
-                                        name = o.optString("name", "pool"),
-                                        ranges = o.optString("ranges", "")
-                                    )
+                    val pResp = httpClient.newCall(pReq).execute()
+                    if (pResp.isSuccessful) {
+                        val pArr = JSONArray(pResp.body?.string() ?: "[]")
+                        val poolList = mutableListOf<com.example.data.model.IpPoolInfo>()
+                        for (i in 0 until pArr.length()) {
+                            val o = pArr.getJSONObject(i)
+                            poolList.add(
+                                com.example.data.model.IpPoolInfo(
+                                    id = o.optString(".id", "pool$i"),
+                                    name = o.optString("name", "pool"),
+                                    ranges = o.optString("ranges", "")
                                 )
-                            }
-                            _ipPools.value = poolList
+                            )
                         }
+                        _ipPools.value = poolList
                     }
                 } catch (_: Exception) {}
 
@@ -1709,17 +1282,16 @@ class MikrotikRepository(
                 val ipToHostName = mutableMapOf<String, String>()
                 try {
                     val leaseReq = Request.Builder().url("$baseUrl/rest/ip/dhcp-server/lease").header("Authorization", credential).build()
-                    httpClient.newCall(leaseReq).execute().use { leaseResp ->
-                        if (leaseResp.isSuccessful) {
-                            val arr = JSONArray(leaseResp.body?.string() ?: "[]")
-                            for (i in 0 until arr.length()) {
-                                val o = arr.getJSONObject(i)
-                                val mac = o.optString("mac-address").uppercase()
-                                val ip = o.optString("address")
-                                val host = o.optString("host-name").ifBlank { o.optString("comment") }
-                                if (mac.isNotBlank() && host.isNotBlank()) macToHostName[mac] = host
-                                if (ip.isNotBlank() && host.isNotBlank()) ipToHostName[ip] = host
-                            }
+                    val leaseResp = httpClient.newCall(leaseReq).execute()
+                    if (leaseResp.isSuccessful) {
+                        val arr = JSONArray(leaseResp.body?.string() ?: "[]")
+                        for (i in 0 until arr.length()) {
+                            val o = arr.getJSONObject(i)
+                            val mac = o.optString("mac-address").uppercase()
+                            val ip = o.optString("address")
+                            val host = o.optString("host-name").ifBlank { o.optString("comment") }
+                            if (mac.isNotBlank() && host.isNotBlank()) macToHostName[mac] = host
+                            if (ip.isNotBlank() && host.isNotBlank()) ipToHostName[ip] = host
                         }
                     }
                 } catch (_: Exception) {}
@@ -1729,47 +1301,38 @@ class MikrotikRepository(
                 val macToServer = mutableMapOf<String, String>()
                 try {
                     val bReq = Request.Builder().url("$baseUrl/rest/interface/bridge/host").header("Authorization", credential).build()
-                    httpClient.newCall(bReq).execute().use { bResp ->
-                        if (bResp.isSuccessful) {
-                            val arr = JSONArray(bResp.body?.string() ?: "[]")
-                            for (i in 0 until arr.length()) {
-                                val o = arr.getJSONObject(i)
-                                val mac = o.optString("mac-address").uppercase()
-                                val onIf = o.optString("on-interface")
-                                if (mac.isNotBlank() && onIf.isNotBlank()) {
-                                    macToInterface[mac] = onIf
-                                }
+                    val bResp = httpClient.newCall(bReq).execute()
+                    if (bResp.isSuccessful) {
+                        val arr = JSONArray(bResp.body?.string() ?: "[]")
+                        for (i in 0 until arr.length()) {
+                            val o = arr.getJSONObject(i)
+                            val mac = o.optString("mac-address").uppercase()
+                            val onIf = o.optString("on-interface")
+                            if (mac.isNotBlank() && onIf.isNotBlank()) {
+                                macToInterface[mac] = onIf
                             }
                         }
                     }
                 } catch (_: Exception) {}
                 try {
                     val hostReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/host").header("Authorization", credential).build()
-                    httpClient.newCall(hostReq).execute().use { hostResp ->
-                        if (hostResp.isSuccessful) {
-                            val arr = JSONArray(hostResp.body?.string() ?: "[]")
-                            for (i in 0 until arr.length()) {
-                                val o = arr.getJSONObject(i)
-                                val mac = o.optString("mac-address").uppercase()
-                                val ifName = o.optString("interface").ifBlank { o.optString("bridge-port") }
-                                val server = o.optString("server")
-                                val comment = o.optString("comment")
-                                if (mac.isNotBlank() && ifName.isNotBlank()) macToInterface[mac] = ifName
-                                if (mac.isNotBlank() && server.isNotBlank()) macToServer[mac] = server
-                                if (mac.isNotBlank() && comment.isNotBlank() && !macToHostName.containsKey(mac)) {
-                                    macToHostName[mac] = comment
-                                }
+                    val hostResp = httpClient.newCall(hostReq).execute()
+                    if (hostResp.isSuccessful) {
+                        val arr = JSONArray(hostResp.body?.string() ?: "[]")
+                        for (i in 0 until arr.length()) {
+                            val o = arr.getJSONObject(i)
+                            val mac = o.optString("mac-address").uppercase()
+                            val ifName = o.optString("interface").ifBlank { o.optString("bridge-port") }
+                            val server = o.optString("server")
+                            val comment = o.optString("comment")
+                            if (mac.isNotBlank() && ifName.isNotBlank()) macToInterface[mac] = ifName
+                            if (mac.isNotBlank() && server.isNotBlank()) macToServer[mac] = server
+                            if (mac.isNotBlank() && comment.isNotBlank() && !macToHostName.containsKey(mac)) {
+                                macToHostName[mac] = comment
                             }
                         }
                     }
                 } catch (_: Exception) {}
-
-                var anyCoreSuccess = false
-                var lastCoreError: Exception? = null
-                var activeSucceeded = false
-                var hsCardsSucceeded = false
-                var umCardsSucceeded = false
-                var interfacesSucceeded = false
 
                 // Fetch data in parallel to reduce total sync time
                 val cardList = mutableListOf<HotspotCard>()
@@ -1781,17 +1344,9 @@ class MikrotikRepository(
                                 .url("$baseUrl/rest/ip/hotspot/active?.proplist=.id,user,address,mac-address,uptime,bytes-in,bytes-out,login-by,session-time-left,comment,server")
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(activeRequest).execute().use { resp ->
-                                if (resp.isSuccessful) {
-                                    true to JSONArray(resp.body?.string() ?: "[]")
-                                } else {
-                                    false to JSONArray()
-                                }
-                            }
-                        } catch (e: Exception) {
-                            lastCoreError = e
-                            false to JSONArray()
-                        }
+                            val resp = httpClient.newCall(activeRequest).execute()
+                            if (resp.isSuccessful) JSONArray(resp.body?.string() ?: "[]") else JSONArray()
+                        } catch (_: Exception) { JSONArray() }
                     }
 
                     // 2. Fetch Hotspot Users (Cards)
@@ -1801,250 +1356,180 @@ class MikrotikRepository(
                                 .url("$baseUrl/rest/ip/hotspot/user?.proplist=.id,name,password,profile,uptime,bytes-in,bytes-out,limit-uptime,limit-bytes-total,comment,disabled")
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(cardsRequest).execute().use { resp ->
-                                if (resp.isSuccessful) {
-                                    true to JSONArray(resp.body?.string() ?: "[]")
-                                } else {
-                                    false to JSONArray()
-                                }
-                            }
-                        } catch (e: Exception) {
-                            lastCoreError = e
-                            false to JSONArray()
-                        }
+                            val resp = httpClient.newCall(cardsRequest).execute()
+                            if (resp.isSuccessful) JSONArray(resp.body?.string() ?: "[]") else JSONArray()
+                        } catch (_: Exception) { JSONArray() }
                     }
 
-                    // 3. Fetch User-Manager Users (with creation/session date fields) & v7 user-profile bindings
+                    // 3. Fetch User-Manager Users
                     val umJob = async {
                         try {
                             val umReq = Request.Builder()
-                                .url("$baseUrl/rest/user-manager/user?.proplist=.id,name,username,password,profile,actual-profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,creation-time,start-time,started,till-time,end-time,last-seen,last-logged-in,comment,disabled")
+                                .url("$baseUrl/rest/user-manager/user?.proplist=.id,name,username,password,profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,comment,disabled")
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(umReq).execute().use { resp ->
-                                if (resp.isSuccessful) {
-                                    true to JSONArray(resp.body?.string() ?: "[]")
-                                } else {
-                                    false to JSONArray()
-                                }
-                            }
-                        } catch (_: Exception) { false to JSONArray() }
-                    }
-                    val umUserProfileJob = async {
-                        fetchRestUmUserProfiles(baseUrl, credential)
+                            val resp = httpClient.newCall(umReq).execute()
+                            if (resp.isSuccessful) JSONArray(resp.body?.string() ?: "[]") else JSONArray()
+                        } catch (_: Exception) { JSONArray() }
                     }
 
-                    // Process results — ONLY overwrite _activeUsers when activeJob actually succeeded
-                    val (actOk, activeArray) = activeJob.await()
-                    activeSucceeded = actOk
-                    if (actOk) {
-                        anyCoreSuccess = true
-                        val activeListResult = mutableListOf<HotspotActiveUser>()
-                        for (i in 0 until activeArray.length()) {
-                            val obj = activeArray.getJSONObject(i)
-                            val mac = obj.optString("mac-address", "").uppercase()
-                            val ip = obj.optString("address", "")
-                            val rawComment = obj.optString("comment", "")
-                            val hostName = macToHostName[mac] ?: ipToHostName[ip] ?: rawComment
-                            val ifName = macToInterface[mac] ?: "السيرفر الرئيسي"
-                            val device = com.example.data.util.DeviceDetector.detectDevice(mac, hostName, obj.optString("user", ""))
+                    // Process results
+                    val activeArray = activeJob.await()
+                    val activeListResult = mutableListOf<HotspotActiveUser>()
+                    for (i in 0 until activeArray.length()) {
+                        val obj = activeArray.getJSONObject(i)
+                        val mac = obj.optString("mac-address", "").uppercase()
+                        val ip = obj.optString("address", "")
+                        val rawComment = obj.optString("comment", "")
+                        val hostName = macToHostName[mac] ?: ipToHostName[ip] ?: rawComment
+                        val ifName = macToInterface[mac] ?: "السيرفر الرئيسي"
+                        val device = com.example.data.util.DeviceDetector.detectDevice(mac, hostName, obj.optString("user", ""))
 
-                            activeListResult.add(
-                                HotspotActiveUser(
-                                    id = obj.optString(".id", "u$i"),
-                                    user = obj.optString("user", "user$i"),
-                                    address = ip,
-                                    macAddress = mac,
-                                    uptime = obj.optString("uptime", "0s"),
-                                    bytesIn = obj.optLong("bytes-in", 0),
-                                    bytesOut = obj.optLong("bytes-out", 0),
-                                    loginBy = obj.optString("login-by", "http"),
-                                    sessionTimeLeft = obj.optString("session-time-left", ""),
-                                    comment = rawComment,
-                                    hostName = hostName,
-                                    serverName = macToServer[mac] ?: obj.optString("server", "hotspot1"),
-                                    nodeName = ifName,
-                                    deviceModel = "${device.brand} ${device.modelName}"
-                                )
+                        activeListResult.add(
+                            HotspotActiveUser(
+                                id = obj.optString(".id", "u$i"),
+                                user = obj.optString("user", "user$i"),
+                                address = ip,
+                                macAddress = mac,
+                                uptime = obj.optString("uptime", "0s"),
+                                bytesIn = obj.optLong("bytes-in", 0),
+                                bytesOut = obj.optLong("bytes-out", 0),
+                                loginBy = obj.optString("login-by", "http"),
+                                sessionTimeLeft = obj.optString("session-time-left", ""),
+                                comment = rawComment,
+                                hostName = hostName,
+                                serverName = macToServer[mac] ?: obj.optString("server", "hotspot1"),
+                                nodeName = ifName,
+                                deviceModel = "${device.brand} ${device.modelName}"
                             )
-                        }
-                        _activeUsers.value = activeListResult
+                        )
+                    }
+                    _activeUsers.value = activeListResult
+
+                    val usersArray = cardsJob.await()
+                    for (i in 0 until usersArray.length()) {
+                        val obj = usersArray.getJSONObject(i)
+                        val cardName = obj.optString("name", "")
+                        val comment = obj.optString("comment", "")
+                        val profile = obj.optString("profile", "default")
+                        val price = extractPriceFromText(comment, profile, cardName)
+                        
+                        val upUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("bytes-in", "0"))
+                        val downUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("bytes-out", "0"))
+                        val totalLimit = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("limit-bytes-total", "0"))
+
+                        cardList.add(
+                            HotspotCard(
+                                id = obj.optString(".id", "c$i"),
+                                name = cardName,
+                                password = obj.optString("password", ""),
+                                profile = profile,
+                                uptime = obj.optString("uptime", "0s"),
+                                bytesIn = upUsed,
+                                bytesOut = downUsed,
+                                limitUptime = obj.optString("limit-uptime", ""),
+                                limitBytesTotal = totalLimit,
+                                comment = comment,
+                                disabled = obj.optBoolean("disabled", false),
+                                price = price
+                            )
+                        )
                     }
 
-                    val (hsOk, usersArray) = cardsJob.await()
-                    hsCardsSucceeded = hsOk
-                    if (hsOk) {
-                        anyCoreSuccess = true
-                        for (i in 0 until usersArray.length()) {
-                            val obj = usersArray.getJSONObject(i)
-                            val cardName = obj.optString("name", "")
-                            val comment = obj.optString("comment", "")
-                            val profile = obj.optString("profile", "default")
-                            val price = extractPriceFromText(comment, profile, cardName)
-
-                            val upUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("bytes-in", "0"))
-                            val downUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("bytes-out", "0"))
-                            val totalLimit = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("limit-bytes-total", "0"))
-
-                            val dateHint = NetworkUtils.parseRouterDateToEpoch(comment) ?: 0L
+                    val umArr = umJob.await()
+                    val existingNames = cardList.map { it.name }.toSet()
+                    for (i in 0 until umArr.length()) {
+                        val obj = umArr.getJSONObject(i)
+                        val name = obj.optString("name").ifBlank { obj.optString("username") }
+                        if (name.isNotBlank() && !existingNames.contains(name)) {
+                            val comment = obj.optString("comment")
+                            val profile = obj.optString("profile", "UserManager")
+                            val price = extractPriceFromText(comment, profile, name)
+                            
+                            val downUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("download-used", "0"))
+                            val upUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("upload-used", "0"))
+                            
+                            val dlLimit = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("download-limit", "0"))
+                            val totLimit = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("total-limit", "0"))
+                            val transLimit = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("transfer-limit", "0"))
+                            
+                            val bestLimit = if (totLimit > 0L) totLimit else if (transLimit > 0L) transLimit else dlLimit
 
                             cardList.add(
                                 HotspotCard(
-                                    id = obj.optString(".id", "c$i"),
-                                    name = cardName,
+                                    id = obj.optString(".id", "um$i"),
+                                    name = name,
                                     password = obj.optString("password", ""),
                                     profile = profile,
                                     uptime = obj.optString("uptime", "0s"),
                                     bytesIn = upUsed,
                                     bytesOut = downUsed,
-                                    limitUptime = obj.optString("limit-uptime", ""),
-                                    limitBytesTotal = totalLimit,
+                                    limitUptime = obj.optString("time-limit", ""),
+                                    limitBytesTotal = bestLimit,
                                     comment = comment,
                                     disabled = obj.optBoolean("disabled", false),
-                                    price = price,
-                                    cardType = "hotspot",
-                                    createdAtHint = dateHint
+                                    price = price
                                 )
                             )
                         }
-                    } else {
-                        cardList.addAll(_cards.value.filter { !it.isUserManagerCard })
-                    }
-
-                    val (umOk, umArr) = umJob.await()
-                    val umUserProfileMap = umUserProfileJob.await()
-                    umCardsSucceeded = umOk
-                    val existingNames = cardList.map { it.name }.toMutableSet()
-                    if (umOk) {
-                        for (i in 0 until umArr.length()) {
-                            val obj = umArr.getJSONObject(i)
-                            val name = obj.optString("name").ifBlank { obj.optString("username") }
-                            if (name.isNotBlank() && !existingNames.contains(name)) {
-                                existingNames.add(name)
-                                val comment = obj.optString("comment")
-                                val umFallback = umUserProfileMap[name.trim().lowercase()]
-                                val rawActualProfile = obj.optString("actual-profile", "")
-                                val rawProfile = obj.optString("profile", "")
-                                val profile = rawActualProfile
-                                    .ifBlank { rawProfile }
-                                    .ifBlank { umFallback?.first.orEmpty() }
-                                    .ifBlank { "UserManager" }
-                                val price = extractPriceFromText(comment, profile, name)
-
-                                val downUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("download-used", "0"))
-                                val upUsed = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("upload-used", "0"))
-
-                                val dlLimit = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("download-limit", "0"))
-                                val totLimit = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("total-limit", "0"))
-                                val transLimit = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("transfer-limit", "0"))
-
-                                val bestLimit = if (totLimit > 0L) totLimit else if (transLimit > 0L) transLimit else dlLimit
-                                val dateHint = listOfNotNull(
-                                    obj.optString("creation-time"),
-                                    obj.optString("start-time"),
-                                    obj.optString("started"),
-                                    comment.takeIf { it.isNotBlank() },
-                                    obj.optString("last-seen"),
-                                    obj.optString("last-logged-in"),
-                                    obj.optString("till-time"),
-                                    obj.optString("end-time"),
-                                    umFallback?.second?.takeIf { it.isNotBlank() }
-                                ).firstNotNullOfOrNull { raw ->
-                                    if (raw.isBlank()) null else NetworkUtils.parseRouterDateToEpoch(raw)
-                                } ?: 0L
-
-                                cardList.add(
-                                    HotspotCard(
-                                        id = obj.optString(".id", "um$i"),
-                                        name = name,
-                                        password = obj.optString("password", ""),
-                                        profile = profile,
-                                        uptime = obj.optString("uptime", "0s"),
-                                        bytesIn = upUsed,
-                                        bytesOut = downUsed,
-                                        limitUptime = obj.optString("time-limit", ""),
-                                        limitBytesTotal = bestLimit,
-                                        comment = comment,
-                                        disabled = obj.optBoolean("disabled", false),
-                                        price = price,
-                                        cardType = "usermanager",
-                                        createdAtHint = dateHint
-                                    )
-                                )
-                            }
-                        }
-                    } else {
-                        _cards.value.filter { it.isUserManagerCard }.forEach { umCard ->
-                            if (!existingNames.contains(umCard.name)) {
-                                existingNames.add(umCard.name)
-                                cardList.add(umCard)
-                            }
-                        }
                     }
                 }
-                if (hsCardsSucceeded || umCardsSucceeded) {
-                    val sortedCards = sortCardsByNewestFirst(cardList.distinctBy { it.name })
+                val sortedCards = sortCardsByNewestFirst(cardList.distinctBy { it.name })
+                if (sortedCards.isNotEmpty() || _cards.value.isEmpty()) {
                     _cards.value = sortedCards
-                    syncCardsToRoom(sortedCards)
                 }
+                syncCardsToRoom(sortedCards)
 
-                // Fetch hotspot & user-manager profiles
-                val profList = mutableListOf<HotspotProfile>()
-                var hsProfSucceeded = false
-                var umProfSucceeded = false
-                try {
-                    val profRequest = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/profile?.proplist=.id,name,rate-limit,shared-users,session-timeout,keepalive-timeout,comment")
-                        .header("Authorization", credential)
-                        .build()
-                    httpClient.newCall(profRequest).execute().use { profResponse ->
-                        if (profResponse.isSuccessful) {
-                            hsProfSucceeded = true
-                            val profArray = JSONArray(profResponse.body?.string() ?: "[]")
-                            for (i in 0 until profArray.length()) {
-                                val obj = profArray.getJSONObject(i)
-                                val name = obj.optString("name", "profile$i")
-                                val rateLimit = obj.optString("rate-limit", "غير محدد")
-                                val comment = obj.optString("comment", "")
-                                val price = extractPriceFromText(comment, name, "")
-                                val priceNum = Regex("""\d+""").find(price)?.value?.toDoubleOrNull() ?: 0.0
-                                val (up, down) = parseRateLimitSpeeds(rateLimit)
-                                val sessionTimeout = obj.optString("session-timeout", "غير محدد")
+                // Fetch hotspot profiles
+                val profRequest = Request.Builder()
+                    .url("$baseUrl/rest/ip/hotspot/user/profile?.proplist=.id,name,rate-limit,shared-users,session-timeout,keepalive-timeout,comment")
+                    .header("Authorization", credential)
+                    .build()
+                val profResponse = httpClient.newCall(profRequest).execute()
+                if (profResponse.isSuccessful) {
+                    val profArray = JSONArray(profResponse.body?.string() ?: "[]")
+                    val profList = mutableListOf<HotspotProfile>()
+                    for (i in 0 until profArray.length()) {
+                        val obj = profArray.getJSONObject(i)
+                        val name = obj.optString("name", "profile$i")
+                        val rateLimit = obj.optString("rate-limit", "غير محدد")
+                        val comment = obj.optString("comment", "")
+                        val price = extractPriceFromText(comment, name, "")
+                        val priceNum = Regex("""\d+""").find(price)?.value?.toDoubleOrNull() ?: 0.0
+                        val (up, down) = parseRateLimitSpeeds(rateLimit)
+                        val sessionTimeout = obj.optString("session-timeout", "غير محدد")
 
-                                profList.add(
-                                    HotspotProfile(
-                                        id = obj.optString(".id", "p$i"),
-                                        name = name,
-                                        rateLimit = rateLimit,
-                                        sharedUsers = obj.optInt("shared-users", 1),
-                                        sessionTimeout = sessionTimeout,
-                                        keepaliveTimeout = obj.optString("keepalive-timeout", "5m"),
-                                        price = price,
-                                        uploadLimit = up,
-                                        downloadLimit = down,
-                                        validity = sessionTimeout,
-                                        dataLimit = extractDataLimitFromText(name, comment),
-                                        source = "hotspot",
-                                        comment = comment,
-                                        priceNumber = priceNum
-                                    )
-                                )
-                            }
-                        }
+                        profList.add(
+                            HotspotProfile(
+                                id = obj.optString(".id", "p$i"),
+                                name = name,
+                                rateLimit = rateLimit,
+                                sharedUsers = obj.optInt("shared-users", 1),
+                                sessionTimeout = sessionTimeout,
+                                keepaliveTimeout = obj.optString("keepalive-timeout", "5m"),
+                                price = price,
+                                uploadLimit = up,
+                                downloadLimit = down,
+                                validity = sessionTimeout,
+                                dataLimit = extractDataLimitFromText(name, comment),
+                                source = "hotspot",
+                                comment = comment,
+                                priceNumber = priceNum
+                            )
+                        )
                     }
-                } catch (_: Exception) {}
 
-                try {
-                    val endpoints = listOf(
-                        "$baseUrl/rest/user-manager/profile" to "usermanager",
-                        "$baseUrl/rest/tool/user-manager/profile" to "usermanager"
-                    )
-                    for ((url, src) in endpoints) {
-                        try {
-                            val req = Request.Builder().url(url).header("Authorization", credential).build()
-                            httpClient.newCall(req).execute().use { resp ->
+                    // Also try user manager profiles (v7 and v6) via REST
+                    try {
+                        val endpoints = listOf(
+                            "$baseUrl/rest/user-manager/profile" to "usermanager",
+                            "$baseUrl/rest/tool/user-manager/profile" to "usermanager"
+                        )
+                        for ((url, src) in endpoints) {
+                            try {
+                                val req = Request.Builder().url(url).header("Authorization", credential).build()
+                                val resp = httpClient.newCall(req).execute()
                                 if (resp.isSuccessful) {
-                                    umProfSucceeded = true
                                     val arr = JSONArray(resp.body?.string() ?: "[]")
                                     for (i in 0 until arr.length()) {
                                         val obj = arr.getJSONObject(i)
@@ -2052,12 +1537,10 @@ class MikrotikRepository(
                                         if (name.isNotBlank() && profList.none { it.name.equals(name, ignoreCase = true) }) {
                                             val rateLimit = obj.optString("rate-limit", "غير محدد")
                                             val comment = obj.optString("comment", "")
-                                            val rawPrice = obj.optString("price", "").takeIf { it.isNotBlank() && it != "0" }
-                                            val priceStr = if (rawPrice != null) "$rawPrice ر.ي" else extractPriceFromText(comment, name, "")
-                                            val priceNum = rawPrice?.toDoubleOrNull() ?: (Regex("""\d+""").find(priceStr)?.value?.toDoubleOrNull() ?: 0.0)
+                                            val priceStr = extractPriceFromText(comment, name, "")
                                             val (up, down) = parseRateLimitSpeeds(rateLimit)
-                                            val totalLimit = NetworkUtils.parseSizeToBytes(obj.optString("total-limit", "0"))
-                                            val dlLimit = NetworkUtils.parseSizeToBytes(obj.optString("download-limit", "0"))
+                                            val totalLimit = obj.optLong("total-limit", 0L)
+                                            val dlLimit = obj.optLong("download-limit", 0L)
                                             val resolvedDataLimit = if (totalLimit > 0L) totalLimit.toString() else if (dlLimit > 0L) dlLimit.toString() else ""
 
                                             profList.add(
@@ -2066,66 +1549,54 @@ class MikrotikRepository(
                                                     name = name,
                                                     rateLimit = rateLimit,
                                                     sharedUsers = obj.optInt("shared-users", 1),
-                                                    sessionTimeout = obj.optString("validity", "1d").ifBlank { "1d" },
+                                                    sessionTimeout = "1d",
                                                     price = priceStr,
                                                     uploadLimit = up,
                                                     downloadLimit = down,
-                                                    validity = obj.optString("validity", "1d").ifBlank { "1d" },
+                                                    validity = "1d",
                                                     dataLimit = resolvedDataLimit,
                                                     source = src,
-                                                    comment = comment,
-                                                    priceNumber = priceNum
+                                                    comment = comment
                                                 )
                                             )
                                         }
                                     }
                                 }
-                            }
-                        } catch (_: Exception) {}
-                    }
-                } catch (_: Exception) {}
+                            } catch (_: Exception) {}
+                        }
+                    } catch (_: Exception) {}
 
-                if (hsProfSucceeded || umProfSucceeded) {
-                    if (!hsProfSucceeded) {
-                        _profiles.value.filter { it.isHotspot }.forEach { hsP ->
-                            if (profList.none { it.name.equals(hsP.name, ignoreCase = true) }) profList.add(hsP)
-                        }
+                    if (profList.isNotEmpty()) {
+                        _profiles.value = profList
                     }
-                    if (!umProfSucceeded) {
-                        _profiles.value.filter { it.isUserManager }.forEach { umP ->
-                            if (profList.none { it.name.equals(umP.name, ignoreCase = true) }) profList.add(umP)
-                        }
-                    }
-                    _profiles.value = profList
                 }
 
                 // Fetch ip bindings
-                try {
-                    val bindRequest = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/ip-binding?.proplist=.id,mac-address,address,type,comment,disabled")
-                        .header("Authorization", credential)
-                        .build()
-                    httpClient.newCall(bindRequest).execute().use { bindResponse ->
-                        if (bindResponse.isSuccessful) {
-                            val bindArray = JSONArray(bindResponse.body?.string() ?: "[]")
-                            val bindList = mutableListOf<IpBinding>()
-                            for (i in 0 until bindArray.length()) {
-                                val obj = bindArray.getJSONObject(i)
-                                bindList.add(
-                                    IpBinding(
-                                        id = obj.optString(".id", "b$i"),
-                                        macAddress = obj.optString("mac-address", ""),
-                                        address = obj.optString("address", ""),
-                                        type = obj.optString("type", "bypassed"),
-                                        comment = obj.optString("comment", "جهاز معفى"),
-                                        disabled = obj.optBoolean("disabled", false)
-                                    )
-                                )
-                            }
-                            _ipBindings.value = bindList
-                        }
+                val bindRequest = Request.Builder()
+                    .url("$baseUrl/rest/ip/hotspot/ip-binding?.proplist=.id,mac-address,address,type,comment,disabled")
+                    .header("Authorization", credential)
+                    .build()
+                val bindResponse = httpClient.newCall(bindRequest).execute()
+                if (bindResponse.isSuccessful) {
+                    val bindArray = JSONArray(bindResponse.body?.string() ?: "[]")
+                    val bindList = mutableListOf<IpBinding>()
+                    for (i in 0 until bindArray.length()) {
+                        val obj = bindArray.getJSONObject(i)
+                        bindList.add(
+                            IpBinding(
+                                id = obj.optString(".id", "b$i"),
+                                macAddress = obj.optString("mac-address", ""),
+                                address = obj.optString("address", ""),
+                                type = obj.optString("type", "bypassed"),
+                                comment = obj.optString("comment", "جهاز معفى"),
+                                disabled = obj.optBoolean("disabled", false)
+                            )
+                        )
                     }
-                } catch (_: Exception) {}
+                    if (bindList.isNotEmpty()) {
+                        _ipBindings.value = bindList
+                    }
+                }
 
                 // Fetch network interfaces stats
                 try {
@@ -2133,101 +1604,88 @@ class MikrotikRepository(
                         .url("$baseUrl/rest/interface?.proplist=.id,name,type,mac-address,rx-byte,tx-byte,rx-packet,tx-packet,running,disabled,comment")
                         .header("Authorization", credential)
                         .build()
-                    httpClient.newCall(ifReq).execute().use { ifResp ->
-                        if (ifResp.isSuccessful) {
-                            interfacesSucceeded = true
-                            anyCoreSuccess = true
-                            val ifArr = JSONArray(ifResp.body?.string() ?: "[]")
-                            val ifList = mutableListOf<com.example.data.model.InterfaceStats>()
-                            for (i in 0 until ifArr.length()) {
-                                val o = ifArr.getJSONObject(i)
-                                ifList.add(
-                                    com.example.data.model.InterfaceStats(
-                                        id = o.optString(".id", "if$i"),
-                                        name = o.optString("name", "ether${i + 1}"),
-                                        type = o.optString("type", "ether"),
-                                        macAddress = o.optString("mac-address", ""),
-                                        rxBytes = o.optLong("rx-byte", 0L),
-                                        txBytes = o.optLong("tx-byte", 0L),
-                                        rxPackets = o.optLong("rx-packet", 0L),
-                                        txPackets = o.optLong("tx-packet", 0L),
-                                        isRunning = o.optBoolean("running", true),
-                                        disabled = o.optBoolean("disabled", false),
-                                        comment = o.optString("comment", "")
-                                    )
+                    val ifResp = httpClient.newCall(ifReq).execute()
+                    if (ifResp.isSuccessful) {
+                        val ifArr = JSONArray(ifResp.body?.string() ?: "[]")
+                        val ifList = mutableListOf<com.example.data.model.InterfaceStats>()
+                        for (i in 0 until ifArr.length()) {
+                            val o = ifArr.getJSONObject(i)
+                            ifList.add(
+                                com.example.data.model.InterfaceStats(
+                                    id = o.optString(".id", "if$i"),
+                                    name = o.optString("name", "ether${i + 1}"),
+                                    type = o.optString("type", "ether"),
+                                    macAddress = o.optString("mac-address", ""),
+                                    rxBytes = o.optLong("rx-byte", 0L),
+                                    txBytes = o.optLong("tx-byte", 0L),
+                                    rxPackets = o.optLong("rx-packet", 0L),
+                                    txPackets = o.optLong("tx-packet", 0L),
+                                    isRunning = o.optBoolean("running", true),
+                                    disabled = o.optBoolean("disabled", false),
+                                    comment = o.optString("comment", "")
                                 )
-                            }
+                            )
+                        }
+                        if (ifList.isNotEmpty()) {
                             _interfaceStats.value = ifList
-                            if (ifList.isNotEmpty()) {
-                                calculateAndUpdateLiveTrafficSpeeds(ifList)
-                            }
+                            calculateAndUpdateLiveTrafficSpeeds(ifList)
                         }
                     }
-                } catch (e: Exception) { lastCoreError = e }
-
-                if (!anyCoreSuccess) {
-                    throw (lastCoreError ?: Exception("تعذر جلب البيانات من الراوتر عبر واجهة REST"))
-                }
+                } catch (_: Exception) {}
 
                 // 5. Fetch Wireless Interfaces, Neighbors and Registrations in parallel to reduce sync lag
                 val wirelessJob = async {
                     try {
                         val wReq = Request.Builder().url("$baseUrl/rest/interface/wireless").header("Authorization", credential).build()
-                        httpClient.newCall(wReq).execute().use { wResp ->
-                            if (wResp.isSuccessful) JSONArray(wResp.body?.string() ?: "[]") else JSONArray()
-                        }
+                        val wResp = httpClient.newCall(wReq).execute()
+                        if (wResp.isSuccessful) JSONArray(wResp.body?.string() ?: "[]") else JSONArray()
                     } catch (_: Exception) { JSONArray() }
                 }
 
                 val neighborJob = async {
                     try {
                         val nReq = Request.Builder().url("$baseUrl/rest/ip/neighbor").header("Authorization", credential).build()
-                        httpClient.newCall(nReq).execute().use { nResp ->
-                            if (nResp.isSuccessful) JSONArray(nResp.body?.string() ?: "[]") else JSONArray()
-                        }
+                        val nResp = httpClient.newCall(nReq).execute()
+                        if (nResp.isSuccessful) JSONArray(nResp.body?.string() ?: "[]") else JSONArray()
                     } catch (_: Exception) { JSONArray() }
                 }
 
                 val registrationsJob = async {
                     try {
                         val rReq = Request.Builder().url("$baseUrl/rest/interface/wireless/registration-table").header("Authorization", credential).build()
-                        httpClient.newCall(rReq).execute().use { rResp ->
-                            if (rResp.isSuccessful) JSONArray(rResp.body?.string() ?: "[]") else JSONArray()
-                        }
+                        val rResp = httpClient.newCall(rReq).execute()
+                        if (rResp.isSuccessful) JSONArray(rResp.body?.string() ?: "[]") else JSONArray()
                     } catch (_: Exception) { JSONArray() }
                 }
 
                 val vlanJob = async {
                     try {
                         val vReq = Request.Builder().url("$baseUrl/rest/interface/vlan").header("Authorization", credential).build()
-                        httpClient.newCall(vReq).execute().use { vResp ->
-                            if (vResp.isSuccessful) JSONArray(vResp.body?.string() ?: "[]") else JSONArray()
-                        }
+                        val vResp = httpClient.newCall(vReq).execute()
+                        if (vResp.isSuccessful) JSONArray(vResp.body?.string() ?: "[]") else JSONArray()
                     } catch (_: Exception) { JSONArray() }
                 }
 
                 val romonJob = async {
                     try {
                         val rReq = Request.Builder().url("$baseUrl/rest/tool/romon/neighbor").header("Authorization", credential).build()
-                        httpClient.newCall(rReq).execute().use { rResp ->
-                            if (rResp.isSuccessful) {
-                                JSONArray(rResp.body?.string() ?: "[]")
-                            } else {
-                                val v7Req = Request.Builder().url("$baseUrl/rest/romon/neighbor").header("Authorization", credential).build()
-                                httpClient.newCall(v7Req).execute().use { v7Resp ->
-                                    if (v7Resp.isSuccessful) JSONArray(v7Resp.body?.string() ?: "[]") else JSONArray()
-                                }
-                            }
+                        val rResp = httpClient.newCall(rReq).execute()
+                        if (rResp.isSuccessful) JSONArray(rResp.body?.string() ?: "[]") else {
+                            // Try alternative v7 path
+                            val v7Req = Request.Builder().url("$baseUrl/rest/romon/neighbor").header("Authorization", credential).build()
+                            val v7Resp = httpClient.newCall(v7Req).execute()
+                            if (v7Resp.isSuccessful) JSONArray(v7Resp.body?.string() ?: "[]") else JSONArray()
                         }
                     } catch (_: Exception) { JSONArray() }
                 }
 
+                    emptyList<Map<String, String>>()
+
                 val ipAddressJob = async {
                     try {
                         val aReq = Request.Builder().url("$baseUrl/rest/ip/address").header("Authorization", credential).build()
-                        httpClient.newCall(aReq).execute().use { aResp ->
-                            if (aResp.isSuccessful) JSONArray(aResp.body?.string() ?: "[]") else JSONArray()
-                        }
+                        val aResp = httpClient.newCall(aReq).execute()
+                        if (aResp.isSuccessful) JSONArray(aResp.body?.string() ?: "[]") else JSONArray()
                     } catch (_: Exception) { JSONArray() }
                 }
 
@@ -2297,25 +1755,11 @@ class MikrotikRepository(
                     wirelessRegs.add(m)
                 }
 
-                if (interfacesSucceeded) {
-                    activeConfig?.let {
-                        syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface, wirelessRegs, vlanList, ipAddressesList)
-                    }
+                CoroutineScope(Dispatchers.IO).launch {
+                    activeConfig?.let { syncLiveSessionsAndNodes(it, wirelessList, neighborsList, realIdentity, macToInterface, wirelessRegs, vlanList, ipAddressesList) }
                 }
-                lastFullSyncTimeMs = System.currentTimeMillis()
                 notifyDataRefreshed()
-
-                // Throttled non-blocking ingestion of historical UserManager sessions AFTER live state/nodes publish
-                val nowRestMs = System.currentTimeMillis()
-                if (lastUmHistoryFetchMs == 0L || (nowRestMs - lastUmHistoryFetchMs) >= 180_000L) {
-                    lastUmHistoryFetchMs = nowRestMs
-                    try {
-                        fetchRestUserManagerSessions(baseUrl, credential)
-                    } catch (_: Exception) {}
-                }
-            } catch (e: Exception) {
-                throw e
-            }
+            } catch (_: Exception) {}
         }
     }
 
@@ -2414,7 +1858,7 @@ class MikrotikRepository(
             )
         }
 
-        repositoryScope.launch {
+        CoroutineScope(Dispatchers.IO).launch {
             syncLiveSessionsAndNodes(config)
         }
     }
@@ -2433,7 +1877,6 @@ class MikrotikRepository(
         val cardList = _cards.value
 
         val routerIpBase = config.ipAddress.takeIf { it.isNotBlank() } ?: "192.168.88.1"
-        val routerIpKey = routerIpBase.trim()
         val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else "172.16.1"
         val serverName = realIdentity.ifBlank { config.name.ifBlank { "السيرفر الرئيسي ($routerIpBase)" } }
 
@@ -2448,13 +1891,9 @@ class MikrotikRepository(
             }
         }
 
-        // 2. Load persistent nodes scoped to THIS router IP only
+        // 2. Load persistent nodes from DB to ensure closed/offline nodes are preserved
         val dbNodes = try {
-            appDao?.getNetworkNodesByRouterSync(routerIpKey)?.filter {
-                !it.id.startsWith("node_home_") &&
-                !it.id.startsWith("demo_") &&
-                it.id != "node_ap_main"
-            }?.map {
+            appDao?.getAllNetworkNodesSync()?.map {
                 it.toNetworkNode().copy(
                     status = com.example.data.model.NodeStatus.OFFLINE,
                     isOnline = false,
@@ -2478,7 +1917,7 @@ class MikrotikRepository(
             return false
         }
 
-        // 3. Process ALL Interfaces from _interfaceStats (even if empty, continue so old nodes are cleared)
+        // 3. Process ALL Interfaces from _interfaceStats
         val allRouterInterfaces = _interfaceStats.value
         
         // Find default bridge for VLANs (like 'LAN' or 'VLAN' from the user's WebFig)
@@ -2547,7 +1986,7 @@ class MikrotikRepository(
                             id = "node_vlan_$ifName",
                             name = displayName,
                             ipAddress = effectiveIp,
-                            macAddress = nMac.ifBlank { iface.macAddress },
+                            macAddress = nMac.ifBlank { iface.macAddress.ifBlank { "48:A9:8A:76:FB:${"%02X".format(vlanId ?: 1)}" } },
                             interfaceName = ifName,
                             parentInterface = parentIf,
                             vlanId = vlanId,
@@ -2582,7 +2021,7 @@ class MikrotikRepository(
                             id = "node_vlan_$ifName",
                             name = displayName,
                             ipAddress = assignedIp,
-                            macAddress = iface.macAddress,
+                            macAddress = iface.macAddress.ifBlank { "48:A9:8A:76:FB:${"%02X".format(vlanId ?: 1)}" },
                             interfaceName = ifName,
                             parentInterface = parentIf,
                             vlanId = vlanId,
@@ -2625,37 +2064,28 @@ class MikrotikRepository(
             } else if (isEther) {
                 // Physical port: do NOT create duplicate node if neighbor AP is connected, or if port is empty/slave
                 val hasNeighborOnPort = neighbors.any { (it["interface"] ?: "").equals(ifName, true) }
-                val assignedIp = interfaceIpMap[ifName] ?: routerIpBase
-                val hasComment = iface.comment.isNotBlank()
-                val isPortActive = isRunning && !isDisabled
+                val assignedIp = interfaceIpMap[ifName]
+                val hasDistinctIpOrTraffic = (assignedIp != null && assignedIp != routerIpBase) || (iface.rxBytes + iface.txBytes > 10_000_000L)
 
-                // Include physical port if it has a neighbor, has a descriptive comment, has distinct IP, or is active/running
-                if (!hasNeighborOnPort && (isPortActive || hasComment)) {
-                    val portIp = if (assignedIp != routerIpBase) assignedIp else "$subnetPrefix.254"
+                if (!hasNeighborOnPort && hasDistinctIpOrTraffic && isRunning && !isDisabled) {
+                    val portIp = assignedIp ?: routerIpBase
                     if (!isNodeBlacklisted("node_if_$ifName", portIp, ifName, iface.macAddress, null)) {
-                        val displayName = when {
-                            hasComment -> "${iface.comment} ($ifName)"
-                            ifName.equals("ether1", true) -> "منفذ $ifName (الإنترنت / WAN)"
-                            else -> "برج / منفذ $ifName"
-                        }
                         candidateSubNodes.add(
                             com.example.data.model.NetworkNode(
                                 id = "node_if_$ifName",
-                                name = displayName,
+                                name = "منفذ $ifName (Ethernet)",
                                 ipAddress = portIp,
                                 macAddress = iface.macAddress,
                                 interfaceName = ifName,
-                                model = if (hasComment) iface.comment else "Ethernet Port",
-                                role = if (ifName.equals("ether1", true)) "منفذ رئيسي WAN" else "برج إرسال / أكسس بوينت",
-                                isOnline = isPortActive,
-                                status = if (isDisabled) com.example.data.model.NodeStatus.DISABLED else if (isRunning) com.example.data.model.NodeStatus.ACTIVE else com.example.data.model.NodeStatus.OFFLINE,
-                                nodeType = if (ifName.equals("ether1", true)) com.example.data.model.NetworkNodeType.MAIN_TOWER else com.example.data.model.NetworkNodeType.DISTRIBUTION,
+                                model = "Physical Port",
+                                role = "منفذ فيزيائي رئيسي",
+                                isOnline = true,
+                                status = com.example.data.model.NodeStatus.ACTIVE,
+                                nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
                                 parentTowerId = "node_main_router",
                                 rxSpeedKbps = iface.rxSpeedKbps,
                                 txSpeedKbps = iface.txSpeedKbps,
-                                totalBytesConsumed = iface.rxBytes + iface.txBytes,
-                                pingMs = if (isRunning) 2L else 0L,
-                                ssid = if (hasComment) iface.comment else ifName
+                                totalBytesConsumed = iface.rxBytes + iface.txBytes
                             )
                         )
                     }
@@ -2760,7 +2190,7 @@ class MikrotikRepository(
             }
         }
 
-        // 6. Sync with DB: Preserve custom node settings ONLY for user-created nodes; NEVER overwrite live router node names/roles/parents
+        // 6. Sync with DB: Deduplicate and preserve custom settings, do not resurrect deleted nodes
         dbNodes?.forEach { dbNode ->
             if (!isNodeBlacklisted(dbNode.id, dbNode.ipAddress, dbNode.interfaceName, dbNode.macAddress, dbNode.vlanId)) {
                 val matchIdx = candidateSubNodes.indexOfFirst { c ->
@@ -2770,24 +2200,16 @@ class MikrotikRepository(
                     (dbNode.vlanId != null && c.vlanId == dbNode.vlanId) ||
                     (dbNode.interfaceName.isNotBlank() && c.interfaceName.equals(dbNode.interfaceName, true))
                 }
-                val isCustomNode = dbNode.id.startsWith("custom_")
                 if (matchIdx >= 0) {
                     val live = candidateSubNodes[matchIdx]
-                    candidateSubNodes[matchIdx] = if (isCustomNode) {
-                        live.copy(
-                            name = dbNode.name.ifBlank { live.name },
-                            location = dbNode.location.ifBlank { live.location },
-                            parentTowerId = dbNode.parentTowerId ?: live.parentTowerId,
-                            parentTowerName = dbNode.parentTowerName ?: live.parentTowerName,
-                            role = dbNode.role.ifBlank { live.role }
-                        )
-                    } else {
-                        live.copy(
-                            location = live.location.ifBlank { dbNode.location }
-                        )
-                    }
-                } else if (isCustomNode) {
-                    // Only preserve user-created custom nodes as offline when not matched on the live router
+                    candidateSubNodes[matchIdx] = live.copy(
+                        name = if (dbNode.name.isNotBlank() && !dbNode.name.startsWith("نقطة بث ESLAN") && !dbNode.name.startsWith("منفذ ")) dbNode.name else live.name,
+                        location = if (dbNode.location.isNotBlank()) dbNode.location else live.location,
+                        parentTowerId = dbNode.parentTowerId ?: live.parentTowerId,
+                        parentTowerName = dbNode.parentTowerName ?: live.parentTowerName,
+                        role = if (dbNode.role.isNotBlank()) dbNode.role else live.role
+                    )
+                } else {
                     candidateSubNodes.add(dbNode.copy(isOnline = false, status = com.example.data.model.NodeStatus.OFFLINE, connectedUsers = 0))
                 }
             }
@@ -2867,7 +2289,7 @@ class MikrotikRepository(
             id = "node_main_router",
             name = serverName,
             ipAddress = routerIpBase,
-            macAddress = allRouterInterfaces.firstOrNull { it.macAddress.isNotBlank() }?.macAddress.orEmpty(),
+            macAddress = "D4:CA:6D:AA:11:01",
             interfaceName = "ALL",
             model = _resourceState.value.boardName.ifBlank { "MikroTik Router" },
             role = "السيرفر الرئيسي (Gateway)",
@@ -2888,20 +2310,12 @@ class MikrotikRepository(
         val finalNodes = (listOf(mainRouterNode) + processedSubNodes).distinctBy { it.id }
         _networkNodes.value = finalNodes
 
-        // Persist discovered and matched nodes scoped strictly to this routerIp, and purge stale rows
+        // Persist discovered and matched nodes to DB so they appear as "Offline" later if not found
         try {
-            val entities = finalNodes.map {
-                com.example.data.local.NetworkNodeEntity.fromNetworkNode(it, routerIpKey)
+            val entities = finalNodes.map { 
+                com.example.data.local.NetworkNodeEntity.fromNetworkNode(it) 
             }
-            if (entities.isEmpty()) {
-                appDao?.deleteAllNodesForRouter(routerIpKey)
-            } else {
-                appDao?.insertOrUpdateNetworkNodes(entities)
-                val activeIds = finalNodes.map { it.id }
-                if (activeIds.size <= 900) {
-                    appDao?.deleteStaleNodesForRouter(routerIpKey, activeIds)
-                }
-            }
+            appDao?.insertOrUpdateNetworkNodes(entities)
         } catch (e: Exception) {
             // Ignore DB errors during background sync to prevent app crash
         }
@@ -3050,17 +2464,11 @@ class MikrotikRepository(
 
     /**
      * Calculates real-time Rx and Tx traffic speed in Kbps based on delta bytes across polling intervals.
-     * Uses a sliding window average to provide a professional, stable, and accurate speed reading.
+     * Prevents static/hung 0 Kbps displays when connected to a real MikroTik router.
      */
     private fun calculateAndUpdateLiveTrafficSpeeds(interfaces: List<com.example.data.model.InterfaceStats>) {
-        if (interfaces.isEmpty()) return
         val now = System.currentTimeMillis()
         val prevTime = lastTrafficCalculationTimeMs
-
-        // Ignore sub-350ms duplicate triggers so speed doesn't drop to 0 or spike abnormally
-        if (prevTime > 0L && (now - prevTime) < 350L) {
-            return
-        }
         lastTrafficCalculationTimeMs = now
 
         // Focus on active, running non-loopback interfaces, or total aggregate if few
@@ -3074,41 +2482,26 @@ class MikrotikRepository(
         for (iface in targetIfaces) {
             val prev = lastInterfaceBytesMap[iface.name]
             if (prev != null) {
-                // Handle counter resets (if iface was restarted)
-                val deltaRx = if (iface.rxBytes >= prev.first) iface.rxBytes - prev.first else 0L
-                val deltaTx = if (iface.txBytes >= prev.second) iface.txBytes - prev.second else 0L
-
+                hasValidPreviousData = true
+                val deltaRx = (iface.rxBytes - prev.first).coerceAtLeast(0L)
+                val deltaTx = (iface.txBytes - prev.second).coerceAtLeast(0L)
                 totalDeltaRxBytes += deltaRx
                 totalDeltaTxBytes += deltaTx
-                hasValidPreviousData = true
             }
             lastInterfaceBytesMap[iface.name] = Pair(iface.rxBytes, iface.txBytes)
         }
 
         if (hasValidPreviousData && prevTime > 0L) {
-            val deltaSec = ((now - prevTime) / 1000.0).coerceIn(0.4, 25.0)
-
-            // Raw calculation: (Bytes * 8) / (1024 * seconds) = Kbps
-            val rawRxKbps = ((totalDeltaRxBytes * 8.0) / (1024.0 * deltaSec)).coerceAtLeast(0.0)
-            val rawTxKbps = ((totalDeltaTxBytes * 8.0) / (1024.0 * deltaSec)).coerceAtLeast(0.0)
-
-            // Professional Smoothing: Sliding Window Average (Thread-safe)
-            val smoothedRx = synchronized(rxSpeedWindow) {
-                rxSpeedWindow.add(rawRxKbps)
-                if (rxSpeedWindow.size > WINDOW_SIZE) rxSpeedWindow.removeAt(0)
-                rxSpeedWindow.average()
-            }
-            val smoothedTx = synchronized(txSpeedWindow) {
-                txSpeedWindow.add(rawTxKbps)
-                if (txSpeedWindow.size > WINDOW_SIZE) txSpeedWindow.removeAt(0)
-                txSpeedWindow.average()
-            }
+            val deltaSec = ((now - prevTime) / 1000.0).coerceIn(0.5, 30.0)
+            // (Bytes * 8) / (1024 * seconds) = Kbps
+            val rxKbps = ((totalDeltaRxBytes * 8.0) / (1024.0 * deltaSec)).coerceAtLeast(0.0)
+            val txKbps = ((totalDeltaTxBytes * 8.0) / (1024.0 * deltaSec)).coerceAtLeast(0.0)
 
             _resourceState.value = _resourceState.value.copy(
-                rxSpeedKbps = smoothedRx,
-                txSpeedKbps = smoothedTx
+                rxSpeedKbps = rxKbps,
+                txSpeedKbps = txKbps
             )
-            recordBandwidthPoint(smoothedRx, smoothedTx)
+            recordBandwidthPoint(rxKbps, txKbps)
         }
     }
 
@@ -3130,156 +2523,49 @@ class MikrotikRepository(
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                     val credential = Credentials.basic(config.username, config.password)
                     val list = mutableListOf<HotspotProfile>()
-                    var hsOk = false
-                    var umOk = false
+                    
+                    val pReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile").header("Authorization", credential).build()
+                    val pResp = httpClient.newCall(pReq).execute()
+                    if (pResp.isSuccessful) {
+                        val jsonArray = JSONArray(pResp.body?.string().orEmpty())
+                        for (i in 0 until jsonArray.length()) {
+                            val obj = jsonArray.getJSONObject(i)
+                            val name = obj.optString("name", "default")
+                            list.add(HotspotProfile(
+                                id = obj.optString(".id", "p_$i"),
+                                name = name,
+                                rateLimit = obj.optString("rate-limit", "غير محدد"),
+                                sessionTimeout = obj.optString("session-timeout", "غير محدد"),
+                                source = "hotspot",
+                                comment = obj.optString("comment", "")
+                            ))
+                        }
+                    }
 
-                    try {
-                        val pReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile").header("Authorization", credential).build()
-                        httpClient.newCall(pReq).execute().use { pResp ->
-                            if (pResp.isSuccessful) {
-                                hsOk = true
-                                val jsonArray = JSONArray(pResp.body?.string().orEmpty())
-                                for (i in 0 until jsonArray.length()) {
-                                    val obj = jsonArray.getJSONObject(i)
-                                    val name = obj.optString("name", "default")
-                                    list.add(HotspotProfile(
-                                        id = obj.optString(".id", "p_$i"),
-                                        name = name,
-                                        rateLimit = obj.optString("rate-limit", "غير محدد"),
-                                        sessionTimeout = obj.optString("session-timeout", "غير محدد"),
-                                        source = "hotspot",
-                                        comment = obj.optString("comment", "")
-                                    ))
-                                }
+                    val umReq = Request.Builder().url("$baseUrl/rest/user-manager/profile").header("Authorization", credential).build()
+                    val umResp = httpClient.newCall(umReq).execute()
+                    if (umResp.isSuccessful) {
+                        val umArray = JSONArray(umResp.body?.string().orEmpty())
+                        for (i in 0 until umArray.length()) {
+                            val obj = umArray.getJSONObject(i)
+                            val name = obj.optString("name", "")
+                            if (name.isNotBlank()) {
+                                list.add(HotspotProfile(
+                                    id = obj.optString(".id", "um_$i"),
+                                    name = name,
+                                    validity = obj.optString("validity", "1d"),
+                                    source = "usermanager_v7",
+                                    comment = obj.optString("comment", "")
+                                ))
                             }
                         }
-                    } catch (_: Exception) {}
+                    }
 
-                    try {
-                        val umReq = Request.Builder().url("$baseUrl/rest/user-manager/profile").header("Authorization", credential).build()
-                        httpClient.newCall(umReq).execute().use { umResp ->
-                            if (umResp.isSuccessful) {
-                                umOk = true
-                                val umArray = JSONArray(umResp.body?.string().orEmpty())
-                                for (i in 0 until umArray.length()) {
-                                    val obj = umArray.getJSONObject(i)
-                                    val name = obj.optString("name", "")
-                                    if (name.isNotBlank() && list.none { it.name.equals(name, ignoreCase = true) }) {
-                                        list.add(HotspotProfile(
-                                            id = obj.optString(".id", "um_$i"),
-                                            name = name,
-                                            validity = obj.optString("validity", "1d"),
-                                            source = "usermanager_v7",
-                                            comment = obj.optString("comment", "")
-                                        ))
-                                    }
-                                }
-                            }
-                        }
-                    } catch (_: Exception) {}
-
-                    if (hsOk || umOk) {
-                        if (!hsOk) {
-                            _profiles.value.filter { it.isHotspot }.forEach { hsP ->
-                                if (list.none { it.name.equals(hsP.name, ignoreCase = true) }) list.add(hsP)
-                            }
-                        }
-                        if (!umOk) {
-                            _profiles.value.filter { it.isUserManager }.forEach { umP ->
-                                if (list.none { it.name.equals(umP.name, ignoreCase = true) }) list.add(umP)
-                            }
-                        }
+                    if (list.isNotEmpty()) {
                         _profiles.value = list
                     }
                 } catch (_: Exception) {}
             }
-        }
-    }
-
-    /**
-     * Periodically queries live network interface statistics to calculate continuous Rx/Tx network speed
-     * in Kbps without performing a full sync.
-     */
-    suspend fun pollLiveTrafficSpeeds(): Result<Unit> {
-        val config = activeConfig ?: return Result.failure(Exception("لم يتم ضبط إعدادات الاتصال"))
-        if (config.isDemoMode) {
-            val current = _resourceState.value
-            val newRx = (current.rxSpeedKbps + Random.nextDouble(-400.0, 500.0)).coerceAtLeast(350.0)
-            val newTx = (current.txSpeedKbps + Random.nextDouble(-200.0, 300.0)).coerceAtLeast(180.0)
-            _resourceState.value = current.copy(
-                rxSpeedKbps = newRx,
-                txSpeedKbps = newTx
-            )
-            recordBandwidthPoint(newRx, newTx)
-            return Result.success(Unit)
-        }
-
-        // Skip polling when a full sync is already running (it also updates traffic speeds)
-        if (!syncMutex.tryLock()) {
-            return Result.success(Unit)
-        }
-        return try {
-            withContext(Dispatchers.IO) {
-                val currentConfig = activeConfig ?: return@withContext Result.failure(Exception("تم إنهاء الاتصال"))
-                if (currentConfig.isDemoMode) return@withContext Result.success(Unit)
-
-                if (isApiSocketMode) {
-                    val ifRes = routerOsApiClient.getInterfaceStats()
-                    if (ifRes.isFailure) {
-                        return@withContext Result.failure(
-                            ifRes.exceptionOrNull() ?: Exception("تعذر جلب إحصائيات المنافذ من الراوتر")
-                        )
-                    }
-                    val ifList = ifRes.getOrThrow()
-                    _interfaceStats.value = ifList
-                    if (ifList.isNotEmpty()) {
-                        calculateAndUpdateLiveTrafficSpeeds(ifList)
-                    }
-                    Result.success(Unit)
-                } else {
-                    val protocol = if (currentConfig.useHttps) "https" else "http"
-                    val baseUrl = "$protocol://${currentConfig.ipAddress}:${currentConfig.port}"
-                    val credential = Credentials.basic(currentConfig.username, currentConfig.password)
-                    val ifReq = Request.Builder()
-                        .url("$baseUrl/rest/interface?.proplist=.id,name,type,mac-address,rx-byte,tx-byte,rx-packet,tx-packet,running,disabled,comment")
-                        .header("Authorization", credential)
-                        .build()
-                    httpClient.newCall(ifReq).execute().use { ifResp ->
-                        if (!ifResp.isSuccessful) {
-                            return@withContext Result.failure(Exception("تعذر جلب إحصائيات المنافذ (HTTP ${ifResp.code})"))
-                        }
-                        val ifArr = JSONArray(ifResp.body?.string() ?: "[]")
-                        val ifList = mutableListOf<com.example.data.model.InterfaceStats>()
-                        for (i in 0 until ifArr.length()) {
-                            val o = ifArr.getJSONObject(i)
-                            ifList.add(
-                                com.example.data.model.InterfaceStats(
-                                    id = o.optString(".id", "if$i"),
-                                    name = o.optString("name", "ether${i + 1}"),
-                                    type = o.optString("type", "ether"),
-                                    macAddress = o.optString("mac-address", ""),
-                                    rxBytes = o.optLong("rx-byte", 0L),
-                                    txBytes = o.optLong("tx-byte", 0L),
-                                    rxPackets = o.optLong("rx-packet", 0L),
-                                    txPackets = o.optLong("tx-packet", 0L),
-                                    isRunning = o.optBoolean("running", true),
-                                    disabled = o.optBoolean("disabled", false),
-                                    comment = o.optString("comment", "")
-                                )
-                            )
-                        }
-                        _interfaceStats.value = ifList
-                        if (ifList.isNotEmpty()) {
-                            calculateAndUpdateLiveTrafficSpeeds(ifList)
-                        }
-                        Result.success(Unit)
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        } finally {
-            syncMutex.unlock()
         }
     }
 
@@ -3294,56 +2580,19 @@ class MikrotikRepository(
                 val umCards = umCardsRes.getOrNull()
                 if (hotspotCards != null || umCards != null) {
                     val combinedCards = mutableListOf<HotspotCard>()
-                    if (hotspotCards != null) {
-                        combinedCards.addAll(hotspotCards)
-                    } else {
-                        combinedCards.addAll(_cards.value.filter { !it.isUserManagerCard })
-                    }
+                    hotspotCards?.let { combinedCards.addAll(it) }
                     val existingNames = combinedCards.map { it.name }.toSet()
-                    if (umCards != null) {
-                        umCards.forEach { umCard ->
-                            if (!existingNames.contains(umCard.name)) {
-                                combinedCards.add(umCard)
-                            }
-                        }
-                    } else {
-                        _cards.value.filter { it.isUserManagerCard }.forEach { umCard ->
-                            if (!existingNames.contains(umCard.name)) {
-                                combinedCards.add(umCard)
-                            }
+                    umCards?.forEach { umCard ->
+                        if (!existingNames.contains(umCard.name)) {
+                            combinedCards.add(umCard)
                         }
                     }
-                    val currentInMemory = _cards.value.associateBy { it.name }
-                    val mergedCards = mutableListOf<HotspotCard>()
-                    val processedNames = mutableSetOf<String>()
-
-                    for (c in combinedCards) {
-                        val cached = currentInMemory[c.name]
-                        val merged = if (cached != null) {
-                            c.copy(
-                                price = c.price.ifBlank { cached.price },
-                                cardType = c.cardType.ifBlank { cached.cardType }
-                            )
-                        } else c
-                        mergedCards.add(merged)
-                        processedNames.add(c.name)
-                    }
-
-                    val distinctCards = mergedCards.distinctBy { it.name }
-                    val nowSocketMs = System.currentTimeMillis()
-                    if (lastUmHistoryFetchMs == 0L || (nowSocketMs - lastUmHistoryFetchMs) >= 180_000L) {
-                        lastUmHistoryFetchMs = nowSocketMs
-                        try {
-                            val umSessions = routerOsApiClient.getUserManagerSessions().getOrNull().orEmpty()
-                            if (umSessions.isNotEmpty()) {
-                                processHistoricalUmSessions(umSessions)
-                            }
-                        } catch (_: Exception) {}
-                    }
+                    val distinctCards = combinedCards.distinctBy { it.name }
                     val sortedCards = sortCardsByNewestFirst(distinctCards)
-                    _cards.value = sortedCards
-                    syncCardsToRoom(sortedCards)
-                    notifyDataRefreshed()
+                    if (sortedCards.isNotEmpty()) {
+                        _cards.value = sortedCards
+                        syncCardsToRoom(sortedCards)
+                    }
                 }
             } else {
                 try {
@@ -3351,160 +2600,87 @@ class MikrotikRepository(
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                     val credential = Credentials.basic(config.username, config.password)
                     val cardList = mutableListOf<HotspotCard>()
-                    var hsOk = false
-                    var umOk = false
 
                     val userReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user").header("Authorization", credential).build()
-                    httpClient.newCall(userReq).execute().use { userResp ->
-                        if (userResp.isSuccessful) {
-                            hsOk = true
-                            val userArray = JSONArray(userResp.body?.string() ?: "[]")
-                            for (i in 0 until userArray.length()) {
-                                val obj = userArray.getJSONObject(i)
-                                val name = obj.optString("name", "card$i")
-                                val comment = obj.optString("comment", "")
-                                val profile = obj.optString("profile", "default")
-                                val price = extractPriceFromText(comment, profile, name)
-                                val upUsed = NetworkUtils.parseSizeToBytes(obj.optString("bytes-in", "0"))
-                                val downUsed = NetworkUtils.parseSizeToBytes(obj.optString("bytes-out", "0"))
-                                val totalLimit = NetworkUtils.parseSizeToBytes(obj.optString("limit-bytes-total", "0")).takeIf { it > 0L }
-                                    ?: NetworkUtils.parseSizeToBytes(obj.optString("limit-bytes-out", "0")).takeIf { it > 0L }
-                                    ?: NetworkUtils.parseSizeToBytes(obj.optString("limit-bytes-in", "0"))
-                                cardList.add(
-                                    HotspotCard(
-                                        id = obj.optString(".id", "u$i"),
-                                        name = name,
-                                        password = obj.optString("password", ""),
-                                        profile = profile,
-                                        uptime = obj.optString("uptime", "0s"),
-                                        bytesIn = upUsed,
-                                        bytesOut = downUsed,
-                                        limitUptime = obj.optString("limit-uptime", ""),
-                                        limitBytesTotal = totalLimit,
-                                        comment = comment,
-                                        disabled = obj.optBoolean("disabled", false),
-                                        price = price,
-                                        cardType = "hotspot",
-                                        createdAtHint = NetworkUtils.parseRouterDateToEpoch(comment) ?: 0L
-                                    )
+                    val userResp = httpClient.newCall(userReq).execute()
+                    if (userResp.isSuccessful) {
+                        val userArray = JSONArray(userResp.body?.string() ?: "[]")
+                        for (i in 0 until userArray.length()) {
+                            val obj = userArray.getJSONObject(i)
+                            val name = obj.optString("name", "card$i")
+                            val comment = obj.optString("comment", "")
+                            val profile = obj.optString("profile", "default")
+                            val price = extractPriceFromText(comment, profile, name)
+                            cardList.add(
+                                HotspotCard(
+                                    id = obj.optString(".id", "u$i"),
+                                    name = name,
+                                    password = obj.optString("password", ""),
+                                    profile = profile,
+                                    uptime = obj.optString("uptime", "0s"),
+                                    bytesIn = obj.optLong("bytes-in", 0L),
+                                    bytesOut = obj.optLong("bytes-out", 0L),
+                                    limitUptime = obj.optString("limit-uptime", ""),
+                                    limitBytesTotal = obj.optLong("limit-bytes-total", 0L).takeIf { it > 0 }
+                                        ?: obj.optLong("limit-bytes-out", 0L).takeIf { it > 0 }
+                                        ?: obj.optLong("limit-bytes-in", 0L),
+                                    comment = comment,
+                                    disabled = obj.optBoolean("disabled", false),
+                                    price = price
                                 )
-                            }
-                        } else {
-                            cardList.addAll(_cards.value.filter { !it.isUserManagerCard })
+                            )
                         }
                     }
 
-                    val umUserProfileMap = fetchRestUmUserProfiles(baseUrl, credential)
                     try {
                         val umReq = Request.Builder()
-                            .url("$baseUrl/rest/user-manager/user?.proplist=.id,name,username,password,profile,actual-profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,creation-time,start-time,started,till-time,end-time,last-seen,last-logged-in,comment,disabled")
-                            .header("Authorization", credential)
-                            .build()
-                        httpClient.newCall(umReq).execute().use { umResp ->
-                            if (umResp.isSuccessful) {
-                                umOk = true
-                                val umArray = JSONArray(umResp.body?.string() ?: "[]")
-                                val existingNames = cardList.map { it.name }.toSet()
-                                for (i in 0 until umArray.length()) {
-                                    val obj = umArray.getJSONObject(i)
-                                    val name = obj.optString("name", "").ifBlank { obj.optString("username", "") }
-                                    if (name.isNotBlank() && !existingNames.contains(name)) {
-                                        val comment = obj.optString("comment", "")
-                                        val umFallback = umUserProfileMap[name.trim().lowercase()]
-                                        val profile = obj.optString("actual-profile", "")
-                                            .ifBlank { obj.optString("profile", "") }
-                                            .ifBlank { umFallback?.first.orEmpty() }
-                                            .ifBlank { "UserManager" }
-                                        val price = extractPriceFromText(comment, profile, name)
-                                        val downUsed = NetworkUtils.parseSizeToBytes(obj.optString("download-used", "0"))
-                                        val upUsed = NetworkUtils.parseSizeToBytes(obj.optString("upload-used", "0"))
-                                        val dlLimit = NetworkUtils.parseSizeToBytes(obj.optString("download-limit", "0"))
-                                        val totLimit = NetworkUtils.parseSizeToBytes(obj.optString("total-limit", "0"))
-                                        val transLimit = NetworkUtils.parseSizeToBytes(obj.optString("transfer-limit", "0"))
-                                        val bestLimit = if (totLimit > 0L) totLimit else if (transLimit > 0L) transLimit else dlLimit
-                                        val dateHint = listOfNotNull(
-                                            obj.optString("creation-time"),
-                                            obj.optString("start-time"),
-                                            obj.optString("started"),
-                                            comment.takeIf { it.isNotBlank() },
-                                            obj.optString("last-seen"),
-                                            obj.optString("last-logged-in"),
-                                            obj.optString("till-time"),
-                                            obj.optString("end-time"),
-                                            umFallback?.second?.takeIf { it.isNotBlank() }
-                                        ).firstNotNullOfOrNull { raw ->
-                                            if (raw.isBlank()) null else NetworkUtils.parseRouterDateToEpoch(raw)
-                                        } ?: 0L
-                                        cardList.add(
-                                            HotspotCard(
-                                                id = obj.optString(".id", "um$i"),
-                                                name = name,
-                                                password = obj.optString("password", ""),
-                                                profile = profile,
-                                                uptime = obj.optString("uptime", "0s"),
-                                                bytesIn = upUsed,
-                                                bytesOut = downUsed,
-                                                limitUptime = obj.optString("time-limit", ""),
-                                                limitBytesTotal = bestLimit,
-                                                comment = comment,
-                                                disabled = obj.optBoolean("disabled", false),
-                                                price = price,
-                                                cardType = "usermanager",
-                                                createdAtHint = dateHint
-                                            )
+                        .url("$baseUrl/rest/user-manager/user?.proplist=.id,name,username,password,profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,comment,disabled")
+                        .header("Authorization", credential)
+                        .build()
+                        val umResp = httpClient.newCall(umReq).execute()
+                        if (umResp.isSuccessful) {
+                            val umArray = JSONArray(umResp.body?.string() ?: "[]")
+                            val existingNames = cardList.map { it.name }.toSet()
+                            for (i in 0 until umArray.length()) {
+                                val obj = umArray.getJSONObject(i)
+                                val name = obj.optString("name", "")
+                                if (name.isNotBlank() && !existingNames.contains(name)) {
+                                    val comment = obj.optString("comment", "")
+                                    val profile = obj.optString("actual-profile", obj.optString("profile", "default"))
+                                    val price = extractPriceFromText(comment, profile, name)
+                                    cardList.add(
+                                        HotspotCard(
+                                            id = obj.optString(".id", "um$i"),
+                                            name = name,
+                                            password = obj.optString("password", ""),
+                                            profile = profile,
+                                            uptime = obj.optString("uptime", "0s"),
+                                            bytesIn = obj.optLong("download-used", 0L),
+                                            bytesOut = obj.optLong("upload-used", 0L),
+                                            limitUptime = obj.optString("time-limit", ""),
+                                            limitBytesTotal = obj.optLong("total-limit", 0L).takeIf { it > 0 }
+                                                ?: obj.optLong("download-limit", 0L),
+                                            comment = comment,
+                                            disabled = obj.optBoolean("disabled", false),
+                                            price = price
                                         )
-                                    }
+                                    )
                                 }
                             }
                         }
                     } catch (_: Exception) {}
 
-                    if (!umOk) {
-                        val existingNames = cardList.map { it.name }.toSet()
-                        _cards.value.filter { it.isUserManagerCard }.forEach { umCard ->
-                            if (!existingNames.contains(umCard.name)) {
-                                cardList.add(umCard)
-                            }
-                        }
-                    }
-
-                    val nowRestCardsMs = System.currentTimeMillis()
-                    if (lastUmHistoryFetchMs == 0L || (nowRestCardsMs - lastUmHistoryFetchMs) >= 180_000L) {
-                        lastUmHistoryFetchMs = nowRestCardsMs
-                        fetchRestUserManagerSessions(baseUrl, credential)
-                    }
-
-                    if (hsOk || umOk) {
-                        val currentInMemory = _cards.value.associateBy { it.name }
-                        val mergedList = mutableListOf<HotspotCard>()
-                        val processedNames = mutableSetOf<String>()
-
-                        for (c in cardList) {
-                            val cached = currentInMemory[c.name]
-                            val merged = if (cached != null) {
-                                c.copy(
-                                    price = c.price.ifBlank { cached.price },
-                                    cardType = c.cardType.ifBlank { cached.cardType }
-                                )
-                            } else c
-                            mergedList.add(merged)
-                            processedNames.add(c.name)
-                        }
-
-                        val sortedCards = sortCardsByNewestFirst(mergedList.distinctBy { it.name })
+                    val sortedCards = sortCardsByNewestFirst(cardList.distinctBy { it.name })
+                    if (sortedCards.isNotEmpty()) {
                         _cards.value = sortedCards
                         syncCardsToRoom(sortedCards)
-                        notifyDataRefreshed()
                     }
                 } catch (_: Exception) {}
             }
         }
     }
 
-    suspend fun refreshData(
-        forceLiveRefresh: Boolean = false,
-        forceHistorySync: Boolean = false
-    ): Result<Unit> {
+    suspend fun refreshData(): Result<Unit> {
         val config = activeConfig ?: return Result.failure(Exception("لم يتم ضبط إعدادات الاتصال"))
         if (config.isDemoMode) {
             val current = _resourceState.value
@@ -3520,44 +2696,32 @@ class MikrotikRepository(
             return Result.success(Unit)
         }
 
-        return syncMutex.withLock {
-            val currentConfig = activeConfig ?: return@withLock Result.failure(Exception("تم إيقاف الاتصال بالراوتر"))
-            if (currentConfig.isDemoMode) return@withLock Result.success(Unit)
-            if (!forceLiveRefresh && !forceHistorySync && (System.currentTimeMillis() - lastFullSyncTimeMs) < 1500L) {
-                return@withLock Result.success(Unit)
-            }
-            if (forceHistorySync) {
-                lastUmHistoryFetchMs = 0L
-            }
-
-            try {
-                if (isApiSocketMode) {
-                    fetchLiveRouterDataFromSocket()
+        return try {
+            if (isApiSocketMode) {
+                fetchLiveRouterDataFromSocket()
+                _lastSyncError.value = null
+                Result.success(Unit)
+            } else {
+                withContext(Dispatchers.IO) {
+                    val protocol = if (config.useHttps) "https" else "http"
+                    val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                    val credential = Credentials.basic(config.username, config.password)
+                    try {
+                        val resReq = Request.Builder().url("$baseUrl/rest/system/resource").header("Authorization", credential).build()
+                        val resResp = httpClient.newCall(resReq).execute()
+                        if (resResp.isSuccessful) {
+                            parseResource(resResp.body?.string() ?: "")
+                        }
+                    } catch (_: Exception) {}
+                    fetchLiveRouterData(baseUrl, credential)
                     _lastSyncError.value = null
                     Result.success(Unit)
-                } else {
-                    withContext(Dispatchers.IO) {
-                        val protocol = if (currentConfig.useHttps) "https" else "http"
-                        val baseUrl = "$protocol://${currentConfig.ipAddress}:${currentConfig.port}"
-                        val credential = Credentials.basic(currentConfig.username, currentConfig.password)
-                        try {
-                            val resReq = Request.Builder().url("$baseUrl/rest/system/resource").header("Authorization", credential).build()
-                            httpClient.newCall(resReq).execute().use { resResp ->
-                                if (resResp.isSuccessful) {
-                                    parseResource(resResp.body?.string() ?: "")
-                                }
-                            }
-                        } catch (_: Exception) {}
-                        fetchLiveRouterData(baseUrl, credential)
-                        _lastSyncError.value = null
-                        Result.success(Unit)
-                    }
                 }
-            } catch (e: Exception) {
-                val errMsg = "تعذر تحديث البيانات من الراوتر: ${e.localizedMessage ?: e.message}"
-                _lastSyncError.value = errMsg
-                Result.failure(e)
             }
+        } catch (e: Exception) {
+            val errMsg = "تعذر تحديث البيانات من الراوتر: ${e.localizedMessage ?: e.message}"
+            _lastSyncError.value = errMsg
+            Result.failure(e)
         }
     }
 
@@ -3569,7 +2733,6 @@ class MikrotikRepository(
                     val socketRes = routerOsApiClient.kickUser(user.id)
                     if (socketRes.isSuccess) {
                         _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
-                        notifyDataRefreshed()
                     }
                     return@withContext socketRes
                 }
@@ -3582,19 +2745,16 @@ class MikrotikRepository(
                         .delete()
                         .header("Authorization", credential)
                         .build()
-                    httpClient.newCall(delRequest).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
-                            notifyDataRefreshed()
-                            return@withContext Result.success(true)
-                        }
+                    val resp = httpClient.newCall(delRequest).execute()
+                    if (resp.isSuccessful) {
+                        _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
+                        return@withContext Result.success(true)
                     }
                 } catch (e: Exception) {
                     return@withContext Result.failure(e)
                 }
             }
             _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
-            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -3614,7 +2774,6 @@ class MikrotikRepository(
                         cardTimestampCache.remove(targetName)
                         try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
                     }
-                    notifyDataRefreshed()
                     return@withContext socketRes
                 }
                 try {
@@ -3650,7 +2809,6 @@ class MikrotikRepository(
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
                         }
-                        notifyDataRefreshed()
                         return@withContext Result.success(true)
                     }
 
@@ -3664,7 +2822,6 @@ class MikrotikRepository(
                             _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
-                            notifyDataRefreshed()
                             return@withContext Result.success(true)
                         }
                     }
@@ -3679,7 +2836,6 @@ class MikrotikRepository(
                             _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
-                            notifyDataRefreshed()
                             return@withContext Result.success(true)
                         }
                     }
@@ -3691,7 +2847,6 @@ class MikrotikRepository(
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
                         }
-                        notifyDataRefreshed()
                         return@withContext Result.success(true)
                     }
 
@@ -3705,7 +2860,6 @@ class MikrotikRepository(
                 try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
             }
             _cards.value = _cards.value.filter { it.id != cardId && (targetName.isBlank() || it.name != targetName) }
-            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -3815,9 +2969,10 @@ class MikrotikRepository(
             }
             val targetCard = _cards.value.firstOrNull { it.name == card.name || it.id == card.id }
             if (targetCard != null) {
-                upsertLocalCardPreservingTimestamp(targetCard)
+                try {
+                    appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(targetCard))
+                } catch (_: Exception) {}
             }
-            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -3912,8 +3067,9 @@ class MikrotikRepository(
             _cards.value = _cards.value.map {
                 if (it.id == updatedCard.id || it.name == updatedCard.name) updatedCard else it
             }
-            upsertLocalCardPreservingTimestamp(updatedCard)
-            notifyDataRefreshed()
+            try {
+                appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updatedCard))
+            } catch (_: Exception) {}
             Result.success(true)
         }
     }
@@ -3934,9 +3090,8 @@ class MikrotikRepository(
                     }
                     val updated = _cards.value.firstOrNull { it.id == cardId || (targetName.isNotBlank() && it.name == targetName) }
                     if (updated != null) {
-                        upsertLocalCardPreservingTimestamp(updated)
+                        try { appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updated)) } catch (_: Exception) {}
                     }
-                    notifyDataRefreshed()
                     return@withContext socketRes
                 }
                 try {
@@ -3956,9 +3111,8 @@ class MikrotikRepository(
                         }
                         val updated = _cards.value.firstOrNull { it.id == cardId }
                         if (updated != null) {
-                            upsertLocalCardPreservingTimestamp(updated)
+                            try { appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updated)) } catch (_: Exception) {}
                         }
-                        notifyDataRefreshed()
                         return@withContext Result.success(true)
                     }
                     return@withContext Result.failure(Exception("رفض الراوتر تغيير حالة الكرت عبر واجهة REST"))
@@ -3971,9 +3125,8 @@ class MikrotikRepository(
             }
             val updated = _cards.value.firstOrNull { it.id == cardId }
             if (updated != null) {
-                upsertLocalCardPreservingTimestamp(updated)
+                try { appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updated)) } catch (_: Exception) {}
             }
-            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -4081,7 +3234,6 @@ class MikrotikRepository(
                 CodeCharType.LETTERS_ONLY -> "ABCDEFGHJKLMNPQRSTUVWXYZ"
             }
 
-            val batchTimestamp = System.currentTimeMillis()
             var attempts = 0
             while (generatedCards.size < config.count && attempts < config.count * 10) {
                 attempts++
@@ -4104,7 +3256,7 @@ class MikrotikRepository(
                     val limitBytes = if (config.dataLimitMB > 0) config.dataLimitMB * 1024 * 1024L else 0L
 
                     val card = HotspotCard(
-                        id = "gen_${batchTimestamp}_${generatedCards.size}",
+                        id = "gen_${System.currentTimeMillis()}_${generatedCards.size}",
                         name = code,
                         password = password,
                         profile = cleanProfileName,
@@ -4335,12 +3487,6 @@ class MikrotikRepository(
                         }
                     }
 
-                    if (addedCards.isNotEmpty()) {
-                        addedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = batchTimestamp - i }
-                        val preMerged = (addedCards + _cards.value).distinctBy { it.name }
-                        _cards.value = sortCardsByNewestFirst(preMerged)
-                    }
-
                     // Re-sync all cards (both Hotspot & User-Manager) directly from router
                     refreshCardsFromRouter()
                 }
@@ -4359,24 +3505,24 @@ class MikrotikRepository(
                     )
                 }
 
-                addedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = batchTimestamp - i }
+                val now = System.currentTimeMillis()
+                addedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = now - i }
                 val currentList = _cards.value.toMutableList()
                 currentList.addAll(0, addedCards)
                 val sorted = sortCardsByNewestFirst(currentList.distinctBy { it.name })
                 _cards.value = sorted
                 syncCardsToRoom(sorted)
-                notifyDataRefreshed()
                 return@withContext Result.success(batchResult)
             }
 
             // Demo Mode: Add generated cards locally
-            generatedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = batchTimestamp - i }
+            val now = System.currentTimeMillis()
+            generatedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = now - i }
             val currentList = _cards.value.toMutableList()
             currentList.addAll(0, generatedCards)
             val sorted = sortCardsByNewestFirst(currentList.distinctBy { it.name })
             _cards.value = sorted
             syncCardsToRoom(sorted)
-            notifyDataRefreshed()
 
             val batchResult = BatchCardGenerationResult(
                 totalRequested = config.count,
@@ -4597,7 +3743,6 @@ class MikrotikRepository(
             val sorted = sortCardsByNewestFirst(currentList)
             _cards.value = sorted
             syncCardsToRoom(listOf(sanitizedCard))
-            notifyDataRefreshed()
 
             // Non-blocking background sync of full list
             if (routerConfig != null && !routerConfig.isDemoMode) {
@@ -4673,7 +3818,6 @@ class MikrotikRepository(
             current.add(newProf)
             _profiles.value = current
         }
-        notifyDataRefreshed()
         return Result.success(true)
     }
 
@@ -4789,8 +3933,9 @@ class MikrotikRepository(
         _cards.value = _cards.value.map {
             if (it.id == card.id || it.name == card.name) activated else it
         }
-        upsertLocalCardPreservingTimestamp(activated)
-        notifyDataRefreshed()
+        try {
+            appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(activated))
+        } catch (_: Exception) {}
         return Result.success(true)
     }
 
@@ -4882,7 +4027,6 @@ class MikrotikRepository(
             current.add(profile)
         }
         _profiles.value = current
-        notifyDataRefreshed()
         return Result.success(true)
     }
 
@@ -4988,7 +4132,6 @@ class MikrotikRepository(
         _profiles.value = _profiles.value.map {
             if (it.id == profile.id || it.name == profile.name) profile else it
         }
-        notifyDataRefreshed()
         return Result.success(true)
     }
 
@@ -5024,7 +4167,6 @@ class MikrotikRepository(
             }
         }
         _profiles.value = _profiles.value.filter { it.id != profile.id && it.name != profile.name }
-        notifyDataRefreshed()
         return Result.success(true)
     }
 
@@ -5046,12 +4188,9 @@ class MikrotikRepository(
             _networkNodes.value = list.distinctBy { it.id.ifBlank { it.ipAddress } }
 
             try {
-                appDao?.insertOrUpdateNetworkNodes(
-                    listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node, currentRouterIp()))
-                )
+                appDao?.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
             } catch (_: Exception) {}
 
-            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -5081,12 +4220,9 @@ class MikrotikRepository(
             _networkNodes.value = currentList
 
             try {
-                appDao?.insertOrUpdateNetworkNodes(
-                    listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node, currentRouterIp()))
-                )
+                appDao?.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
             } catch (_: Exception) {}
 
-            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -5110,13 +4246,11 @@ class MikrotikRepository(
                 it.id != nodeId && (existing == null || it.ipAddress.isBlank() || it.ipAddress != existing.ipAddress)
             }
 
-            val routerIpKey = currentRouterIp()
             try {
-                appDao?.deleteNetworkNodesFlexible(routerIpKey, nodeId, existing?.ipAddress.orEmpty(), existing?.interfaceName.orEmpty())
+                appDao?.deleteNetworkNodesFlexible(nodeId, existing?.ipAddress.orEmpty(), existing?.interfaceName.orEmpty())
             } catch (_: Exception) {
-                try { appDao?.deleteNetworkNodeEntity(routerIpKey, nodeId) } catch (_: Exception) {}
+                try { appDao?.deleteNetworkNodeEntity(nodeId) } catch (_: Exception) {}
             }
-            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -5153,70 +4287,21 @@ class MikrotikRepository(
             }
 
             // Real network heartbeat polling
-            // 1. Gateway node is the router itself — if connected, it is always active
-            if (node.id == "node_main_router" || node.ipAddress == gatewayIp) {
-                return@withContext node.copy(
-                    status = com.example.data.model.NodeStatus.ACTIVE,
-                    isOnline = true,
-                    pingMs = 1L.coerceAtLeast(node.pingMs),
-                    lastCheckTime = now,
-                    lastSeenTime = now
-                )
-            }
-
-            // 2. If node has actively connected users passing traffic right now, it is online!
-            if (node.connectedUsers > 0) {
-                return@withContext node.copy(
-                    status = com.example.data.model.NodeStatus.ACTIVE,
-                    isOnline = true,
-                    pingMs = if (node.pingMs > 0) node.pingMs else 2L,
-                    lastCheckTime = now,
-                    lastSeenTime = now
-                )
-            }
-
-            // 3. Check live router interface status from interface stats:
-            val matchingIface = _interfaceStats.value.firstOrNull { it.name.equals(node.interfaceName, ignoreCase = true) }
-            if (matchingIface != null) {
-                if (matchingIface.disabled) {
-                    return@withContext node.copy(
-                        status = com.example.data.model.NodeStatus.DISABLED,
-                        isOnline = false,
-                        pingMs = 0L,
-                        lastCheckTime = now
-                    )
-                }
-                if (matchingIface.isRunning) {
-                    return@withContext node.copy(
-                        status = com.example.data.model.NodeStatus.ACTIVE,
-                        isOnline = true,
-                        pingMs = if (node.pingMs > 0) node.pingMs else 2L,
-                        rxSpeedKbps = matchingIface.rxSpeedKbps,
-                        txSpeedKbps = matchingIface.txSpeedKbps,
-                        totalBytesConsumed = matchingIface.rxBytes + matchingIface.txBytes,
-                        lastCheckTime = now,
-                        lastSeenTime = now
-                    )
-                }
-            }
-
-            // 4. Standalone probe via ICMP ping or common port socket connection:
             val start = System.currentTimeMillis()
             var isReachable = false
             var responseMs = 0L
 
-            if (node.ipAddress.isNotBlank() && node.ipAddress != "0.0.0.0" && node.ipAddress != "غير محدد") {
-                val pingRes = NetworkUtils.pingHost(node.ipAddress, timeoutMs = 700)
-                if (pingRes.first) {
-                    isReachable = true
-                    responseMs = pingRes.second.coerceAtLeast(1L)
-                } else {
-                    for (port in listOf(80, 8728, 8291, 443)) {
-                        if (NetworkUtils.testSocketConnection(node.ipAddress, port, timeoutMs = 350)) {
-                            isReachable = true
-                            responseMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
-                            break
-                        }
+            val pingRes = NetworkUtils.pingHost(node.ipAddress, timeoutMs = 900)
+            if (pingRes.first) {
+                isReachable = true
+                responseMs = pingRes.second.coerceAtLeast(1L)
+            } else {
+                // Fallback socket probe on common network ports
+                for (port in listOf(80, 8728, 8291, 443)) {
+                    if (NetworkUtils.testSocketConnection(node.ipAddress, port, timeoutMs = 450)) {
+                        isReachable = true
+                        responseMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+                        break
                     }
                 }
             }
@@ -5252,7 +4337,6 @@ class MikrotikRepository(
 
     suspend fun pollAllNodesHeartbeat(context: android.content.Context? = null): List<com.example.data.model.NetworkNode> {
         return withContext(Dispatchers.IO) {
-            val sessionAtStart = connectionSessionId
             val currentNodes = _networkNodes.value
             if (currentNodes.isEmpty()) return@withContext emptyList()
 
@@ -5265,30 +4349,7 @@ class MikrotikRepository(
                 }.awaitAll()
             }
 
-            if (sessionAtStart != connectionSessionId || activeConfig == null) {
-                return@withContext _networkNodes.value
-            }
-
-            // Merge heartbeat status into the latest _networkNodes list so live session updates arriving mid-scan are never lost
-            val checkedById = checkedNodes.associateBy { it.id }
-            val mergedNodes = _networkNodes.value.map { latest ->
-                val checked = checkedById[latest.id]
-                if (checked != null) {
-                    latest.copy(
-                        status = checked.status,
-                        isOnline = checked.isOnline,
-                        pingMs = checked.pingMs,
-                        lastCheckTime = checked.lastCheckTime,
-                        lastSeenTime = maxOf(latest.lastSeenTime, checked.lastSeenTime),
-                        rxSpeedKbps = if (checked.rxSpeedKbps > 0) checked.rxSpeedKbps else latest.rxSpeedKbps,
-                        txSpeedKbps = if (checked.txSpeedKbps > 0) checked.txSpeedKbps else latest.txSpeedKbps
-                    )
-                } else {
-                    latest
-                }
-            }
-
-            _networkNodes.value = mergedNodes
+            _networkNodes.value = checkedNodes
 
             // Persist immediately in RouterCacheManager for ultra-fast restore on app relaunch
             context?.let { ctx ->
@@ -5305,13 +4366,13 @@ class MikrotikRepository(
                     profiles = _profiles.value,
                     activeUsers = _activeUsers.value,
                     servers = _hotspotServers.value,
-                    nodes = mergedNodes,
+                    nodes = checkedNodes,
                     logs = _systemLogs.value,
                     ipBindings = _ipBindings.value
                 )
             }
 
-            mergedNodes
+            checkedNodes
         }
     }
 
@@ -5346,7 +4407,7 @@ class MikrotikRepository(
                         .post("{}".toRequestBody("application/json".toMediaType()))
                         .header("Authorization", credential)
                         .build()
-                    httpClient.newCall(postReq).execute().close()
+                    httpClient.newCall(postReq).execute()
                     Result.success(true)
                 } catch (e: Exception) {
                     Result.failure(e)
@@ -5434,23 +4495,11 @@ class MikrotikRepository(
     }
 
     fun disconnect() {
-        connectionSessionId++
-        initialSyncJob?.cancel()
-        initialSyncJob = null
         activeConfig = null
-        activeRouterIp = ""
-        lastFullSyncTimeMs = 0L
-        lastUmHistoryFetchMs = 0L
-        lastSyncedUmSessionsSignature = 0
-        cardTimestampCache.clear()
-        umEarliestSessionTimestamps.clear()
-        customAddedNodes.clear()
-        deletedNodeIds.clear()
-        deletedNodeKeys.clear()
-        lastKnownUserTelemetry.clear()
-        resetTrafficCalculationState()
-        isApiSocketMode = false
-        routerOsApiClient.disconnect()
+        if (isApiSocketMode) {
+            routerOsApiClient.close()
+            isApiSocketMode = false
+        }
     }
 
     fun getActiveConfig(): RouterConnectionConfig? = activeConfig

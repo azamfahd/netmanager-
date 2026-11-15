@@ -49,8 +49,7 @@ data class LocalCardEntity(
             comment = comment,
             disabled = disabled,
             price = price,
-            cardType = cardType,
-            createdAtHint = createdTimestamp
+            cardType = cardType
         )
     }
 

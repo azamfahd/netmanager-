@@ -178,7 +178,7 @@ fun ProfilesScreen(
                 }
 
                 IconButton(
-                    onClick = { viewModel.refreshData(forceLiveRefresh = true, notifyOnError = true) },
+                    onClick = { viewModel.refreshData() },
                     modifier = Modifier.testTag("btn_refresh_profiles")
                 ) {
                     Icon(

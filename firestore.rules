@@ -1,0 +1,79 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isUser(uid) { return isSignedIn() && request.auth.uid == uid; }
+    function isValidId(id) { return id is string && id.size() > 0 && id.size() <= 128; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // 2. Resource-Specific Validations
+    function isValidRouter(data) {
+      return data.id is string && data.name is string && data.ipAddress is string;
+    }
+    function isValidBatch(data) {
+      return data.id is string && data.profileName is string && data.count is number;
+    }
+    function isValidAgent(data) {
+      return data.id is string && data.name is string && data.discountPercent is number;
+    }
+    function isValidPosCard(data) {
+      return data.id is string && data.cardName is string && data.isSold is bool;
+    }
+    function isValidPayment(data) {
+      return data.id is string && data.agentId is string && data.amount is number;
+    }
+    function isValidPricing(data) {
+      return data.profileName is string && data.costPrice is number && data.salePrice is number;
+    }
+    function isValidSession(data) {
+      return data.id is string && data.username is string && data.timestamp is timestamp;
+    }
+    function isValidErrorLog(data) {
+      return data.id is string && data.operation is string && data.timestamp is timestamp;
+    }
+    function isValidLoginHistory(data) {
+      return data.id is string && data.username is string && data.timestamp is timestamp;
+    }
+    function isValidSystemLog(data) {
+      return data.id is string && data.actionType is string && data.timestamp is timestamp;
+    }
+
+    // 3. Collection Rules
+    match /users/{uid} {
+      allow read, write: if isUser(uid);
+
+      match /routers/{routerId} {
+        allow read, write: if isUser(uid) && isValidId(routerId) && (request.method == 'delete' || isValidRouter(incoming()));
+      }
+      match /batchHistory/{batchId} {
+        allow read, write: if isUser(uid) && isValidId(batchId) && (request.method == 'delete' || isValidBatch(incoming()));
+      }
+      match /posAgents/{agentId} {
+        allow read, write: if isUser(uid) && isValidId(agentId) && (request.method == 'delete' || isValidAgent(incoming()));
+      }
+      match /posCards/{cardId} {
+        allow read, write: if isUser(uid) && isValidId(cardId) && (request.method == 'delete' || isValidPosCard(incoming()));
+      }
+      match /posPayments/{paymentId} {
+        allow read, write: if isUser(uid) && isValidId(paymentId) && (request.method == 'delete' || isValidPayment(incoming()));
+      }
+      match /packagePricing/{pricingId} {
+        allow read, write: if isUser(uid) && isValidId(pricingId) && (request.method == 'delete' || isValidPricing(incoming()));
+      }
+      match /sessionArchive/{sessionId} {
+        allow read, write: if isUser(uid) && isValidId(sessionId) && (request.method == 'delete' || isValidSession(incoming()));
+      }
+      match /errorLogs/{logId} {
+        allow read, write: if isUser(uid) && isValidId(logId) && (request.method == 'delete' || isValidErrorLog(incoming()));
+      }
+      match /loginHistory/{historyId} {
+        allow read, write: if isUser(uid) && isValidId(historyId) && (request.method == 'delete' || isValidLoginHistory(incoming()));
+      }
+      match /systemLogs/{logId} {
+        allow read, write: if isUser(uid) && isValidId(logId) && (request.method == 'delete' || isValidSystemLog(incoming()));
+      }
+    }
+  }
+}

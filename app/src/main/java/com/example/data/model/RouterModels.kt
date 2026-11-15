@@ -8,30 +8,7 @@ data class CardBatchGroup(
     val timestamp: Long,
     val formattedDate: String,
     val totalValue: Double,
-    val cards: List<HotspotCard>,
-    val allBatchCards: List<HotspotCard> = cards,
-    val readyCards: List<HotspotCard> = cards,
-    val totalGeneratedCount: Int = cards.size,
-    val readyCount: Int = cards.size,
-    val activeCount: Int = 0,
-    val usedOfflineCount: Int = 0,
-    val expiredCount: Int = 0,
-    val isPrintedBefore: Boolean = false,
-    val batchNumber: Int = 0,
-    val sourceSystemLabel: String = ""
-)
-
-data class PrintableBatchOption(
-    val batchKey: String,
-    val title: String,
-    val profileName: String,
-    val price: String,
-    val timestamp: Long,
-    val formattedDate: String,
-    val readyCards: List<HotspotCard>,
-    val allCardsInBatch: List<HotspotCard>,
-    val isPrintedBefore: Boolean = false,
-    val isNewlyAdded: Boolean = false
+    val cards: List<HotspotCard>
 )
 
 data class RouterConnectionConfig(
@@ -62,27 +39,27 @@ sealed class ConnectionState {
 }
 
 data class RouterResource(
-    val uptime: String = "0s",
-    val version: String = "",
-    val boardName: String = "",
-    val cpuLoad: Int = 0,
-    val freeMemoryBytes: Long = 0L,
-    val totalMemoryBytes: Long = 0L,
-    val architecture: String = "",
-    val rxSpeedKbps: Double = 0.0,
-    val txSpeedKbps: Double = 0.0,
-    val voltage: String = "",
-    val temperature: String = "",
-    val cpuFrequency: String = "",
-    val hddFreeBytes: Long = 0L
+    val uptime: String = "3d 14h 22m",
+    val version: String = "7.15.2 (stable)",
+    val boardName: String = "MikroTik RB4011iGS+",
+    val cpuLoad: Int = 18,
+    val freeMemoryBytes: Long = 780 * 1024 * 1024L,
+    val totalMemoryBytes: Long = 1024 * 1024 * 1024L,
+    val architecture: String = "arm64",
+    val rxSpeedKbps: Double = 3450.0,
+    val txSpeedKbps: Double = 1820.0,
+    val voltage: String = "24.1 V",
+    val temperature: String = "42°C",
+    val cpuFrequency: String = "1400 MHz",
+    val hddFreeBytes: Long = 512 * 1024 * 1024L
 )
 
 data class RouterBoardInfo(
-    val model: String = "",
-    val serialNumber: String = "",
-    val currentFirmware: String = "",
-    val upgradeFirmware: String = "",
-    val routerboard: Boolean = false
+    val model: String = "RB4011iGS+",
+    val serialNumber: String = "H93A012345",
+    val currentFirmware: String = "7.15.2",
+    val upgradeFirmware: String = "7.15.2",
+    val routerboard: Boolean = true
 )
 
 data class HotspotServerInfo(
@@ -155,8 +132,7 @@ data class HotspotCard(
     val disabled: Boolean = false,
     val price: String = "",
     val posAgent: String = "",
-    val cardType: String = "hotspot", // "hotspot" or "usermanager"
-    val createdAtHint: Long = 0L
+    val cardType: String = "hotspot" // "hotspot" or "usermanager"
 ) {
     val isUserManagerCard: Boolean
         get() = cardType.contains("usermanager", ignoreCase = true) || id.startsWith("um", ignoreCase = true) || id.startsWith("tum", ignoreCase = true)
