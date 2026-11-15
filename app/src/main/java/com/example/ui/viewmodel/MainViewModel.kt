@@ -2,6 +2,10 @@ package com.example.ui.viewmodel
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -17,11 +21,6 @@ import com.example.data.local.SystemEventLogEntity
 import com.example.data.local.toUserSessionRecord
 import com.example.data.local.RouterTaskQueueManager
 import com.example.data.local.RouterTaskEntity
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.Firebase
-import com.google.firebase.auth.auth
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.SetOptions
 import com.example.data.model.BatchCardGenerationResult
 import com.example.data.model.BatchGenerationConfig
 import com.example.data.model.ConnectionState
@@ -40,19 +39,11 @@ import com.example.data.model.UpdateDownloadState
 import com.example.data.model.DetailedPackageProfitStat
 import com.example.data.model.MonthlyPackageSales
 import com.example.data.model.DailySalesPoint
-import com.example.data.model.FinanceCloudSyncStatus
-import com.example.data.model.FinanceCloudValidator
-import com.example.data.model.ValidatedMonthlyFetchResult
 import com.example.data.util.AppUpdateManager
 import com.example.data.util.FinanceAnalyticsEngine
-import com.example.data.network.FinanceFirestoreRepository
 import com.example.data.network.MikrotikRepository
 import com.example.data.network.NetworkUtils
-import com.example.data.network.OperationType
-import com.example.data.network.handleFirestoreError
-import com.google.firebase.auth.FirebaseAuth
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -63,17 +54,16 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 
 enum class CardFilter {
@@ -101,7 +91,6 @@ enum class ProfileSystemFilter {
 class MainViewModel(
     private val repository: MikrotikRepository,
     private val database: AppDatabase,
-    private val db: FirebaseFirestore,
     private val appContext: Context? = null
 ) : ViewModel() {
 
@@ -227,21 +216,7 @@ class MainViewModel(
 
                 val routerIp = currentConn.ipAddress.ifBlank { _currentConfig.value.ipAddress }.trim()
                 val entities = updatedNodes.map { n ->
-                    val entity = com.example.data.local.NetworkNodeEntity.fromNetworkNode(n, routerIp)
-                    
-                    // Sync to Cloud
-                    syncToCloud("networkNodes", n.id, mapOf(
-                        "id" to n.id,
-                        "name" to n.name,
-                        "ipAddress" to n.ipAddress,
-                        "macAddress" to n.macAddress,
-                        "status" to n.effectiveStatus.name,
-                        "isOnline" to n.isOnline,
-                        "pingMs" to n.pingMs,
-                        "connectedUsers" to n.connectedUsers,
-                        "timestamp" to com.google.firebase.Timestamp.now()
-                    ))
-                    entity
+                    com.example.data.local.NetworkNodeEntity.fromNetworkNode(n, routerIp)
                 }
                 if (entities.isNotEmpty()) {
                     database.appDao().insertOrUpdateNetworkNodes(entities)
@@ -289,58 +264,12 @@ class MainViewModel(
     val systemEventLogs: StateFlow<List<com.example.data.local.SystemEventLogEntity>> = database.appDao().getAllSystemEventLogs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    private val financeFirestoreRepository = FinanceFirestoreRepository(db)
-
-    private val _financeCloudSyncStatus = MutableStateFlow<FinanceCloudSyncStatus>(
-        if (getUserId() != null) FinanceCloudSyncStatus.Syncing else FinanceCloudSyncStatus.SignedOut
-    )
-    val financeCloudSyncStatus: StateFlow<FinanceCloudSyncStatus> = _financeCloudSyncStatus.asStateFlow()
-
-    private fun getUserId(): String? {
-        return runCatching { Firebase.auth.currentUser?.uid }.getOrNull()
-    }
-
-    private fun authStateFlow(): kotlinx.coroutines.flow.Flow<String?> = callbackFlow {
-        val firebaseAuth = runCatching { Firebase.auth }.getOrNull()
-        if (firebaseAuth == null) {
-            trySend(null)
-            awaitClose {}
-            return@callbackFlow
-        }
-        trySend(firebaseAuth.currentUser?.uid)
-        val listener = FirebaseAuth.AuthStateListener { auth ->
-            trySend(auth.currentUser?.uid)
-        }
-        firebaseAuth.addAuthStateListener(listener)
-        awaitClose {
-            firebaseAuth.removeAuthStateListener(listener)
-        }
-    }
-
     @Volatile
     private var lastSnapshotSaveTimeMs: Long = 0L
     @Volatile
     private var lastSnapshotSignature: String = ""
     private val lastArchivedSessionSignatures = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val lastActiveLoginStatsCache = java.util.concurrent.ConcurrentHashMap<String, String>()
-
-    private fun syncToCloud(collectionName: String, docId: String, data: Map<String, Any?>) {
-        val uid = getUserId() ?: return
-        val safeDocId = FinanceCloudValidator.sanitizeFirestoreDocId(docId)
-        val path = "users/$uid/$collectionName/$safeDocId"
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                db.collection("users").document(uid).collection(collectionName).document(safeDocId)
-                    .set(data, SetOptions.merge())
-                    .addOnFailureListener { e ->
-                        handleFirestoreError(e, OperationType.WRITE, path)
-                        logApplicationError("Cloud Sync", "فشل المزامنة لـ $collectionName: ${e.message}")
-                    }
-            } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.WRITE, path)
-            }
-        }
-    }
 
     fun recordSystemEvent(
         actionType: String,
@@ -364,22 +293,7 @@ class MainViewModel(
                 details = details,
                 timestamp = timestamp
             )
-            val insertedId = database.appDao().insertSystemEventLog(log)
-            
-            // Sync to Firestore
-            val cloudData = mapOf(
-                "id" to insertedId.toString(),
-                "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
-                "actionType" to actionType,
-                "targetType" to targetType,
-                "targetName" to targetName,
-                "description" to description,
-                "status" to status,
-                "operatorUsername" to "admin",
-                "routerIp" to routerIp,
-                "details" to details
-            )
-            syncToCloud("systemLogs", insertedId.toString(), cloudData)
+            database.appDao().insertSystemEventLog(log)
         }
     }
 
@@ -704,15 +618,7 @@ class MainViewModel(
                     details = details,
                     timestamp = timestamp
                 )
-                val insertedId = database.appDao().insertErrorLog(log)
-                
-                // Sync to Cloud
-                syncToCloud("errorLogs", insertedId.toString(), mapOf(
-                    "id" to insertedId.toString(),
-                    "operation" to operation,
-                    "errorMessage" to errorMessage,
-                    "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp))
-                ))
+                database.appDao().insertErrorLog(log)
             } catch (_: Exception) {}
         }
     }
@@ -734,109 +640,12 @@ class MainViewModel(
                     updatedAt = timestamp
                 )
             )
-
-            // Validated Cloud Sync using sanitized docId
-            financeFirestoreRepository.saveValidatedPackagePricing(
-                profileName = profileName,
-                costPrice = cleanCost,
-                salePrice = cleanSale
-            ).onFailure { err ->
-                logApplicationError("Cloud Pricing Sync", "تعذرت مزامنة سعر الباقة ($profileName): ${err.message}")
-            }
             _toastEvent.emit("تم حفظ وتحديث سعر التكلفة والبيع لباقة ($profileName) بنجاح")
-        }
-    }
-
-    fun syncFinanceWithCloud() {
-        val uid = getUserId()
-        if (uid.isNullOrBlank()) {
-            _financeCloudSyncStatus.value = FinanceCloudSyncStatus.SignedOut
-            viewModelScope.launch {
-                _toastEvent.emit("يرجى تسجيل الدخول بحساب Google أولاً لمزامنة السجل المالي السحابي")
-            }
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Syncing
-            try {
-                syncPackagePricingsFromCloud(uid)
-                val fetchRes = financeFirestoreRepository.fetchMonthlyProfitsSequentially(uid)
-                val fetched = fetchRes.getOrElse { err ->
-                    _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(err.message ?: "خطأ في الجلب السحابي")
-                    _toastEvent.emit("تعذر جلب السجل المالي السحابي: ${err.message}")
-                    return@launch
-                }
-                applyValidatedCloudMonthlyFetch(fetched)
-
-                val pushReport = financeFirestoreRepository.upsertMonthlyProfitsValidated(monthlySalesList.value)
-                    .getOrElse { err ->
-                        _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(err.message ?: "خطأ في الحفظ السحابي")
-                        _toastEvent.emit("تعذر رفع تحديثات الأرباح للسحابة: ${err.message}")
-                        return@launch
-                    }
-
-                val postFetch = financeFirestoreRepository.fetchMonthlyProfitsSequentially(uid).getOrNull() ?: fetched
-                applyValidatedCloudMonthlyFetch(postFetch)
-                _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Synced(
-                    syncedMonthsCount = postFetch.entities.size,
-                    skippedInvalidCount = postFetch.rejectedDocsCount + pushReport.rejectedValidationCount
-                )
-                _toastEvent.emit(
-                    "تمت المزامنة المالية المتسلسلة: ${postFetch.entities.size} شهر موثق" +
-                        if (pushReport.totalWrittenCount > 0) " (تم رفع ${pushReport.totalWrittenCount} تحديث)" else ""
-                )
-            } catch (e: Exception) {
-                _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(e.message ?: "خطأ غير متوقع")
-                _toastEvent.emit("حدث خطأ أثناء مزامنة السحابة: ${e.message}")
-            }
-        }
-    }
-
-    private suspend fun syncPackagePricingsFromCloud(uid: String) {
-        val cloudPricings = financeFirestoreRepository.fetchPackagePricings(uid).getOrNull() ?: return
-        if (cloudPricings.isEmpty()) return
-        val localByName = database.appDao().getAllPackagePricingsSync().associateBy { it.profileName }
-        for (remote in cloudPricings) {
-            val local = localByName[remote.profileName]
-            if (local == null || remote.updatedAt > local.updatedAt) {
-                database.appDao().insertPackagePricing(remote)
-            }
-        }
-    }
-
-    private suspend fun applyValidatedCloudMonthlyFetch(fetchResult: ValidatedMonthlyFetchResult) {
-        if (fetchResult.breakdownsByMonth != _cloudPackageBreakdowns.value) {
-            _cloudPackageBreakdowns.value = fetchResult.breakdownsByMonth
-        }
-        if (fetchResult.entities != _cloudMonthlyRecordsFlow.value) {
-            _cloudMonthlyRecordsFlow.value = fetchResult.entities
-        }
-        if (fetchResult.entities.isNotEmpty()) {
-            try {
-                val existingByKey = database.appDao().getAllMonthlyProfitRecordsSync().associateBy { it.monthKey }
-                val toUpsert = fetchResult.entities.filter { cloud ->
-                    val cloudHasData = cloud.totalRevenue > 0.0 || cloud.soldCardsCount > 0 || cloud.totalCardsCount > 0 || cloud.totalBytesConsumed > 0L
-                    val local = existingByKey[cloud.monthKey]
-                    val localHasData = local != null && (local.totalRevenue > 0.0 || local.soldCardsCount > 0 || local.totalCardsCount > 0 || local.totalBytesConsumed > 0L)
-                    if (!cloudHasData && localHasData) {
-                        false
-                    } else if (local == null) {
-                        cloudHasData
-                    } else {
-                        cloudHasData && !localHasData
-                    }
-                }
-                if (toUpsert.isNotEmpty()) {
-                    database.appDao().insertOrUpdateMonthlyProfitRecords(toUpsert)
-                }
-            } catch (_: Exception) {}
         }
     }
 
     private val localCardsFlow = database.appDao().getAllLocalCardsFlow()
     private val archivedSessionsFlow = database.appDao().getAllArchivedSessions()
-    private val _cloudMonthlyRecordsFlow = MutableStateFlow<List<com.example.data.local.MonthlyProfitRecordEntity>>(emptyList())
-    private val _cloudPackageBreakdowns = MutableStateFlow<Map<String, List<MonthlyPackageSales>>>(emptyMap())
     private val initialMonthlyProfitRecordsFlow = flow {
         val saved = try {
             withContext(Dispatchers.IO) {
@@ -848,20 +657,8 @@ class MainViewModel(
         emit(saved)
     }
 
-    private val mergedSavedMonthlyRecordsFlow = combine(
-        initialMonthlyProfitRecordsFlow,
-        _cloudMonthlyRecordsFlow
-    ) { initialRoom, cloudRecords ->
-        val merged = initialRoom.associateBy { it.monthKey }.toMutableMap()
-        for (cloud in cloudRecords) {
-            val cloudHasData = cloud.totalRevenue > 0.0 || cloud.soldCardsCount > 0 || cloud.totalCardsCount > 0 || cloud.totalBytesConsumed > 0L
-            val existing = merged[cloud.monthKey]
-            val existingHasData = existing != null && (existing.totalRevenue > 0.0 || existing.soldCardsCount > 0 || existing.totalCardsCount > 0 || existing.totalBytesConsumed > 0L)
-            if (existing == null || (cloudHasData && (!existingHasData || cloud.lastUpdatedTimestamp >= existing.lastUpdatedTimestamp))) {
-                merged[cloud.monthKey] = cloud
-            }
-        }
-        merged.values.sortedWith(
+    private val mergedSavedMonthlyRecordsFlow = initialMonthlyProfitRecordsFlow.map { initialRoom ->
+        initialRoom.sortedWith(
             compareByDescending<com.example.data.local.MonthlyProfitRecordEntity> { it.year }
                 .thenByDescending { it.month }
         )
@@ -897,10 +694,9 @@ class MainViewModel(
         localCardsFlow,
         allLoginHistory,
         archivedSessionsFlow,
-        mergedSavedMonthlyRecordsFlow,
-        _cloudPackageBreakdowns
-    ) { localCardList, loginList, sessionList, savedMonthlyList, cloudBreakdowns ->
-        FinanceHistoryInputs(localCardList, loginList, sessionList, savedMonthlyList, cloudBreakdowns)
+        mergedSavedMonthlyRecordsFlow
+    ) { localCardList, loginList, sessionList, savedMonthlyList ->
+        FinanceHistoryInputs(localCardList, loginList, sessionList, savedMonthlyList, emptyMap())
     }
 
     val detailedPackageProfitStats: StateFlow<List<com.example.data.model.DetailedPackageProfitStat>> = combine(
@@ -1143,13 +939,6 @@ class MainViewModel(
                 val now = System.currentTimeMillis()
                 newlySold.chunked(400).forEach { chunk ->
                     dao.markCardsAsSoldBatch(chunk, now)
-                }
-                val soldTs = com.google.firebase.Timestamp(java.util.Date(now))
-                newlySold.forEach { cardName ->
-                    syncToCloud("posCards", cardName, mapOf(
-                        "isSold" to true,
-                        "soldAt" to soldTs
-                    ))
                 }
             } catch (_: Exception) {}
         }
@@ -1776,12 +1565,23 @@ class MainViewModel(
             }
 
             repository.restoreFromSnapshot(snapshot)
-            _currentConfig.value = RouterConnectionConfig(
+            val savedRouter = try {
+                database.appDao().getSavedRouterByIp(snapshot.ipAddress)
+            } catch (_: Exception) {
+                null
+            }
+            val resolvedConfig = RouterConnectionConfig(
                 ipAddress = snapshot.ipAddress,
-                name = snapshot.routerName
+                port = savedRouter?.port ?: 80,
+                username = savedRouter?.username ?: "admin",
+                password = savedRouter?.password ?: "",
+                name = savedRouter?.name?.ifBlank { snapshot.routerName } ?: snapshot.routerName,
+                useHttps = savedRouter?.useHttps ?: false
             )
+            _currentConfig.value = resolvedConfig
+            repository.setOfflineConfig(resolvedConfig)
 
-            val displayRouterName = snapshot.routerName.ifBlank { "راوتر MikroTik (${snapshot.ipAddress})" }
+            val displayRouterName = resolvedConfig.name.ifBlank { "راوتر MikroTik (${snapshot.ipAddress})" }
             _connectionState.value = ConnectionState.Connected(
                 routerName = displayRouterName,
                 ipAddress = snapshot.ipAddress,
@@ -1790,9 +1590,9 @@ class MainViewModel(
                 isFromCache = true,
                 isOffline = true,
                 lastSyncTime = snapshot.timestamp,
-                offlineReason = "وضع التصفح والعمل المحلي (بدون إنترنت)"
+                offlineReason = "وضع التصفح والعمل المحلي (بانتظار توفر الاتصال للمزامنة التلقائية)"
             )
-            _toastEvent.emit("⚡ تم الدخول للبيانات المحلية بنجاح! الكروت (${snapshot.cards.size}) والباقات متاحة للعمل.")
+            _toastEvent.emit("⚡ تم الدخول للبيانات المحلية بنجاح! الكروت (${snapshot.cards.size}) والباقات متاحة، وسيتم المزامنة تلقائياً فور توفر الاتصال.")
             startAutoRefresh()
         }
     }
@@ -1911,18 +1711,7 @@ class MainViewModel(
                         useHttps = config.useHttps,
                         lastConnectedTime = System.currentTimeMillis()
                     )
-                    val insertedId = database.appDao().insertSavedRouter(routerEntity)
-                    
-                    // Sync to Cloud
-                    syncToCloud("routers", if (routerEntity.id > 0) routerEntity.id.toString() else insertedId.toString(), mapOf(
-                        "id" to if (routerEntity.id > 0) routerEntity.id.toString() else insertedId.toString(),
-                        "name" to finalRouterName,
-                        "ipAddress" to config.ipAddress,
-                        "port" to config.port,
-                        "username" to config.username,
-                        "useHttps" to config.useHttps,
-                        "isDemoMode" to false
-                    ))
+                    database.appDao().insertSavedRouter(routerEntity)
 
                     // Persist new cache snapshot
                     if (targetContext != null) {
@@ -1990,13 +1779,24 @@ class MainViewModel(
         _connectionState.value = ConnectionState.Disconnected
     }
 
-    fun refreshData(forceHistorySync: Boolean = false) {
+    fun refreshData(
+        forceLiveRefresh: Boolean = false,
+        forceHistorySync: Boolean = false,
+        notifyOnError: Boolean = false
+    ) {
         val currentConn = _connectionState.value
         if (currentConn !is ConnectionState.Connected || currentConn.isSyncing) {
             return
         }
         viewModelScope.launch {
-            val res = repository.refreshData(forceHistorySync = forceHistorySync)
+            val res = if (!currentConn.isDemo && (currentConn.isOffline || !repository.isSessionEstablished())) {
+                attemptLiveReconnectAndSync(notifyOnSuccess = true)
+            } else {
+                repository.refreshData(
+                    forceLiveRefresh = forceLiveRefresh,
+                    forceHistorySync = forceHistorySync
+                )
+            }
             val latestConn = _connectionState.value as? ConnectionState.Connected ?: return@launch
             if (res.isSuccess) {
                 consecutiveRefreshFailures = 0
@@ -2006,7 +1806,85 @@ class MainViewModel(
                     offlineReason = "",
                     lastSyncTime = System.currentTimeMillis()
                 )
+            } else if (notifyOnError) {
+                val err = res.exceptionOrNull()?.message ?: "تعذر التحديث من الراوتر"
+                _toastEvent.emit("⚠️ $err")
             }
+        }
+    }
+
+    private val reconnectMutex = Mutex()
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    private suspend fun attemptLiveReconnectAndSync(notifyOnSuccess: Boolean = true): Result<Unit> {
+        return reconnectMutex.withLock {
+            val currentConn = _connectionState.value as? ConnectionState.Connected
+                ?: return@withLock Result.failure(Exception("غير متصل براوتر"))
+            if (currentConn.isDemo) {
+                return@withLock repository.refreshData(forceLiveRefresh = true)
+            }
+
+            val wasOffline = currentConn.isOffline
+            val targetIp = _currentConfig.value.ipAddress.ifBlank { currentConn.ipAddress }.trim()
+            if (targetIp.isBlank()) {
+                return@withLock Result.failure(Exception("عنوان الراوتر غير محدد"))
+            }
+
+            val savedRouter = try {
+                database.appDao().getSavedRouterByIp(targetIp)
+            } catch (_: Exception) {
+                null
+            }
+            val baseCfg = _currentConfig.value
+            val resolvedConfig = baseCfg.copy(
+                ipAddress = targetIp,
+                port = if (baseCfg.ipAddress.equals(targetIp, ignoreCase = true) && baseCfg.port > 0) baseCfg.port else (savedRouter?.port ?: 80),
+                username = baseCfg.username.ifBlank { savedRouter?.username ?: "admin" },
+                password = baseCfg.password.ifBlank { savedRouter?.password ?: "" },
+                name = baseCfg.name.ifBlank { savedRouter?.name ?: currentConn.routerName },
+                useHttps = if (baseCfg.ipAddress.equals(targetIp, ignoreCase = true)) baseCfg.useHttps else (savedRouter?.useHttps ?: false)
+            )
+            _currentConfig.value = resolvedConfig
+
+            val syncResult: Result<Unit> = if (wasOffline || !repository.isSessionEstablished()) {
+                val connRes = repository.verifyAndConnect(resolvedConfig)
+                if (connRes.isSuccess) Result.success(Unit)
+                else Result.failure(connRes.exceptionOrNull() ?: Exception("تعذر الاتصال بالراوتر"))
+            } else {
+                repository.refreshData(forceLiveRefresh = true)
+            }
+
+            val latestConn = _connectionState.value as? ConnectionState.Connected ?: return@withLock syncResult
+            if (syncResult.isSuccess) {
+                consecutiveRefreshFailures = 0
+                val liveBoardName = repository.resourceState.value.boardName
+                val resolvedName = if (latestConn.routerName.isNotBlank() && !latestConn.routerName.startsWith("راوتر 192")) {
+                    latestConn.routerName
+                } else if (liveBoardName.isNotBlank()) {
+                    liveBoardName
+                } else {
+                    latestConn.routerName
+                }
+                _connectionState.value = latestConn.copy(
+                    routerName = resolvedName,
+                    isSyncing = false,
+                    isOffline = false,
+                    isFromCache = false,
+                    offlineReason = "",
+                    lastSyncTime = System.currentTimeMillis()
+                )
+                if (wasOffline && notifyOnSuccess) {
+                    _toastEvent.emit("✅ تم استعادة الاتصال بالراوتر وتحديث البيانات بنجاح!")
+                }
+                val qResult = taskQueueManager.processPendingTasks(repository)
+                if (qResult.processedCount > 0) {
+                    _toastEvent.emit(qResult.message)
+                }
+                if (wasOffline) {
+                    runHeartbeatCheck(appContext, silent = true)
+                }
+            }
+            syncResult
         }
     }
 
@@ -2016,24 +1894,10 @@ class MainViewModel(
             if (currentConn is ConnectionState.Connected) {
                 _connectionState.value = currentConn.copy(isSyncing = true)
                 _toastEvent.emit("جاري محاولة الاتصال بالراوتر ومزامنة البيانات...")
-                val res = repository.refreshData(forceHistorySync = true)
+                val res = attemptLiveReconnectAndSync(notifyOnSuccess = false)
                 val latestConn = _connectionState.value as? ConnectionState.Connected ?: return@launch
                 if (res.isSuccess) {
-                    consecutiveRefreshFailures = 0
-                    _connectionState.value = latestConn.copy(
-                        isSyncing = false,
-                        isOffline = false,
-                        offlineReason = "",
-                        lastSyncTime = System.currentTimeMillis()
-                    )
                     _toastEvent.emit("✅ تم الاتصال بالراوتر بنجاح وتحديث كافة البيانات!")
-                    // Process pending tasks on successful reconnection
-                    viewModelScope.launch {
-                        val qResult = taskQueueManager.processPendingTasks(repository)
-                        if (qResult.processedCount > 0) {
-                            _toastEvent.emit(qResult.message)
-                        }
-                    }
                 } else {
                     val err = res.exceptionOrNull()?.message ?: "الراوتر غير متاح حالياً"
                     logApplicationError("SYNC_RETRY", err, "IP: ${latestConn.ipAddress}")
@@ -2087,29 +1951,23 @@ class MainViewModel(
                 if (currentConn is ConnectionState.Connected) {
                     if (currentConn.isDemo) {
                         repository.refreshData()
+                    } else if (currentConn.isOffline || !repository.isSessionEstablished()) {
+                        // Try fast offline->online recovery every 12 seconds (plus instant recovery via NetworkCallback)
+                        if (refreshCycleCount == 1 || refreshCycleCount % 2 == 0) {
+                            attemptLiveReconnectAndSync(notifyOnSuccess = true)
+                        }
                     } else {
                         val res = repository.refreshData()
                         val latestConn = _connectionState.value as? ConnectionState.Connected ?: continue
                         if (res.isSuccess) {
                             consecutiveRefreshFailures = 0
-                            if (latestConn.isOffline) {
-                                _connectionState.value = latestConn.copy(
-                                    isOffline = false,
-                                    isFromCache = false,
-                                    offlineReason = "",
-                                    lastSyncTime = System.currentTimeMillis()
-                                )
-                                _toastEvent.emit("✅ تم استعادة الاتصال بالراوتر وتحديث البيانات بنجاح!")
+                            _connectionState.value = latestConn.copy(
+                                isFromCache = false,
+                                lastSyncTime = System.currentTimeMillis()
+                            )
+                            if (pendingTasksCount.value > 0) {
+                                // Background automatic retry with exponential backoff
                                 taskQueueManager.processPendingTasks(repository)
-                            } else {
-                                _connectionState.value = latestConn.copy(
-                                    isFromCache = false,
-                                    lastSyncTime = System.currentTimeMillis()
-                                )
-                                if (pendingTasksCount.value > 0) {
-                                    // Background automatic retry with exponential backoff
-                                    taskQueueManager.processPendingTasks(repository)
-                                }
                             }
                             // Every 4 cycles (~24 seconds), automatically perform a silent heartbeat poll on network nodes
                             if (refreshCycleCount % 4 == 0) {
@@ -2290,33 +2148,12 @@ class MainViewModel(
                             cardsJson = jsonArr.toString()
                         )
                     )
-                    
-                    // Sync to Cloud
-                    syncToCloud("batchHistory", batchId, mapOf(
-                        "id" to batchId,
-                        "profileName" to config.profile,
-                        "count" to cards.size,
-                        "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
-                        "comment" to batchName
-                    ))
 
                     // If assigned to a POS Agent, save assignments
                     if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
                         val priceNum = parseBatchPriceValue(config.price).takeIf { it > 0.0 } ?: 200.0
                         val assignments = cards.map { card ->
                             val assignAt = System.currentTimeMillis()
-                            val assignmentId = "assign_${card.name}_${assignAt}"
-                            
-                            // Sync Assignment to Cloud
-                            syncToCloud("posCards", assignmentId, mapOf(
-                                "id" to assignmentId,
-                                "agentId" to config.posAgentId.toString(),
-                                "cardName" to card.name,
-                                "profileName" to config.profile,
-                                "priceAmount" to priceNum,
-                                "isSold" to false,
-                                "soldAt" to null
-                            ))
 
                             PosCardAssignmentEntity(
                                 agentId = config.posAgentId,
@@ -2412,15 +2249,7 @@ class MainViewModel(
     // ==========================================
     fun addPosAgent(agent: PosAgentEntity) {
         viewModelScope.launch {
-            val insertedId = database.appDao().insertPosAgent(agent)
-            
-            // Sync to Cloud
-            syncToCloud("posAgents", insertedId.toString(), mapOf(
-                "id" to insertedId.toString(),
-                "name" to agent.name,
-                "phone" to agent.phone,
-                "discountPercent" to agent.discountPercent
-            ))
+            database.appDao().insertPosAgent(agent)
             _toastEvent.emit("تمت إضافة نقطة البيع (${agent.name}) بنجاح")
         }
     }
@@ -2450,16 +2279,7 @@ class MainViewModel(
                 paymentDate = timestamp,
                 paymentNote = note.ifBlank { "دفعة نقدية / سداد" }
             )
-            val insertedId = database.appDao().insertPosPayment(payment)
-            
-            // Sync to Cloud
-            syncToCloud("posPayments", insertedId.toString(), mapOf(
-                "id" to insertedId.toString(),
-                "agentId" to agentId.toString(),
-                "amount" to amount,
-                "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
-                "note" to note.ifBlank { "دفعة نقدية / سداد" }
-            ))
+            database.appDao().insertPosPayment(payment)
             _toastEvent.emit("تم تسجيل سند قبض بمبلغ ${amount.toInt()} ر.ي بنجاح")
         }
     }
@@ -2817,7 +2637,7 @@ class MainViewModel(
                         }
                     }
 
-                    // Persist only unseen logs to Room & Cloud so 8s refreshes do not flood DB/Firestore
+                    // Persist only unseen logs to Room so 6s refreshes do not flood DB
                     val dao = database.appDao()
                     snapshot.logs.forEach { log ->
                         val logKey = "${log.time}|${log.topics}|${log.message}"
@@ -2830,7 +2650,7 @@ class MainViewModel(
                         }
                         if (isNewLog && log.message.isNotBlank()) {
                             val timestamp = System.currentTimeMillis()
-                            val insertedId = dao.insertSystemEventLog(
+                            dao.insertSystemEventLog(
                                 SystemEventLogEntity(
                                     actionType = if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام",
                                     targetType = "راوتر",
@@ -2840,17 +2660,6 @@ class MainViewModel(
                                     timestamp = timestamp
                                 )
                             )
-
-                            syncToCloud("systemLogs", insertedId.toString(), mapOf(
-                                "id" to insertedId.toString(),
-                                "timestamp" to com.google.firebase.Timestamp(java.util.Date(timestamp)),
-                                "actionType" to (if (log.topics.contains("firewall")) "جدار الحماية" else "أحداث النظام"),
-                                "targetType" to "راوتر",
-                                "targetName" to "سجل خارجي",
-                                "description" to log.message,
-                                "status" to "INFO",
-                                "operatorUsername" to "system"
-                            ))
                         }
                     }
                 }
@@ -2919,45 +2728,7 @@ class MainViewModel(
             }
         }
 
-        // Auth-Gated Sequential Firestore Finance Sync & Real-Time Observer
-        viewModelScope.launch(Dispatchers.IO) {
-            authStateFlow()
-                .distinctUntilChanged()
-                .collectLatest { uid ->
-                    if (uid.isNullOrBlank()) {
-                        _financeCloudSyncStatus.value = FinanceCloudSyncStatus.SignedOut
-                        return@collectLatest
-                    }
-                    _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Syncing
-                    syncPackagePricingsFromCloud(uid)
-
-                    val initialFetch = financeFirestoreRepository.fetchMonthlyProfitsSequentially(uid)
-                    initialFetch.onSuccess { res ->
-                        applyValidatedCloudMonthlyFetch(res)
-                    }
-
-                    val currentLocal = monthlySalesList.value
-                    if (currentLocal.isNotEmpty()) {
-                        financeFirestoreRepository.upsertMonthlyProfitsValidated(currentLocal)
-                    }
-
-                    financeFirestoreRepository.observeMonthlyProfits(uid)
-                        .catch { err ->
-                            _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(
-                                err.message ?: "تعذرت قراءة الأرباح السحابية"
-                            )
-                        }
-                        .collectLatest { liveFetch ->
-                            applyValidatedCloudMonthlyFetch(liveFetch)
-                            _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Synced(
-                                syncedMonthsCount = liveFetch.entities.size,
-                                skippedInvalidCount = liveFetch.rejectedDocsCount
-                            )
-                        }
-                }
-        }
-
-        // Monthly Profit Records Persistence Collector (Room + Validated Cloud Upsert, loop-free & zero-clobber guarded)
+        // Monthly Profit Records Persistence Collector (Room only, loop-free & zero-clobber guarded)
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             monthlySalesList
                 .collectLatest { months ->
@@ -3007,26 +2778,6 @@ class MainViewModel(
                         if (entities.isNotEmpty()) {
                             database.appDao().insertOrUpdateMonthlyProfitRecords(entities)
                         }
-
-                        if (!getUserId().isNullOrBlank()) {
-                            financeFirestoreRepository.upsertMonthlyProfitsValidated(months)
-                                .onSuccess { report ->
-                                    if (report.totalWrittenCount > 0) {
-                                        val meaningfulCount = months.count {
-                                            it.totalRevenue > 0.0 || it.totalCardsSold > 0 || it.totalCardsGenerated > 0 || it.totalBytesConsumed > 0L
-                                        }
-                                        _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Synced(
-                                            syncedMonthsCount = meaningfulCount,
-                                            skippedInvalidCount = report.rejectedValidationCount
-                                        )
-                                    }
-                                }
-                                .onFailure { err ->
-                                    _financeCloudSyncStatus.value = FinanceCloudSyncStatus.Error(
-                                        err.message ?: "تعذرت مزامنة الأرباح السحابية"
-                                    )
-                                }
-                        }
                     } catch (_: Exception) {}
                 }
         }
@@ -3055,13 +2806,6 @@ class MainViewModel(
                         if (newlySoldActive.isNotEmpty()) {
                             newlySoldActive.chunked(400).forEach { chunk ->
                                 dao.markCardsAsSoldBatch(chunk, now)
-                            }
-                            val soldTs = com.google.firebase.Timestamp(java.util.Date(now))
-                            newlySoldActive.forEach { cardName ->
-                                syncToCloud("posCards", cardName, mapOf(
-                                    "isSold" to true,
-                                    "soldAt" to soldTs
-                                ))
                             }
                         }
                     } catch (_: Exception) {}
@@ -3097,16 +2841,7 @@ class MainViewModel(
                                     packageLimitBytes = quotaLimitBytes,
                                     timestamp = now
                                 )
-                                val insertedId = dao.insertLoginHistory(loginEntity)
-
-                                syncToCloud("loginHistory", insertedId.toString(), mapOf(
-                                    "id" to insertedId.toString(),
-                                    "username" to user.user,
-                                    "ipAddress" to user.address,
-                                    "macAddress" to user.macAddress,
-                                    "timestamp" to com.google.firebase.Timestamp(java.util.Date(now)),
-                                    "profile" to cardProf
-                                ))
+                                dao.insertLoginHistory(loginEntity)
                             } else {
                                 val statsSig = "${user.bytesIn}|${user.bytesOut}|${user.uptime}"
                                 if (lastActiveLoginStatsCache[user.user] != statsSig) {
@@ -3211,18 +2946,6 @@ class MainViewModel(
                                 timestamp = now
                             )
                             changedEntities.add(entity)
-
-                            syncToCloud("sessionArchive", session.id, mapOf(
-                                "id" to session.id,
-                                "username" to session.username,
-                                "macAddress" to session.macAddress,
-                                "ipAddress" to session.ipAddress,
-                                "loginTime" to session.loginTime,
-                                "logoutTime" to session.logoutTime,
-                                "duration" to session.duration,
-                                "totalBytes" to session.totalBytes,
-                                "timestamp" to com.google.firebase.Timestamp(java.util.Date(now))
-                            ))
                         }
                         if (changedEntities.isNotEmpty()) {
                             database.appDao().insertOrUpdateSessions(changedEntities)
@@ -3234,11 +2957,45 @@ class MainViewModel(
         viewModelScope.launch {
             seedInitialPosDataIfEmpty()
         }
+
+        // Listen for OS network changes so returning Wi-Fi triggers immediate router sync
+        if (appContext != null) {
+            try {
+                val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val callback = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        viewModelScope.launch {
+                            delay(600) // Allow DHCP / routing table to settle
+                            val conn = _connectionState.value
+                            if (conn is ConnectionState.Connected && !conn.isDemo && !conn.isSyncing) {
+                                if (conn.isOffline || !repository.isSessionEstablished()) {
+                                    attemptLiveReconnectAndSync(notifyOnSuccess = true)
+                                } else {
+                                    refreshData(forceLiveRefresh = true)
+                                }
+                            }
+                        }
+                    }
+                }
+                val request = NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+                    .build()
+                cm?.registerNetworkCallback(request, callback)
+                networkCallback = callback
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onCleared() {
         super.onCleared()
         stopAutoRefresh()
+        if (appContext != null && networkCallback != null) {
+            try {
+                val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                cm?.unregisterNetworkCallback(networkCallback!!)
+            } catch (_: Exception) {}
+            networkCallback = null
+        }
     }
 
     companion object {
@@ -3528,13 +3285,12 @@ data class IndependentBatchPartitionResult(
 class MainViewModelFactory(
     private val repository: MikrotikRepository,
     private val database: AppDatabase,
-    private val db: FirebaseFirestore,
     private val appContext: Context? = null
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
-            return MainViewModel(repository, database, db, appContext) as T
+            return MainViewModel(repository, database, appContext) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

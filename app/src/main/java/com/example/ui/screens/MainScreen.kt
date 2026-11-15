@@ -67,7 +67,6 @@ enum class MainTab(val title: String, val icon: ImageVector) {
 @Composable
 fun MainScreen(
     viewModel: MainViewModel,
-    onTriggerSignIn: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val navController = rememberNavController()
@@ -99,7 +98,7 @@ fun MainScreen(
     DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                viewModel.refreshData()
+                viewModel.refreshData(forceLiveRefresh = true)
                 viewModel.runHeartbeatCheck(silent = true)
             }
         }
@@ -157,7 +156,7 @@ fun MainScreen(
                 actions = {
                     IconButton(
                         onClick = {
-                            viewModel.refreshData(forceHistorySync = true)
+                            viewModel.refreshData(forceLiveRefresh = true, forceHistorySync = true, notifyOnError = true)
                             viewModel.runHeartbeatCheck(silent = true)
                         },
                         modifier = Modifier.testTag("btn_top_refresh")
@@ -271,8 +270,7 @@ fun MainScreen(
                         },
                         onOpenAnalytics = { username, type ->
                             navController.navigate(Screen.UsageAnalytics(username, type))
-                        },
-                        onTriggerSignIn = onTriggerSignIn
+                        }
                     )
                 }
                 composable<Screen.UsageAnalytics> { backStackEntry ->
@@ -378,7 +376,7 @@ fun MainScreen(
                         onOpenAnalytics = { type ->
                             navController.navigate(Screen.UsageAnalytics(args.username, type))
                         },
-                        onRefresh = { viewModel.refreshData() }
+                        onRefresh = { viewModel.refreshData(forceLiveRefresh = true, notifyOnError = true) }
                     )
                 }
             }
@@ -486,8 +484,7 @@ fun MainPagerContent(
     onOpenPrintScreen: (List<com.example.data.model.HotspotCard>) -> Unit,
     onOpenSessionDetail: (String) -> Unit,
     onOpenAdminAudit: () -> Unit,
-    onOpenAnalytics: (String, String) -> Unit,
-    onTriggerSignIn: () -> Unit
+    onOpenAnalytics: (String, String) -> Unit
 ) {
     val pagerState = rememberPagerState(initialPage = 0) { MainTab.entries.size }
     val scope = rememberCoroutineScope()
@@ -504,11 +501,11 @@ fun MainPagerContent(
         val currentTab = MainTab.entries[pagerState.currentPage]
         when (currentTab) {
             MainTab.NODES -> {
-                viewModel.refreshData()
+                viewModel.refreshData(forceLiveRefresh = true)
                 viewModel.runHeartbeatCheck(silent = true)
             }
-            MainTab.ACTIVE_USERS, MainTab.CARDS, MainTab.PROFILES, MainTab.DASHBOARD -> {
-                viewModel.refreshData()
+            MainTab.ACTIVE_USERS, MainTab.CARDS, MainTab.PROFILES, MainTab.DASHBOARD, MainTab.TOOLS, MainTab.FINANCE -> {
+                viewModel.refreshData(forceLiveRefresh = true)
             }
             else -> {}
         }
@@ -583,7 +580,6 @@ fun MainPagerContent(
                 MainTab.TOOLS -> NetworkToolsScreen(
                     viewModel = viewModel,
                     onOpenSystemEventLog = { scope.launch { pagerState.animateScrollToPage(MainTab.LOGS.ordinal) } },
-                    onTriggerSignIn = onTriggerSignIn,
                     onOpenAdminAudit = onOpenAdminAudit,
                     modifier = Modifier.padding(bottom = 78.dp)
                 )
@@ -591,7 +587,6 @@ fun MainPagerContent(
                     viewModel = viewModel,
                     onNavigateToCards = { scope.launch { pagerState.animateScrollToPage(MainTab.CARDS.ordinal) } },
                     onNavigateToPosAgents = { scope.launch { pagerState.animateScrollToPage(MainTab.POS_AGENTS.ordinal) } },
-                    onTriggerSignIn = onTriggerSignIn,
                     modifier = Modifier.padding(bottom = 78.dp)
                 )
                 MainTab.LOGS -> SystemEventLogScreen(

@@ -1,17 +1,10 @@
 package com.example.data.model
 
 import com.example.data.local.MonthlyProfitRecordEntity
-import com.google.firebase.Timestamp
-import com.google.firebase.firestore.DocumentId
-import com.google.firebase.firestore.DocumentSnapshot
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.IgnoreExtraProperties
-import com.google.firebase.firestore.ServerTimestamp
 import java.security.MessageDigest
 import java.util.Locale
 import kotlin.math.abs
 
-@IgnoreExtraProperties
 data class MonthlyPackageSalesCloud(
     val packageName: String = "",
     val cardsSold: Long = 0L,
@@ -20,9 +13,8 @@ data class MonthlyPackageSalesCloud(
     val sharePercentage: Double = 0.0
 )
 
-@IgnoreExtraProperties
 data class MonthlyProfitCloudRecord(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val monthKey: String = "",
     val monthNameAr: String = "",
@@ -37,8 +29,8 @@ data class MonthlyProfitCloudRecord(
     val topSellingProfile: String = "",
     val totalBytesConsumed: Long = 0L,
     val packageBreakdown: List<MonthlyPackageSalesCloud> = emptyList(),
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAtMillis: Long? = null,
+    val updatedAtMillis: Long? = null
 )
 
 sealed class FinanceCloudSyncStatus {
@@ -158,9 +150,7 @@ data class MonthlyProfitUploadCandidate(
             "totalCardsCount" to totalCardsCount,
             "topSellingProfile" to topSellingProfile,
             "totalBytesConsumed" to totalBytesConsumed,
-            "packageBreakdown" to packageBreakdownToMaps(),
-            "createdAt" to FieldValue.serverTimestamp(),
-            "updatedAt" to FieldValue.serverTimestamp()
+            "packageBreakdown" to packageBreakdownToMaps()
         )
     }
 
@@ -174,8 +164,7 @@ data class MonthlyProfitUploadCandidate(
             "totalCardsCount" to totalCardsCount,
             "topSellingProfile" to topSellingProfile,
             "totalBytesConsumed" to totalBytesConsumed,
-            "packageBreakdown" to packageBreakdownToMaps(),
-            "updatedAt" to FieldValue.serverTimestamp()
+            "packageBreakdown" to packageBreakdownToMaps()
         )
     }
 }
@@ -206,26 +195,6 @@ object FinanceCloudValidator {
             .take(6)
             .joinToString("") { "%02x".format(Locale.US, it) }
         return if (slug.isNotBlank()) "pkg_${slug}_$digest" else "pkg_$digest"
-    }
-
-    fun validateCloudDocument(
-        doc: DocumentSnapshot,
-        expectedUserId: String? = null
-    ): MonthlyProfitValidationResult {
-        val docId = doc.id
-        if (!isValidMonthKey(docId)) {
-            return MonthlyProfitValidationResult.Invalid(docId, "Invalid month document ID: '$docId'")
-        }
-        val record = try {
-            doc.toObject(
-                MonthlyProfitCloudRecord::class.java,
-                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
-            )
-        } catch (e: Exception) {
-            return MonthlyProfitValidationResult.Invalid(docId, "Deserialization failed: ${e.message}")
-        } ?: return MonthlyProfitValidationResult.Invalid(docId, "Empty/null document snapshot")
-
-        return validateRecordFields(docId, record, expectedUserId)
     }
 
     fun validateRecordFields(
@@ -315,7 +284,7 @@ object FinanceCloudValidator {
             )
         }
 
-        val updatedMs = record.updatedAt?.toDate()?.time ?: System.currentTimeMillis()
+        val updatedMs = record.updatedAtMillis ?: System.currentTimeMillis()
         val entity = MonthlyProfitRecordEntity(
             monthKey = docId,
             monthNameAr = monthName,

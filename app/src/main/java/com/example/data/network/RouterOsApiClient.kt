@@ -81,6 +81,7 @@ class RouterOsApiClient {
             synchronized(socketLock) {
                 try {
                     closeSocketOnlyLocked()
+                    synchronized(cachedProfiles) { cachedProfiles.clear() }
                     isExplicitlyClosed = false
                     val cleanHost = host.trim()
                     val cleanUser = username.trim()
@@ -165,13 +166,20 @@ class RouterOsApiClient {
                 val re = sentences.firstOrNull { it.firstOrNull() == "!re" }
                 if (re != null) {
                     val map = parseSentenceToMap(re)
-                    val cpu = map["cpu-load"]?.toIntOrNull() ?: 15
-                    val freeMem = map["free-memory"]?.toLongOrNull() ?: (500 * 1024 * 1024L)
-                    val totalMem = map["total-memory"]?.toLongOrNull() ?: (1024 * 1024 * 1024L)
-                    val uptime = map["uptime"] ?: "1d 2h"
-                    val version = map["version"] ?: "RouterOS"
-                    val board = map["board-name"] ?: "MikroTik"
-                    val arch = map["architecture-name"] ?: "mipsbe"
+                    val cpu = map["cpu-load"]?.toIntOrNull() ?: 0
+                    val freeMem = map["free-memory"]?.toLongOrNull() ?: 0L
+                    val totalMem = map["total-memory"]?.toLongOrNull() ?: 0L
+                    val uptime = map["uptime"] ?: "0s"
+                    val version = map["version"] ?: ""
+                    val board = map["board-name"] ?: ""
+                    val arch = map["architecture-name"] ?: ""
+                    val cpuFreqRaw = map["cpu-frequency"].orEmpty()
+                    val cpuFreq = when {
+                        cpuFreqRaw.isBlank() -> ""
+                        cpuFreqRaw.contains("MHz", ignoreCase = true) -> cpuFreqRaw
+                        else -> "$cpuFreqRaw MHz"
+                    }
+                    val hddFree = map["free-hdd-space"]?.toLongOrNull() ?: 0L
 
                     val res = RouterResource(
                         uptime = uptime,
@@ -182,11 +190,13 @@ class RouterOsApiClient {
                         totalMemoryBytes = totalMem,
                         architecture = arch,
                         rxSpeedKbps = 0.0,
-                        txSpeedKbps = 0.0
+                        txSpeedKbps = 0.0,
+                        cpuFrequency = cpuFreq,
+                        hddFreeBytes = hddFree
                     )
                     Result.success(res)
                 } else {
-                    Result.success(RouterResource())
+                    Result.failure(Exception("لم يُرجع الراوتر بيانات النظام"))
                 }
             } catch (e: Exception) {
                 Result.failure(e)
@@ -516,11 +526,9 @@ class RouterOsApiClient {
                     return@withContext Result.failure(lastSysError!!)
                 }
 
-                if (list.isNotEmpty()) {
-                    synchronized(cachedProfiles) {
-                        cachedProfiles.clear()
-                        cachedProfiles.addAll(list)
-                    }
+                synchronized(cachedProfiles) {
+                    cachedProfiles.clear()
+                    cachedProfiles.addAll(list)
                 }
 
                 Result.success(list)
@@ -2225,7 +2233,7 @@ class RouterOsApiClient {
                     )
                     Result.success(info)
                 } else {
-                    Result.success(RouterBoardInfo())
+                    Result.failure(Exception("لا تتوفر بيانات RouterBOARD"))
                 }
             } catch (e: Exception) {
                 Result.failure(e)
@@ -2871,6 +2879,7 @@ class RouterOsApiClient {
             lastHost = ""
             lastUsername = ""
             lastPassword = ""
+            synchronized(cachedProfiles) { cachedProfiles.clear() }
             closeSocketOnlyLocked()
         }
     }

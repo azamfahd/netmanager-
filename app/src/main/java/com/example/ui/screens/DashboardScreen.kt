@@ -135,7 +135,7 @@ fun DashboardScreen(
                 ipAddress = connectedIp,
                 uptime = resource.uptime,
                 isDemo = isConnectedAsDemo,
-                onRefresh = { viewModel.refreshData() }
+                onRefresh = { viewModel.refreshData(forceLiveRefresh = true, notifyOnError = true) }
             )
         }
 

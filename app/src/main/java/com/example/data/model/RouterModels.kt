@@ -62,27 +62,27 @@ sealed class ConnectionState {
 }
 
 data class RouterResource(
-    val uptime: String = "3d 14h 22m",
-    val version: String = "7.15.2 (stable)",
-    val boardName: String = "MikroTik RB4011iGS+",
-    val cpuLoad: Int = 18,
-    val freeMemoryBytes: Long = 780 * 1024 * 1024L,
-    val totalMemoryBytes: Long = 1024 * 1024 * 1024L,
-    val architecture: String = "arm64",
-    val rxSpeedKbps: Double = 3450.0,
-    val txSpeedKbps: Double = 1820.0,
-    val voltage: String = "24.1 V",
-    val temperature: String = "42°C",
-    val cpuFrequency: String = "1400 MHz",
-    val hddFreeBytes: Long = 512 * 1024 * 1024L
+    val uptime: String = "0s",
+    val version: String = "",
+    val boardName: String = "",
+    val cpuLoad: Int = 0,
+    val freeMemoryBytes: Long = 0L,
+    val totalMemoryBytes: Long = 0L,
+    val architecture: String = "",
+    val rxSpeedKbps: Double = 0.0,
+    val txSpeedKbps: Double = 0.0,
+    val voltage: String = "",
+    val temperature: String = "",
+    val cpuFrequency: String = "",
+    val hddFreeBytes: Long = 0L
 )
 
 data class RouterBoardInfo(
-    val model: String = "RB4011iGS+",
-    val serialNumber: String = "H93A012345",
-    val currentFirmware: String = "7.15.2",
-    val upgradeFirmware: String = "7.15.2",
-    val routerboard: Boolean = true
+    val model: String = "",
+    val serialNumber: String = "",
+    val currentFirmware: String = "",
+    val upgradeFirmware: String = "",
+    val routerboard: Boolean = false
 )
 
 data class HotspotServerInfo(

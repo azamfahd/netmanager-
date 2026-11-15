@@ -12,7 +12,6 @@ import com.example.data.model.HotspotProfile
 import com.example.data.local.SystemEventLogEntity
 import com.example.data.model.IpBinding
 import com.example.data.model.RouterConnectionConfig
-import com.google.firebase.firestore.FirebaseFirestore
 import com.example.data.model.RouterResource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,7 +50,6 @@ data class UserKnownTelemetry(
 )
 
 class MikrotikRepository(
-    private val db: FirebaseFirestore,
     private val appDao: com.example.data.local.AppDao? = null
 ) {
 
@@ -336,6 +334,11 @@ class MikrotikRepository(
         .writeTimeout(20, TimeUnit.SECONDS)
         .build()
 
+    private val probeHttpClient = httpClient.newBuilder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .build()
+
     private val routerOsApiClient = RouterOsApiClient()
     @Volatile
     private var isApiSocketMode = false
@@ -392,6 +395,21 @@ class MikrotikRepository(
     fun notifyDataRefreshed() {
         val config = activeConfig ?: return
         onDataRefreshedListener?.invoke(getCurrentSnapshot(config.ipAddress, config.name.ifBlank { "راوتر MikroTik" }))
+    }
+
+    fun setOfflineConfig(config: RouterConnectionConfig) {
+        activeConfig = config.copy(
+            ipAddress = config.ipAddress.trim(),
+            username = config.username.trim(),
+            password = config.password.trim()
+        )
+        activeRouterIp = config.ipAddress.trim()
+        lastFullSyncTimeMs = 0L
+        isApiSocketMode = false
+    }
+
+    fun isSessionEstablished(): Boolean {
+        return activeConfig != null && (isApiSocketMode || lastFullSyncTimeMs > 0L || activeConfig?.isDemoMode == true)
     }
 
     // State Holders
@@ -548,6 +566,28 @@ class MikrotikRepository(
     }
 
     fun populateDemoData() {
+        _resourceState.value = RouterResource(
+            uptime = "5d 14h 22m",
+            version = "7.14.2 (stable)",
+            boardName = "MikroTik RB4011iGS+ (Demo)",
+            cpuLoad = 18,
+            freeMemoryBytes = 512L * 1024L * 1024L,
+            totalMemoryBytes = 1024L * 1024L * 1024L,
+            architecture = "arm64",
+            cpuFrequency = "1400 MHz",
+            hddFreeBytes = 420L * 1024L * 1024L,
+            voltage = "24.1 V",
+            temperature = "42°C",
+            rxSpeedKbps = 8400.0,
+            txSpeedKbps = 3200.0
+        )
+        _routerBoardInfo.value = com.example.data.model.RouterBoardInfo(
+            model = "RB4011iGS+5HacQ2HnD",
+            serialNumber = "DEMO99887766",
+            currentFirmware = "7.14.2",
+            upgradeFirmware = "7.14.2",
+            routerboard = true
+        )
         // Initialize default realistic profiles
         _profiles.value = listOf(
             HotspotProfile("1", "1 Hour - 500MB", rateLimit = "2M/2M", sharedUsers = 1, sessionTimeout = "1h", price = "200 ر.ي"),
@@ -1198,20 +1238,22 @@ class MikrotikRepository(
                             .header("Authorization", credential)
                             .build()
 
-                        httpClient.newCall(request).execute().use { response ->
+                        probeHttpClient.newCall(request).execute().use { response ->
                             if (response.isSuccessful) {
-                                val body = response.body?.string() ?: ""
-                                parseResource(body)
-                                routerOsApiClient.disconnect()
-                                isApiSocketMode = false
-                                restConnected = true
-                                syncMutex.withLock {
-                                    if (connectionSessionId == sessionId && activeConfig != null) {
-                                        try {
-                                            fetchLiveRouterData(baseUrl, credential)
-                                        } catch (e: Exception) {
-                                            _lastSyncError.value = e.message
-                                            restSyncError = e
+                                val body = response.body?.string().orEmpty()
+                                if (body.trimStart().startsWith("{")) {
+                                    parseResource(body)
+                                    routerOsApiClient.disconnect()
+                                    isApiSocketMode = false
+                                    restConnected = true
+                                    syncMutex.withLock {
+                                        if (connectionSessionId == sessionId && activeConfig != null) {
+                                            try {
+                                                fetchLiveRouterData(baseUrl, credential)
+                                            } catch (e: Exception) {
+                                                _lastSyncError.value = e.message
+                                                restSyncError = e
+                                            }
                                         }
                                     }
                                 }
@@ -1279,8 +1321,13 @@ class MikrotikRepository(
             val resResult = routerOsApiClient.getSystemResource()
             if (resResult.isSuccess) {
                 val res = resResult.getOrThrow()
+                val formattedBoard = when {
+                    realIdentity.isNotBlank() && res.boardName.isNotBlank() -> "$realIdentity (${res.boardName})"
+                    realIdentity.isNotBlank() -> realIdentity
+                    else -> res.boardName
+                }
                 _resourceState.value = res.copy(
-                    boardName = if (realIdentity.isNotBlank()) "$realIdentity (${res.boardName})" else res.boardName,
+                    boardName = formattedBoard,
                     rxSpeedKbps = _resourceState.value.rxSpeedKbps,
                     txSpeedKbps = _resourceState.value.txSpeedKbps
                 )
@@ -1298,13 +1345,22 @@ class MikrotikRepository(
 
             val resResult = routerOsApiClient.getSystemResource()
             val healthMap = routerOsApiClient.getSystemHealth().getOrDefault(emptyMap())
-            val healthVolt = healthMap["voltage"]?.let { "$it V" } ?: healthMap["voltage-sensor"]?.let { "$it V" } ?: "24.1 V"
-            val healthTemp = healthMap["temperature"]?.let { "$it°C" } ?: healthMap["cpu-temperature"]?.let { "$it°C" } ?: "42°C"
+            val healthVolt = healthMap["voltage"]?.takeIf { it.isNotBlank() }?.let { "$it V" }
+                ?: healthMap["voltage-sensor"]?.takeIf { it.isNotBlank() }?.let { "$it V" }
+                ?: "غير متاح"
+            val healthTemp = healthMap["temperature"]?.takeIf { it.isNotBlank() }?.let { "$it°C" }
+                ?: healthMap["cpu-temperature"]?.takeIf { it.isNotBlank() }?.let { "$it°C" }
+                ?: "غير متاح"
 
             if (resResult.isSuccess) {
                 val res = resResult.getOrThrow()
+                val formattedBoard = when {
+                    realIdentity.isNotBlank() && res.boardName.isNotBlank() -> "$realIdentity (${res.boardName})"
+                    realIdentity.isNotBlank() -> realIdentity
+                    else -> res.boardName
+                }
                 _resourceState.value = res.copy(
-                    boardName = if (realIdentity.isNotBlank()) "$realIdentity (${res.boardName})" else res.boardName,
+                    boardName = formattedBoard,
                     voltage = healthVolt,
                     temperature = healthTemp,
                     rxSpeedKbps = _resourceState.value.rxSpeedKbps,
@@ -1344,18 +1400,6 @@ class MikrotikRepository(
             val umCardsRes = routerOsApiClient.getUserManagerUsers()
             val hotspotCards = hotspotCardsRes.getOrNull()
             val umCards = umCardsRes.getOrNull()
-
-            // Throttled ingestion of historical UserManager sessions (initial sync & every 3 minutes)
-            val nowMs = System.currentTimeMillis()
-            if (lastUmHistoryFetchMs == 0L || (nowMs - lastUmHistoryFetchMs) >= 180_000L) {
-                lastUmHistoryFetchMs = nowMs
-                try {
-                    val umSessions = routerOsApiClient.getUserManagerSessions().getOrNull().orEmpty()
-                    if (umSessions.isNotEmpty()) {
-                        processHistoricalUmSessions(umSessions)
-                    }
-                } catch (_: Exception) {}
-            }
 
             if (hotspotCards != null || umCards != null) {
                 val combinedCards = mutableListOf<HotspotCard>()
@@ -1448,6 +1492,18 @@ class MikrotikRepository(
 
             lastFullSyncTimeMs = System.currentTimeMillis()
             notifyDataRefreshed()
+
+            // Throttled non-blocking ingestion of historical UserManager sessions AFTER live state/nodes publish
+            val nowMs = System.currentTimeMillis()
+            if (lastUmHistoryFetchMs == 0L || (nowMs - lastUmHistoryFetchMs) >= 180_000L) {
+                lastUmHistoryFetchMs = nowMs
+                try {
+                    val umSessions = routerOsApiClient.getUserManagerSessions().getOrNull().orEmpty()
+                    if (umSessions.isNotEmpty()) {
+                        processHistoricalUmSessions(umSessions)
+                    }
+                } catch (_: Exception) {}
+            }
         }
     }
 
@@ -1455,13 +1511,17 @@ class MikrotikRepository(
         try {
             val json = JSONObject(jsonString)
             _resourceState.value = RouterResource(
-                uptime = json.optString("uptime", "1d 2h"),
-                version = json.optString("version", "RouterOS v7"),
-                boardName = json.optString("board-name", "MikroTik Router"),
-                cpuLoad = json.optInt("cpu-load", 15),
-                freeMemoryBytes = json.optLong("free-memory", 500 * 1024 * 1024L),
-                totalMemoryBytes = json.optLong("total-memory", 1024 * 1024 * 1024L),
-                architecture = json.optString("architecture-name", "arm64"),
+                uptime = json.optString("uptime", "0s"),
+                version = json.optString("version", ""),
+                boardName = json.optString("board-name", ""),
+                cpuLoad = json.optInt("cpu-load", 0),
+                freeMemoryBytes = json.optLong("free-memory", 0L),
+                totalMemoryBytes = json.optLong("total-memory", 0L),
+                architecture = json.optString("architecture-name", ""),
+                cpuFrequency = json.optString("cpu-frequency", "").let { if (it.isNotBlank() && !it.endsWith("MHz", true)) "$it MHz" else it },
+                hddFreeBytes = json.optLong("free-hdd-space", 0L),
+                voltage = _resourceState.value.voltage,
+                temperature = _resourceState.value.temperature,
                 rxSpeedKbps = _resourceState.value.rxSpeedKbps,
                 txSpeedKbps = _resourceState.value.txSpeedKbps
             )
@@ -1480,8 +1540,14 @@ class MikrotikRepository(
                             val idObj = JSONObject(idResp.body?.string() ?: "{}")
                             realIdentity = idObj.optString("name", "")
                             if (realIdentity.isNotBlank()) {
+                                val baseBoard = _resourceState.value.boardName
+                                val formattedBoard = if (baseBoard.isNotBlank() && !baseBoard.startsWith("$realIdentity ")) {
+                                    "$realIdentity ($baseBoard)"
+                                } else {
+                                    realIdentity
+                                }
                                 _resourceState.value = _resourceState.value.copy(
-                                    boardName = "$realIdentity (${_resourceState.value.boardName})"
+                                    boardName = formattedBoard
                                 )
                             }
                         }
@@ -1495,11 +1561,11 @@ class MikrotikRepository(
                         if (rbResp.isSuccessful) {
                             val rbObj = JSONObject(rbResp.body?.string() ?: "{}")
                             _routerBoardInfo.value = com.example.data.model.RouterBoardInfo(
-                                model = rbObj.optString("model", "MikroTik Router"),
+                                model = rbObj.optString("model", ""),
                                 serialNumber = rbObj.optString("serial-number", ""),
                                 currentFirmware = rbObj.optString("current-firmware", ""),
                                 upgradeFirmware = rbObj.optString("upgrade-firmware", ""),
-                                routerboard = rbObj.optBoolean("routerboard", true)
+                                routerboard = rbObj.optBoolean("routerboard", false)
                             )
                         }
                     }
@@ -1511,14 +1577,16 @@ class MikrotikRepository(
                     httpClient.newCall(hReq).execute().use { hResp ->
                         if (hResp.isSuccessful) {
                             val hArr = JSONArray(hResp.body?.string() ?: "[]")
-                            var volt = "24.1 V"
-                            var temp = "42°C"
+                            var volt = "غير متاح"
+                            var temp = "غير متاح"
                             for (i in 0 until hArr.length()) {
                                 val o = hArr.getJSONObject(i)
                                 val name = o.optString("name", "")
                                 val value = o.optString("value", "")
-                                if (name.contains("voltage", ignoreCase = true)) volt = "$value V"
-                                if (name.contains("temperature", ignoreCase = true)) temp = "$value°C"
+                                if (value.isNotBlank()) {
+                                    if (name.contains("voltage", ignoreCase = true)) volt = "$value V"
+                                    if (name.contains("temperature", ignoreCase = true)) temp = "$value°C"
+                                }
                             }
                             _resourceState.value = _resourceState.value.copy(voltage = volt, temperature = temp)
                         }
@@ -1914,11 +1982,6 @@ class MikrotikRepository(
                         }
                     }
                 }
-                val nowRestMs = System.currentTimeMillis()
-                if (lastUmHistoryFetchMs == 0L || (nowRestMs - lastUmHistoryFetchMs) >= 180_000L) {
-                    lastUmHistoryFetchMs = nowRestMs
-                    fetchRestUserManagerSessions(baseUrl, credential)
-                }
                 if (hsCardsSucceeded || umCardsSucceeded) {
                     val sortedCards = sortCardsByNewestFirst(cardList.distinctBy { it.name })
                     _cards.value = sortedCards
@@ -2241,6 +2304,15 @@ class MikrotikRepository(
                 }
                 lastFullSyncTimeMs = System.currentTimeMillis()
                 notifyDataRefreshed()
+
+                // Throttled non-blocking ingestion of historical UserManager sessions AFTER live state/nodes publish
+                val nowRestMs = System.currentTimeMillis()
+                if (lastUmHistoryFetchMs == 0L || (nowRestMs - lastUmHistoryFetchMs) >= 180_000L) {
+                    lastUmHistoryFetchMs = nowRestMs
+                    try {
+                        fetchRestUserManagerSessions(baseUrl, credential)
+                    } catch (_: Exception) {}
+                }
             } catch (e: Exception) {
                 throw e
             }
@@ -2475,7 +2547,7 @@ class MikrotikRepository(
                             id = "node_vlan_$ifName",
                             name = displayName,
                             ipAddress = effectiveIp,
-                            macAddress = nMac.ifBlank { iface.macAddress.ifBlank { "48:A9:8A:76:FB:${"%02X".format(vlanId ?: 1)}" } },
+                            macAddress = nMac.ifBlank { iface.macAddress },
                             interfaceName = ifName,
                             parentInterface = parentIf,
                             vlanId = vlanId,
@@ -2510,7 +2582,7 @@ class MikrotikRepository(
                             id = "node_vlan_$ifName",
                             name = displayName,
                             ipAddress = assignedIp,
-                            macAddress = iface.macAddress.ifBlank { "48:A9:8A:76:FB:${"%02X".format(vlanId ?: 1)}" },
+                            macAddress = iface.macAddress,
                             interfaceName = ifName,
                             parentInterface = parentIf,
                             vlanId = vlanId,
@@ -2688,7 +2760,7 @@ class MikrotikRepository(
             }
         }
 
-        // 6. Sync with DB: Deduplicate and preserve custom settings, do not resurrect deleted nodes
+        // 6. Sync with DB: Preserve custom node settings ONLY for user-created nodes; NEVER overwrite live router node names/roles/parents
         dbNodes?.forEach { dbNode ->
             if (!isNodeBlacklisted(dbNode.id, dbNode.ipAddress, dbNode.interfaceName, dbNode.macAddress, dbNode.vlanId)) {
                 val matchIdx = candidateSubNodes.indexOfFirst { c ->
@@ -2698,16 +2770,23 @@ class MikrotikRepository(
                     (dbNode.vlanId != null && c.vlanId == dbNode.vlanId) ||
                     (dbNode.interfaceName.isNotBlank() && c.interfaceName.equals(dbNode.interfaceName, true))
                 }
+                val isCustomNode = dbNode.id.startsWith("custom_")
                 if (matchIdx >= 0) {
                     val live = candidateSubNodes[matchIdx]
-                    candidateSubNodes[matchIdx] = live.copy(
-                        name = if (dbNode.name.isNotBlank() && !dbNode.name.startsWith("نقطة بث ESLAN") && !dbNode.name.startsWith("منفذ ")) dbNode.name else live.name,
-                        location = if (dbNode.location.isNotBlank()) dbNode.location else live.location,
-                        parentTowerId = dbNode.parentTowerId ?: live.parentTowerId,
-                        parentTowerName = dbNode.parentTowerName ?: live.parentTowerName,
-                        role = if (dbNode.role.isNotBlank()) dbNode.role else live.role
-                    )
-                } else if (dbNode.id.startsWith("custom_") || dbNode.nodeType == com.example.data.model.NetworkNodeType.HOME_NODE) {
+                    candidateSubNodes[matchIdx] = if (isCustomNode) {
+                        live.copy(
+                            name = dbNode.name.ifBlank { live.name },
+                            location = dbNode.location.ifBlank { live.location },
+                            parentTowerId = dbNode.parentTowerId ?: live.parentTowerId,
+                            parentTowerName = dbNode.parentTowerName ?: live.parentTowerName,
+                            role = dbNode.role.ifBlank { live.role }
+                        )
+                    } else {
+                        live.copy(
+                            location = live.location.ifBlank { dbNode.location }
+                        )
+                    }
+                } else if (isCustomNode) {
                     // Only preserve user-created custom nodes as offline when not matched on the live router
                     candidateSubNodes.add(dbNode.copy(isOnline = false, status = com.example.data.model.NodeStatus.OFFLINE, connectedUsers = 0))
                 }
@@ -2788,7 +2867,7 @@ class MikrotikRepository(
             id = "node_main_router",
             name = serverName,
             ipAddress = routerIpBase,
-            macAddress = "D4:CA:6D:AA:11:01",
+            macAddress = allRouterInterfaces.firstOrNull { it.macAddress.isNotBlank() }?.macAddress.orEmpty(),
             interfaceName = "ALL",
             model = _resourceState.value.boardName.ifBlank { "MikroTik Router" },
             role = "السيرفر الرئيسي (Gateway)",
@@ -3264,6 +3343,7 @@ class MikrotikRepository(
                     val sortedCards = sortCardsByNewestFirst(distinctCards)
                     _cards.value = sortedCards
                     syncCardsToRoom(sortedCards)
+                    notifyDataRefreshed()
                 }
             } else {
                 try {
@@ -3414,13 +3494,17 @@ class MikrotikRepository(
                         val sortedCards = sortCardsByNewestFirst(mergedList.distinctBy { it.name })
                         _cards.value = sortedCards
                         syncCardsToRoom(sortedCards)
+                        notifyDataRefreshed()
                     }
                 } catch (_: Exception) {}
             }
         }
     }
 
-    suspend fun refreshData(forceHistorySync: Boolean = false): Result<Unit> {
+    suspend fun refreshData(
+        forceLiveRefresh: Boolean = false,
+        forceHistorySync: Boolean = false
+    ): Result<Unit> {
         val config = activeConfig ?: return Result.failure(Exception("لم يتم ضبط إعدادات الاتصال"))
         if (config.isDemoMode) {
             val current = _resourceState.value
@@ -3439,7 +3523,7 @@ class MikrotikRepository(
         return syncMutex.withLock {
             val currentConfig = activeConfig ?: return@withLock Result.failure(Exception("تم إيقاف الاتصال بالراوتر"))
             if (currentConfig.isDemoMode) return@withLock Result.success(Unit)
-            if (!forceHistorySync && (System.currentTimeMillis() - lastFullSyncTimeMs) < 1500L) {
+            if (!forceLiveRefresh && !forceHistorySync && (System.currentTimeMillis() - lastFullSyncTimeMs) < 1500L) {
                 return@withLock Result.success(Unit)
             }
             if (forceHistorySync) {
@@ -3485,6 +3569,7 @@ class MikrotikRepository(
                     val socketRes = routerOsApiClient.kickUser(user.id)
                     if (socketRes.isSuccess) {
                         _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
+                        notifyDataRefreshed()
                     }
                     return@withContext socketRes
                 }
@@ -3500,6 +3585,7 @@ class MikrotikRepository(
                     httpClient.newCall(delRequest).execute().use { resp ->
                         if (resp.isSuccessful) {
                             _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
+                            notifyDataRefreshed()
                             return@withContext Result.success(true)
                         }
                     }
@@ -3508,6 +3594,7 @@ class MikrotikRepository(
                 }
             }
             _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
+            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -3527,6 +3614,7 @@ class MikrotikRepository(
                         cardTimestampCache.remove(targetName)
                         try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
                     }
+                    notifyDataRefreshed()
                     return@withContext socketRes
                 }
                 try {
@@ -3562,6 +3650,7 @@ class MikrotikRepository(
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
                         }
+                        notifyDataRefreshed()
                         return@withContext Result.success(true)
                     }
 
@@ -3575,6 +3664,7 @@ class MikrotikRepository(
                             _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
+                            notifyDataRefreshed()
                             return@withContext Result.success(true)
                         }
                     }
@@ -3589,6 +3679,7 @@ class MikrotikRepository(
                             _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
+                            notifyDataRefreshed()
                             return@withContext Result.success(true)
                         }
                     }
@@ -3600,6 +3691,7 @@ class MikrotikRepository(
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
                         }
+                        notifyDataRefreshed()
                         return@withContext Result.success(true)
                     }
 
@@ -3613,6 +3705,7 @@ class MikrotikRepository(
                 try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
             }
             _cards.value = _cards.value.filter { it.id != cardId && (targetName.isBlank() || it.name != targetName) }
+            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -3724,6 +3817,7 @@ class MikrotikRepository(
             if (targetCard != null) {
                 upsertLocalCardPreservingTimestamp(targetCard)
             }
+            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -3819,6 +3913,7 @@ class MikrotikRepository(
                 if (it.id == updatedCard.id || it.name == updatedCard.name) updatedCard else it
             }
             upsertLocalCardPreservingTimestamp(updatedCard)
+            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -3841,6 +3936,7 @@ class MikrotikRepository(
                     if (updated != null) {
                         upsertLocalCardPreservingTimestamp(updated)
                     }
+                    notifyDataRefreshed()
                     return@withContext socketRes
                 }
                 try {
@@ -3862,6 +3958,7 @@ class MikrotikRepository(
                         if (updated != null) {
                             upsertLocalCardPreservingTimestamp(updated)
                         }
+                        notifyDataRefreshed()
                         return@withContext Result.success(true)
                     }
                     return@withContext Result.failure(Exception("رفض الراوتر تغيير حالة الكرت عبر واجهة REST"))
@@ -3876,6 +3973,7 @@ class MikrotikRepository(
             if (updated != null) {
                 upsertLocalCardPreservingTimestamp(updated)
             }
+            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -4267,6 +4365,7 @@ class MikrotikRepository(
                 val sorted = sortCardsByNewestFirst(currentList.distinctBy { it.name })
                 _cards.value = sorted
                 syncCardsToRoom(sorted)
+                notifyDataRefreshed()
                 return@withContext Result.success(batchResult)
             }
 
@@ -4277,6 +4376,7 @@ class MikrotikRepository(
             val sorted = sortCardsByNewestFirst(currentList.distinctBy { it.name })
             _cards.value = sorted
             syncCardsToRoom(sorted)
+            notifyDataRefreshed()
 
             val batchResult = BatchCardGenerationResult(
                 totalRequested = config.count,
@@ -4497,6 +4597,7 @@ class MikrotikRepository(
             val sorted = sortCardsByNewestFirst(currentList)
             _cards.value = sorted
             syncCardsToRoom(listOf(sanitizedCard))
+            notifyDataRefreshed()
 
             // Non-blocking background sync of full list
             if (routerConfig != null && !routerConfig.isDemoMode) {
@@ -4572,6 +4673,7 @@ class MikrotikRepository(
             current.add(newProf)
             _profiles.value = current
         }
+        notifyDataRefreshed()
         return Result.success(true)
     }
 
@@ -4688,6 +4790,7 @@ class MikrotikRepository(
             if (it.id == card.id || it.name == card.name) activated else it
         }
         upsertLocalCardPreservingTimestamp(activated)
+        notifyDataRefreshed()
         return Result.success(true)
     }
 
@@ -4779,6 +4882,7 @@ class MikrotikRepository(
             current.add(profile)
         }
         _profiles.value = current
+        notifyDataRefreshed()
         return Result.success(true)
     }
 
@@ -4884,6 +4988,7 @@ class MikrotikRepository(
         _profiles.value = _profiles.value.map {
             if (it.id == profile.id || it.name == profile.name) profile else it
         }
+        notifyDataRefreshed()
         return Result.success(true)
     }
 
@@ -4919,6 +5024,7 @@ class MikrotikRepository(
             }
         }
         _profiles.value = _profiles.value.filter { it.id != profile.id && it.name != profile.name }
+        notifyDataRefreshed()
         return Result.success(true)
     }
 
@@ -4945,6 +5051,7 @@ class MikrotikRepository(
                 )
             } catch (_: Exception) {}
 
+            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -4979,6 +5086,7 @@ class MikrotikRepository(
                 )
             } catch (_: Exception) {}
 
+            notifyDataRefreshed()
             Result.success(true)
         }
     }
@@ -5008,6 +5116,7 @@ class MikrotikRepository(
             } catch (_: Exception) {
                 try { appDao?.deleteNetworkNodeEntity(routerIpKey, nodeId) } catch (_: Exception) {}
             }
+            notifyDataRefreshed()
             Result.success(true)
         }
     }

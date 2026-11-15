@@ -321,5 +321,37 @@ class LocalFirstSyncAuditTest {
 
         assertTrue(com.example.data.local.RouterCacheManager.hasPersistableData(baseSnapshot))
     }
+
+    @Test
+    fun testRealRouterModelDefaultsContainNoFakeDemoValues() {
+        val resource = com.example.data.model.RouterResource()
+        val board = com.example.data.model.RouterBoardInfo()
+
+        assertEquals("0s", resource.uptime)
+        assertEquals("", resource.version)
+        assertEquals("", resource.boardName)
+        assertEquals(0, resource.cpuLoad)
+        assertEquals(0L, resource.freeMemoryBytes)
+        assertEquals(0L, resource.totalMemoryBytes)
+        assertEquals("", resource.voltage)
+        assertEquals("", resource.temperature)
+
+        assertEquals("", board.model)
+        assertEquals("", board.serialNumber)
+        assertFalse(board.routerboard)
+    }
+
+    @Test
+    fun testRepositoryWorksWithoutFirebaseAndSetsDemoDataExplicitly() {
+        val repo = com.example.data.network.MikrotikRepository(appDao = null)
+        assertEquals("", repo.resourceState.value.boardName)
+        assertTrue(repo.cards.value.isEmpty())
+        assertTrue(repo.networkNodes.value.isEmpty())
+
+        repo.populateDemoData()
+        assertTrue(repo.resourceState.value.boardName.contains("Demo"))
+        assertTrue(repo.cards.value.isNotEmpty())
+        assertTrue(repo.networkNodes.value.isNotEmpty())
+    }
 }
 

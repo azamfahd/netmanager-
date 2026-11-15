@@ -64,7 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.data.model.FinanceCloudSyncStatus
+import com.example.data.model.ConnectionState
 import com.example.data.model.MonthlySalesSummary
 import com.example.data.model.DetailedPackageProfitStat
 import com.example.data.model.RevenueAnalyticsSummary
@@ -82,7 +82,6 @@ fun FinanceAnalyticsScreen(
     viewModel: MainViewModel,
     onNavigateToCards: () -> Unit,
     onNavigateToPosAgents: () -> Unit,
-    onTriggerSignIn: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val revenueSummary by viewModel.revenueAnalytics.collectAsStateWithLifecycle()
@@ -90,7 +89,7 @@ fun FinanceAnalyticsScreen(
     val packageStats by viewModel.detailedPackageProfitStats.collectAsStateWithLifecycle()
     val posAgents by viewModel.posSummaries.collectAsStateWithLifecycle()
     val selectedTimeFilter by viewModel.selectedTimeFilter.collectAsStateWithLifecycle()
-    val financeCloudSyncStatus by viewModel.financeCloudSyncStatus.collectAsStateWithLifecycle()
+    val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
 
     var selectedTab by remember { mutableStateOf(FinanceTab.OVERVIEW) }
     var selectedMonthKey by remember { mutableStateOf<String?>(null) }
@@ -187,28 +186,25 @@ fun FinanceAnalyticsScreen(
                         }
                     }
 
-                    IconButton(onClick = { viewModel.refreshData() }) {
+                    IconButton(onClick = { viewModel.refreshData(forceLiveRefresh = true, notifyOnError = true) }) {
                         Icon(Icons.Default.Refresh, contentDescription = "تحديث", tint = MaterialTheme.colorScheme.primary)
                     }
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Sync Status Banner (SQLite + Validated Sequential Firestore)
-                val statusTint = when (financeCloudSyncStatus) {
-                    is FinanceCloudSyncStatus.Synced -> StatusActiveGreen
-                    is FinanceCloudSyncStatus.Syncing -> RouterBlue
-                    is FinanceCloudSyncStatus.SignedOut -> StatusWarningAmber
-                    is FinanceCloudSyncStatus.Error -> StatusErrorRed
+                // Local Database & Direct Router Sync Status Banner
+                val connected = connectionState as? ConnectionState.Connected
+                val statusTint = when {
+                    connected == null || connected.isOffline -> StatusWarningAmber
+                    connected.isSyncing -> RouterBlue
+                    else -> StatusActiveGreen
                 }
-                val statusText = when (val status = financeCloudSyncStatus) {
-                    is FinanceCloudSyncStatus.Synced -> {
-                        val skippedNote = if (status.skippedInvalidCount > 0) " • تجاهل ${status.skippedInvalidCount} قيد غير صالح" else ""
-                        "SQLite + سحابة موثقة (${status.syncedMonthsCount} شهر متسلسل) ✅$skippedNote"
-                    }
-                    is FinanceCloudSyncStatus.Syncing -> "SQLite نشطة • جاري مزامنة الأرباح السحابية بتسلسل..."
-                    is FinanceCloudSyncStatus.SignedOut -> "SQLite مدمجة ✅ • السجل السحابي غير مربوط بحساب Google"
-                    is FinanceCloudSyncStatus.Error -> "SQLite نشطة ✅ • تعذرت المزامنة: ${status.message}"
+                val statusText = when {
+                    connected == null -> "قاعدة البيانات المحلية SQLite نشطة ✅"
+                    connected.isSyncing -> "جاري المزامنة المباشرة مع السيرفر وتحديث قاعدة البيانات المحلية..."
+                    connected.isOffline -> "قاعدة البيانات المحلية نشطة ✅ • السيرفر غير متصل حالياً"
+                    else -> "متزامن مباشرة مع الراوتر وقاعدة البيانات المحلية (${monthlySales.size} شهر مسجل) ✅"
                 }
                 Surface(
                     shape = RoundedCornerShape(8.dp),
@@ -226,11 +222,7 @@ fun FinanceAnalyticsScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Icon(
-                                imageVector = if (financeCloudSyncStatus is FinanceCloudSyncStatus.Error || financeCloudSyncStatus is FinanceCloudSyncStatus.SignedOut) {
-                                    Icons.Default.Warning
-                                } else {
-                                    Icons.Default.CheckCircle
-                                },
+                                imageVector = if (connected?.isOffline == true) Icons.Default.Warning else Icons.Default.CheckCircle,
                                 contentDescription = null,
                                 tint = statusTint,
                                 modifier = Modifier.size(14.dp)
@@ -242,24 +234,11 @@ fun FinanceAnalyticsScreen(
                                 fontWeight = FontWeight.Bold
                             )
                         }
-                        when (financeCloudSyncStatus) {
-                            is FinanceCloudSyncStatus.SignedOut -> {
-                                androidx.compose.material3.TextButton(
-                                    onClick = onTriggerSignIn,
-                                    modifier = Modifier.testTag("finance_cloud_signin_button")
-                                ) {
-                                    Text("ربط الحساب", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                            is FinanceCloudSyncStatus.Synced, is FinanceCloudSyncStatus.Error -> {
-                                androidx.compose.material3.TextButton(
-                                    onClick = { viewModel.syncFinanceWithCloud() },
-                                    modifier = Modifier.testTag("finance_cloud_sync_button")
-                                ) {
-                                    Text("مزامنة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                            is FinanceCloudSyncStatus.Syncing -> Unit
+                        androidx.compose.material3.TextButton(
+                            onClick = { viewModel.refreshData(forceLiveRefresh = true, forceHistorySync = true, notifyOnError = true) },
+                            modifier = Modifier.testTag("finance_router_sync_button")
+                        ) {
+                            Text("تحديث الآن", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }

@@ -141,7 +141,7 @@ fun NetworkNodesScreen(
     // Auto-sync router nodes and heartbeat on entering this screen (or right after initial sync finishes)
     LaunchedEffect(isConnected, isSyncing) {
         if (isConnected && !isSyncing) {
-            viewModel.refreshData()
+            viewModel.refreshData(forceLiveRefresh = true)
             viewModel.runHeartbeatCheck(silent = true)
         }
     }
