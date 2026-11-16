@@ -87,32 +87,25 @@ fun FinanceAnalyticsScreen(
     val monthlySales by viewModel.monthlySalesList.collectAsStateWithLifecycle()
     val packageStats by viewModel.detailedPackageProfitStats.collectAsStateWithLifecycle()
     val posAgents by viewModel.posSummaries.collectAsStateWithLifecycle()
-    val selectedTimeFilter by viewModel.selectedTimeFilter.collectAsStateWithLifecycle()
 
     var selectedTab by remember { mutableStateOf(FinanceTab.OVERVIEW) }
     var selectedMonthKey by remember { mutableStateOf<String?>(null) }
     var pkgToEditPrice by remember { mutableStateOf<DetailedPackageProfitStat?>(null) }
-
-    // Filter mode: "ALL" (all months), "LAST_6" (latest 6 months), or specific year string e.g. "2026"
-    var activeMonthFilter by remember { mutableStateOf("ALL") }
-    var sortNewestFirst by remember { mutableStateOf(true) }
+    
+    // Filter mode: null means "Last 6 Months" (default), otherwise a specific year string
+    var activeYearFilter by remember { mutableStateOf<String?>(null) }
 
     val distinctYears = remember(monthlySales) {
-        monthlySales.mapNotNull {
-            it.monthKey.substringBefore("-").takeIf { y -> y.isNotBlank() }
-        }.distinct().sortedDescending()
+        monthlySales.map { it.monthKey.substringBefore("-") }.distinct().sortedDescending()
     }
-
-    val filteredMonths = remember(monthlySales, activeMonthFilter, sortNewestFirst) {
-        val base = when (activeMonthFilter) {
-            "ALL" -> monthlySales
-            "LAST_6" -> monthlySales.take(6)
-            else -> monthlySales.filter { it.monthKey.startsWith("$activeMonthFilter-") }
-        }
-        if (sortNewestFirst) {
-            base.sortedByDescending { it.monthKey }
+    
+    val filteredMonths = remember(monthlySales, activeYearFilter) {
+        if (activeYearFilter == null) {
+            // Default: Show the most recent 6 months that have any data or are recent
+            monthlySales.take(6)
         } else {
-            base.sortedBy { it.monthKey }
+            // Filter by the selected year
+            monthlySales.filter { it.monthKey.startsWith(activeYearFilter!!) }
         }
     }
 
@@ -128,14 +121,14 @@ fun FinanceAnalyticsScreen(
             .background(MaterialTheme.colorScheme.background)
     ) {
         // Global Pricing Dialog
-        pkgToEditPrice?.let { targetPkg ->
+        if (pkgToEditPrice != null) {
             PackagePricingDialog(
-                profileName = targetPkg.profileName,
-                initialSalePrice = targetPkg.salePrice,
-                initialCostPrice = targetPkg.costPrice,
+                profileName = pkgToEditPrice!!.profileName,
+                initialSalePrice = pkgToEditPrice!!.salePrice,
+                initialCostPrice = pkgToEditPrice!!.costPrice,
                 onDismiss = { pkgToEditPrice = null },
                 onSave = { sale, cost ->
-                    viewModel.savePackagePricing(targetPkg.profileName, sale, cost)
+                    viewModel.savePackagePricing(pkgToEditPrice!!.profileName, sale, cost)
                 }
             )
         }
@@ -247,13 +240,6 @@ fun FinanceAnalyticsScreen(
 
             when (selectedTab) {
                 FinanceTab.OVERVIEW -> {
-                    item {
-                        FinanceTimeFilterRow(
-                            selectedTimeFilter = selectedTimeFilter,
-                            onSelectFilter = { viewModel.setTimeFilter(it) }
-                        )
-                    }
-
                     // Global KPI cards
                     item {
                         FinanceGlobalKpiCard(
@@ -293,11 +279,7 @@ fun FinanceAnalyticsScreen(
                 FinanceTab.MONTHS -> {
                     // Total Sales for All Months Section
                     item {
-                        val headerTitle = when (activeMonthFilter) {
-                            "ALL" -> "إجمالي المبيعات (كل الأشهر)"
-                            "LAST_6" -> "إجمالي المبيعات (آخر 6 أشهر)"
-                            else -> "إجمالي المبيعات (سنة $activeMonthFilter)"
-                        }
+                        val headerTitle = if (activeYearFilter == null) "إجمالي المبيعات (آخر 6 أشهر)" else "إجمالي المبيعات (سنة $activeYearFilter)"
                         AllMonthsAggregateHeader(
                             title = headerTitle,
                             monthlySales = filteredMonths,
@@ -313,42 +295,23 @@ fun FinanceAnalyticsScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // Default: Last 6 Months
                             FilterChip(
-                                selected = activeMonthFilter == "ALL",
-                                onClick = { activeMonthFilter = "ALL" },
-                                label = { Text("كل الأشهر (${monthlySales.size})", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
-                                shape = RoundedCornerShape(10.dp)
-                            )
-
-                            FilterChip(
-                                selected = activeMonthFilter == "LAST_6",
-                                onClick = { activeMonthFilter = "LAST_6" },
+                                selected = activeYearFilter == null,
+                                onClick = { activeYearFilter = null },
                                 label = { Text("آخر 6 أشهر", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                                 shape = RoundedCornerShape(10.dp)
                             )
-
+                            
                             // Year Filters
                             distinctYears.forEach { yr ->
                                 FilterChip(
-                                    selected = activeMonthFilter == yr,
-                                    onClick = { activeMonthFilter = yr },
+                                    selected = activeYearFilter == yr,
+                                    onClick = { activeYearFilter = yr },
                                     label = { Text("سنة $yr", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                                     shape = RoundedCornerShape(10.dp)
                                 )
                             }
-
-                            FilterChip(
-                                selected = !sortNewestFirst,
-                                onClick = { sortNewestFirst = !sortNewestFirst },
-                                label = {
-                                    Text(
-                                        text = if (sortNewestFirst) "الأحدث أولاً" else "الأقدم أولاً",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                },
-                                shape = RoundedCornerShape(10.dp)
-                            )
                         }
                     }
 
@@ -365,7 +328,7 @@ fun FinanceAnalyticsScreen(
                                 ) {
                                     Icon(Icons.Default.CalendarMonth, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp))
                                     Spacer(modifier = Modifier.height(8.dp))
-                                    Text("لا توجد إحصائيات مسجلة لهذا النطاق", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                                    Text("لا توجد إحصائيات مسجلة لهذا العام", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
                                 }
                             }
                         }
@@ -385,22 +348,16 @@ fun FinanceAnalyticsScreen(
 
                 FinanceTab.PACKAGES -> {
                     item {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                text = "تحليل أرباح وتكاليف الباقات",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "مقارنة أسعار البيع والتكلفة وهامش الربح الصافي لكل باقة",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            FinanceTimeFilterRow(
-                                selectedTimeFilter = selectedTimeFilter,
-                                onSelectFilter = { viewModel.setTimeFilter(it) }
-                            )
-                        }
+                        Text(
+                            text = "تحليل أرباح وتكاليف الباقات",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "مقارنة أسعار البيع والتكلفة وهامش الربح الصافي لكل باقة",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
 
                     items(packageStats, key = { it.profileName }) { pkg ->
@@ -534,7 +491,7 @@ private fun FinanceGlobalKpiCard(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("إجمالي المبيعات", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
-                        text = "${currencyFormat.format(revenueSummary.totalEstimatedRevenue)} ر.ي",
+                        text = "${currencyFormat.format(revenueSummary.activeRevenue)} ر.ي",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
@@ -563,46 +520,14 @@ private fun FinanceGlobalKpiCard(
 }
 
 @Composable
-private fun FinanceTimeFilterRow(
-    selectedTimeFilter: TimeFilterRange,
-    onSelectFilter: (TimeFilterRange) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        TimeFilterRange.entries.forEach { range ->
-            FilterChip(
-                selected = selectedTimeFilter == range,
-                onClick = { onSelectFilter(range) },
-                label = {
-                    Text(
-                        text = range.title,
-                        fontSize = 12.sp,
-                        fontWeight = if (selectedTimeFilter == range) FontWeight.Bold else FontWeight.Medium
-                    )
-                },
-                shape = RoundedCornerShape(10.dp)
-            )
-        }
-    }
-}
-
-@Composable
 private fun SoldVsUnsoldBreakdownCard(
     revenueSummary: RevenueAnalyticsSummary,
     currencyFormat: NumberFormat
 ) {
+    val totalCount = revenueSummary.totalCardsCount.coerceAtLeast(1)
     val soldCount = revenueSummary.activeCardsCount + revenueSummary.expiredCardsCount
     val unsoldCount = revenueSummary.unusedCardsCount
-    val trackedCount = (soldCount + unsoldCount)
-    val totalCount = maxOf(revenueSummary.totalCardsCount, trackedCount)
-    val soldRatio = if (totalCount > 0) (soldCount.toFloat() / totalCount.toFloat()).coerceIn(0f, 1f) else 0f
-    val soldPct = if (totalCount > 0) (soldRatio * 100f).toInt().coerceIn(0, 100) else 0
-    val unsoldPct = if (totalCount > 0) (100 - soldPct).coerceIn(0, 100) else 0
+    val soldRatio = (soldCount.toFloat() / totalCount.toFloat()).coerceIn(0f, 1f)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -620,7 +545,7 @@ private fun SoldVsUnsoldBreakdownCard(
                     Icon(Icons.Default.Inventory2, contentDescription = null, tint = RouterBlue, modifier = Modifier.size(20.dp))
                     Text("حالة الكروت: المباعة مقابل غير المباعة", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 }
-                Text("إجمالي $totalCount كرت", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("إجمالي ${revenueSummary.totalCardsCount} كرت", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             // Progress visual
@@ -631,7 +556,7 @@ private fun SoldVsUnsoldBreakdownCard(
                     .height(8.dp)
                     .clip(RoundedCornerShape(4.dp)),
                 color = StatusActiveGreen,
-                trackColor = if (totalCount > 0) Color(0xFFFF8F00).copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant
+                trackColor = Color(0xFFFF8F00).copy(alpha = 0.4f)
             )
 
             // Grid of Sold vs Unsold
@@ -652,8 +577,8 @@ private fun SoldVsUnsoldBreakdownCard(
                             Text("الكروت المباعة", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = StatusActiveGreen)
                         }
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text("$soldCount كرت ($soldPct%)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Text("قيمة المبيعات: ${currencyFormat.format(revenueSummary.totalEstimatedRevenue)} ر.ي", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$soldCount كرت (${(soldRatio * 100).toInt()}%)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text("قيمة المبيعات: ${currencyFormat.format(revenueSummary.activeRevenue)} ر.ي", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
 
@@ -670,7 +595,7 @@ private fun SoldVsUnsoldBreakdownCard(
                             Text("الكروت غير المباعة", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = Color(0xFFFF8F00))
                         }
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text("$unsoldCount كرت ($unsoldPct%)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text("$unsoldCount كرت (${((1f - soldRatio) * 100).toInt()}%)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         Text("قيمة المخزون: ${currencyFormat.format(revenueSummary.availableInventoryValue)} ر.ي", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
@@ -760,13 +685,11 @@ private fun AllMonthsAggregateHeader(
     currencyFormat: NumberFormat
 ) {
     val totalRevenueAllMonths = monthlySales.sumOf { it.totalRevenue }
-    val totalCostAllMonths = monthlySales.sumOf { it.totalCost }
     val totalProfitAllMonths = monthlySales.sumOf { it.netProfit }
     val totalGenAllMonths = monthlySales.sumOf { it.totalCardsGenerated }
     val totalSoldAllMonths = monthlySales.sumOf { it.totalCardsSold }
     val totalUnsoldAllMonths = monthlySales.sumOf { it.totalCardsUnsold }
     val totalDeficitAllMonths = monthlySales.sumOf { it.targetDeficit }
-    val overallMarginPercent = if (totalRevenueAllMonths > 0.0) ((totalProfitAllMonths / totalRevenueAllMonths) * 100.0).toInt() else 0
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -775,33 +698,13 @@ private fun AllMonthsAggregateHeader(
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "$title (${monthlySales.size} شهر)",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                if (overallMarginPercent > 0) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = StatusActiveGreen.copy(alpha = 0.14f)
-                    ) {
-                        Text(
-                            text = "هامش $overallMarginPercent%",
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = StatusActiveGreen
-                        )
-                    }
-                }
-            }
             Text(
-                text = "إحصائيات دقيقة ومرتبة زمنياً ومحسوبة مباشرة من سجل الكروت والدفعات ونقاط البيع",
+                text = "$title (${monthlySales.size} شهر)",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "إحصائيات دقيقة ومحسوبة مباشرة من بيانات الكروت والدفعات ونقاط البيع منذ بداية تشغيل الشبكة",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -829,26 +732,22 @@ private fun AllMonthsAggregateHeader(
                 }
             }
 
-            // Revenue, Cost, Profit & Deficit
+            // Deficit & Revenue
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column {
                     Text("المبيعات الكلية", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${currencyFormat.format(totalRevenueAllMonths)} ر.ي", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                }
-                Column {
-                    Text("إجمالي التكلفة", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${currencyFormat.format(totalCostAllMonths)} ر.ي", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = StatusErrorRed)
+                    Text("${currencyFormat.format(totalRevenueAllMonths)} ر.ي", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                 }
                 Column {
                     Text("صافي الأرباح", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${currencyFormat.format(totalProfitAllMonths)} ر.ي", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
+                    Text("${currencyFormat.format(totalProfitAllMonths)} ر.ي", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
                 }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("عجز الهدف", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${currencyFormat.format(totalDeficitAllMonths)} ر.ي", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = StatusWarningAmber)
+                Column {
+                    Text("عجز المبيعات المستهدف", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${currencyFormat.format(totalDeficitAllMonths)} ر.ي", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = StatusErrorRed)
                 }
             }
 
@@ -1058,7 +957,6 @@ private fun MonthlySalesDetailedCard(
 
                     // Daily Sales Distribution
                     if (month.dailyBreakdown.isNotEmpty()) {
-                        val maxDaySold = month.dailyBreakdown.maxOfOrNull { it.cardsSold }?.coerceAtLeast(1) ?: 1
                         Spacer(modifier = Modifier.height(2.dp))
                         Text("توزيع المبيعات اليومية:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                         Row(
@@ -1068,7 +966,6 @@ private fun MonthlySalesDetailedCard(
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             month.dailyBreakdown.forEach { point ->
-                                val barHeight = ((point.cardsSold.toFloat() / maxDaySold.toFloat()) * 48f).dp.coerceIn(14.dp, 52.dp)
                                 Surface(
                                     shape = RoundedCornerShape(8.dp),
                                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
@@ -1081,8 +978,8 @@ private fun MonthlySalesDetailedCard(
                                         Text(point.dayLabel, style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
                                         Box(
                                             modifier = Modifier
-                                                .width(22.dp)
-                                                .height(barHeight)
+                                                .width(20.dp)
+                                                .height((point.cardsSold * 4).dp.coerceIn(12.dp, 50.dp))
                                                 .clip(RoundedCornerShape(4.dp))
                                                 .background(RouterBlue)
                                         ) {
@@ -1166,10 +1063,6 @@ private fun PackagePricingDialog(
 ) {
     var salePriceInput by remember { mutableStateOf(if (initialSalePrice > 0) initialSalePrice.toInt().toString() else "") }
     var costPriceInput by remember { mutableStateOf(if (initialCostPrice > 0) initialCostPrice.toInt().toString() else "") }
-    val previewSale = salePriceInput.toDoubleOrNull() ?: 0.0
-    val previewCost = costPriceInput.toDoubleOrNull() ?: 0.0
-    val previewProfit = (previewSale - previewCost).coerceAtLeast(0.0)
-    val previewMargin = if (previewSale > 0.0) ((previewProfit / previewSale) * 100.0).toInt() else 0
 
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1179,48 +1072,25 @@ private fun PackagePricingDialog(
         ) {
             Column(
                 modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Text("ضبط أسعار باقة: $profileName", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-
+                
                 androidx.compose.material3.OutlinedTextField(
                     value = salePriceInput,
-                    onValueChange = { input ->
-                        if (input.count { it == '.' } <= 1 && input.all { c -> c.isDigit() || c == '.' }) {
-                            salePriceInput = input
-                        }
-                    },
+                    onValueChange = { if (it.all { c -> c.isDigit() }) salePriceInput = it },
                     label = { Text("سعر البيع للجمهور (ر.ي)") },
                     modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal)
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
                 )
 
                 androidx.compose.material3.OutlinedTextField(
                     value = costPriceInput,
-                    onValueChange = { input ->
-                        if (input.count { it == '.' } <= 1 && input.all { c -> c.isDigit() || c == '.' }) {
-                            costPriceInput = input
-                        }
-                    },
+                    onValueChange = { if (it.all { c -> c.isDigit() }) costPriceInput = it },
                     label = { Text("تكلفة الكرت الواحد (ر.ي)") },
                     modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal)
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
                 )
-
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = StatusActiveGreen.copy(alpha = 0.1f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("ربح الكرت: +${previewProfit.toInt()} ر.ي", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
-                        Text("هامش $previewMargin%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
-                    }
-                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),

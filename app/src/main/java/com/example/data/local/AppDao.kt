@@ -62,12 +62,6 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCardAssignments(assignments: List<PosCardAssignmentEntity>)
 
-    @Query("SELECT DISTINCT cardName FROM pos_card_assignments WHERE isSold = 0")
-    suspend fun getUnsoldAssignedCardNamesSync(): List<String>
-
-    @Query("UPDATE pos_card_assignments SET isSold = 1, soldAt = :soldAt WHERE isSold = 0 AND cardName IN (:cardNames)")
-    suspend fun markCardsAsSoldBatch(cardNames: List<String>, soldAt: Long)
-
     @Query("UPDATE pos_card_assignments SET isSold = 1, soldAt = :soldAt WHERE cardName = :cardName AND isSold = 0")
     suspend fun markCardAsSold(cardName: String, soldAt: Long)
 
@@ -116,9 +110,6 @@ interface AppDao {
     @Query("SELECT * FROM session_archive ORDER BY timestamp DESC")
     fun getAllArchivedSessions(): Flow<List<SessionArchiveEntity>>
 
-    @Query("DELETE FROM session_archive WHERE sessionId LIKE 'sess_card_%'")
-    suspend fun deleteLegacyCardSnapshotSessions()
-
     @Query("SELECT * FROM session_archive WHERE isOnline = 1 ORDER BY timestamp DESC")
     fun getActiveArchivedSessions(): Flow<List<SessionArchiveEntity>>
 
@@ -152,7 +143,7 @@ interface AppDao {
     @Query("SELECT * FROM user_login_history WHERE username = :username ORDER BY timestamp DESC")
     fun getLoginHistoryForUser(username: String): Flow<List<UserLoginHistoryEntity>>
 
-    @Query("SELECT * FROM user_login_history ORDER BY timestamp DESC LIMIT 5000")
+    @Query("SELECT * FROM user_login_history ORDER BY timestamp DESC LIMIT 100")
     fun getAllLoginHistory(): Flow<List<UserLoginHistoryEntity>>
 
     @Query("SELECT * FROM user_login_history WHERE username = :username AND logoutTime = 'متصل الآن' ORDER BY timestamp DESC LIMIT 1")
@@ -187,6 +178,9 @@ interface AppDao {
 
     @Query("DELETE FROM network_nodes WHERE id = :nodeId")
     suspend fun deleteNetworkNodeEntity(nodeId: String)
+
+    @Query("DELETE FROM network_nodes WHERE id = :nodeId OR (ipAddress != '' AND ipAddress = :ipAddress) OR (interfaceName != '' AND interfaceName = :interfaceName)")
+    suspend fun deleteNetworkNodesFlexible(nodeId: String, ipAddress: String, interfaceName: String)
 
     // ==========================================
     // System Event Logs (Add, Edit, Delete Operations)
@@ -241,12 +235,6 @@ interface AppDao {
 
     @Query("DELETE FROM local_cards WHERE name = :cardName")
     suspend fun deleteLocalCardByName(cardName: String)
-
-    @Query("DELETE FROM local_cards WHERE sourceSystem = :sourceSystem")
-    suspend fun deleteLocalCardsBySource(sourceSystem: String)
-
-    @Query("DELETE FROM local_cards WHERE sourceSystem = :sourceSystem AND name NOT IN (:keepNames)")
-    suspend fun deleteLocalCardsBySourceExcept(sourceSystem: String, keepNames: List<String>)
 
     @Query("DELETE FROM local_cards")
     suspend fun clearAllLocalCards()

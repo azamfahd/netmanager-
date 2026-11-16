@@ -323,7 +323,7 @@ fun NetworkNodesScreen(
 
                         // Last Heartbeat Time
                         Text(
-                            text = if (lastHeartbeatScanTime > 0L) "آخر فحص: ${NetworkUtils.formatCardCreationDate(lastHeartbeatScanTime)}" else "$totalUsersOnNodes مشترك",
+                            text = if (lastHeartbeatScanTime != null) "آخر فحص: $lastHeartbeatScanTime" else "$totalUsersOnNodes مشترك",
                             color = Color.White.copy(alpha = 0.9f),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Medium
@@ -825,7 +825,7 @@ fun NetworkNodesScreen(
                                     }
                                 }
 
-                                items(activeNodesWithUsers, key = { "active_${it.id}_${it.ipAddress}" }) { node ->
+                                items(activeNodesWithUsers, key = { it.id }) { node ->
                                     NetworkNodeItem(
                                         node = node,
                                         onDetailClick = { selectedNodeForDetail = node },
@@ -886,7 +886,7 @@ fun NetworkNodesScreen(
                                 }
 
                                 if (isIdleGroupExpanded) {
-                                    items(activeNodesNoUsers, key = { "idle_${it.id}_${it.ipAddress}" }) { node ->
+                                    items(activeNodesNoUsers, key = { it.id }) { node ->
                                         Box(modifier = Modifier.padding(start = 8.dp)) {
                                             NetworkNodeItem(
                                                 node = node,
@@ -951,7 +951,7 @@ fun NetworkNodesScreen(
                                 }
 
                                 if (isOfflineGroupExpanded) {
-                                    items(offlineNodes, key = { "offline_${it.id}_${it.ipAddress}" }) { node ->
+                                    items(offlineNodes, key = { it.id }) { node ->
                                         Box(modifier = Modifier.padding(start = 8.dp)) {
                                             NetworkNodeItem(
                                                 node = node,
@@ -1423,7 +1423,7 @@ fun NetworkNodeItem(
                         }
 
                         Text(
-                            text = if (node.lastCheckTime > 0L) "🕒 نبض: ${NetworkUtils.formatCardCreationDate(node.lastCheckTime)}" else if (node.isOnline) "⚡ استجابة ${node.pingMs}ms" else "⚠️ غير مستجيب",
+                            text = if (node.lastCheckTime != null) "🕒 نبض: ${node.lastCheckTime}" else if (node.isOnline) "⚡ استجابة ${node.pingMs}ms" else "⚠️ غير مستجيب",
                             fontSize = 10.sp,
                             color = statusColor,
                             fontWeight = FontWeight.Medium
@@ -1710,7 +1710,7 @@ fun AddNodeDialog(
     var location by remember { mutableStateOf("البرج الرئيسي") }
     var interfaceName by remember { mutableStateOf("ether2") }
     var selectedNodeType by remember { mutableStateOf(NetworkNodeType.DISTRIBUTION) }
-    var parentTowerName by remember { mutableStateOf("") }
+    var parentTowerName by remember { mutableStateOf("البرج الرئيسي") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1782,7 +1782,7 @@ fun AddNodeDialog(
                         value = parentTowerName,
                         onValueChange = { parentTowerName = it },
                         label = { Text("اسم البرج التابعة له (للتجميع الذكي)") },
-                        placeholder = { Text("اكتب اسم نقطة/برج موجود كما يظهر في القائمة") },
+                        placeholder = { Text("البرج الرئيسي / برج الشرق") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp)
@@ -1848,8 +1848,8 @@ fun AddNodeDialog(
                             role = role.ifBlank { "أكسس بوينت" },
                             location = location.ifBlank { "الموقع الرئيسي" },
                             nodeType = selectedNodeType,
-                            parentTowerId = null,
-                            parentTowerName = parentTowerName.trim().takeIf { selectedNodeType == NetworkNodeType.HOME_NODE && it.isNotBlank() },
+                            parentTowerId = if (selectedNodeType == NetworkNodeType.HOME_NODE) "node_ap_main" else null,
+                            parentTowerName = if (selectedNodeType == NetworkNodeType.HOME_NODE) parentTowerName.ifBlank { "البرج الرئيسي" } else null,
                             status = NodeStatus.ACTIVE,
                             isOnline = true,
                             pingMs = 3L,
@@ -2054,15 +2054,14 @@ fun HierarchicalNetworkTreeView(
     onPingNode: (String) -> Unit,
     onKickUser: (HotspotActiveUser) -> Unit
 ) {
-    // 1. Mutually exclusive 4-group partition of all distinct nodes
-    val distinctNodes = remember(nodes) { nodes.distinctBy { it.id } }
-    val (activeWithUsersNodes, idleOnlineNodes, faultyOrNoNetNodes, offlineOrDisabledNodes) = remember(distinctNodes) {
+    // 1. Mutually exclusive 4-group partition of all nodes
+    val (activeWithUsersNodes, idleOnlineNodes, faultyOrNoNetNodes, offlineOrDisabledNodes) = remember(nodes) {
         val g1 = mutableListOf<NetworkNode>() // Online, ACTIVE, connectedUsers > 0
         val g2 = mutableListOf<NetworkNode>() // Online, ACTIVE, connectedUsers == 0, !hasIssue
         val g3 = mutableListOf<NetworkNode>() // NO_INTERNET or active with issue (ping/cpu/temp)
         val g4 = mutableListOf<NetworkNode>() // OFFLINE or DISABLED
 
-        distinctNodes.forEach { node ->
+        nodes.forEach { node ->
             when {
                 node.effectiveStatus == NodeStatus.OFFLINE || node.effectiveStatus == NodeStatus.DISABLED -> g4.add(node)
                 node.effectiveStatus == NodeStatus.NO_INTERNET -> g3.add(node)
@@ -2232,18 +2231,12 @@ private fun buildTreeSubset(subset: List<NetworkNode>): List<TreeNode> {
 
     subset.forEach { node ->
         val directParentId = node.parentTowerId?.takeIf { nodeMap.containsKey(it) }
-        val namedParentId = if (directParentId == null) {
-            node.parentTowerName?.trim()?.takeIf { it.isNotBlank() }?.let { parentName ->
-                subset.firstOrNull { it.id != node.id && it.name.equals(parentName, ignoreCase = true) }?.id
-            }
-        } else null
-        val resolvedParentId = directParentId ?: namedParentId
-        val cleanParentIf = node.parentInterface?.trim().orEmpty().lowercase()
-        val interfaceParentId = if (resolvedParentId == null && cleanParentIf.isNotEmpty()) {
+        val interfaceParentId = if (directParentId == null && !node.parentInterface.isNullOrBlank()) {
+            val cleanParentIf = node.parentInterface!!.lowercase()
             nodeMap["node_if_$cleanParentIf"]?.id ?: ifaceToNodeMap[cleanParentIf]?.id
         } else null
 
-        val effectiveParentId = resolvedParentId ?: interfaceParentId
+        val effectiveParentId = directParentId ?: interfaceParentId
         if (effectiveParentId != null && effectiveParentId != node.id) {
             childrenMap.getOrPut(effectiveParentId) { mutableListOf() }.add(node)
         } else {

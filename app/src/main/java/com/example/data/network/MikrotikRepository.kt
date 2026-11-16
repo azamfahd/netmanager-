@@ -57,19 +57,9 @@ class MikrotikRepository(
 
     private val repositoryScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
     private val cardTimestampCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private val umEarliestSessionTimestamps = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    @Volatile
-    private var lastUmHistoryFetchMs: Long = 0L
-    @Volatile
-    private var lastSyncedUmSessionsSignature: Int = 0
 
     fun getCardCreationTimestamp(card: HotspotCard): Long {
         val cached = cardTimestampCache[card.name]
-        val explicit = extractExplicitTimestamp(card)
-        if (explicit != null && (cached == null || explicit < cached)) {
-            cardTimestampCache[card.name] = explicit
-            return explicit
-        }
         if (cached != null && cached > 0L) return cached
 
         val resolved = resolveCardTimestamp(card)
@@ -77,11 +67,7 @@ class MikrotikRepository(
         return resolved
     }
 
-    private fun extractExplicitTimestamp(card: HotspotCard): Long? {
-        if (card.createdAtHint in 1577836800000L..2082758400000L) {
-            return card.createdAtHint
-        }
-
+    private fun resolveCardTimestamp(card: HotspotCard): Long {
         val id = card.id
         val match = Regex("""(?:gen_|card_|c_|tum_|um_)?(\d{10,13})""").find(id)
         if (match != null) {
@@ -92,20 +78,26 @@ class MikrotikRepository(
             }
         }
 
-        if (card.comment.isNotBlank()) {
-            NetworkUtils.parseRouterDateToEpoch(card.comment)?.let { return it }
+        val comment = card.comment
+        if (comment.isNotBlank()) {
+            val dateMatch = Regex("""(\d{4})[-/](\d{1,2})[-/](\d{1,2})""").find(comment)
+            if (dateMatch != null) {
+                try {
+                    val (y, m, d) = dateMatch.destructured
+                    val cal = java.util.Calendar.getInstance()
+                    cal.set(y.toInt(), m.toInt() - 1, d.toInt(), 12, 0, 0)
+                    return cal.timeInMillis
+                } catch (_: Exception) {}
+            }
+            val epochMatch = Regex("""\b(17\d{8,11})\b""").find(comment)
+            if (epochMatch != null) {
+                val num = epochMatch.value.toLongOrNull()
+                if (num != null) {
+                    val ms = if (epochMatch.value.length == 10) num * 1000L else num
+                    if (ms in 1577836800000L..2082758400000L) return ms
+                }
+            }
         }
-
-        val umTs = umEarliestSessionTimestamps[card.name.trim().lowercase()]
-        if (umTs != null && umTs in 1577836800000L..2082758400000L) {
-            return umTs
-        }
-
-        return null
-    }
-
-    private fun resolveCardTimestamp(card: HotspotCard): Long {
-        extractExplicitTimestamp(card)?.let { return it }
 
         val uptimeSec = parseUptimeToSeconds(card.uptime)
         if (uptimeSec > 0L) {
@@ -122,19 +114,13 @@ class MikrotikRepository(
         )
     }
 
-    suspend fun syncCardsToRoom(cards: List<HotspotCard>, successfulSources: Set<String> = emptySet()) {
+    suspend fun syncCardsToRoom(cards: List<HotspotCard>) {
         val dao = appDao ?: return
         try {
             val existing = dao.getAllLocalCardsSync().associateBy { it.name }
             val entities = cards.map { card ->
                 val prevEntity = existing[card.name]
-                val explicitTs = extractExplicitTimestamp(card)
-                val prevTs = prevEntity?.createdTimestamp?.takeIf { it > 0L }
-                val createdTs = when {
-                    explicitTs != null && (prevTs == null || explicitTs < prevTs) -> explicitTs
-                    prevTs != null -> prevTs
-                    else -> getCardCreationTimestamp(card)
-                }
+                val createdTs = prevEntity?.createdTimestamp?.takeIf { it > 0L } ?: getCardCreationTimestamp(card)
                 cardTimestampCache[card.name] = createdTs
                 com.example.data.local.LocalCardEntity.fromHotspotCard(
                     card = card,
@@ -143,119 +129,6 @@ class MikrotikRepository(
                 )
             }
             dao.insertOrUpdateLocalCards(entities)
-            successfulSources.forEach { source ->
-                val keepNames = entities.filter { it.sourceSystem == source }.map { it.name }
-                if (keepNames.isEmpty()) dao.deleteLocalCardsBySource(source)
-                else dao.deleteLocalCardsBySourceExcept(source, keepNames)
-            }
-        } catch (_: Exception) {}
-    }
-
-    private suspend fun processHistoricalUmSessions(sessions: List<com.example.data.local.SessionArchiveEntity>) {
-        if (sessions.isEmpty()) return
-        try {
-            var earliestChanged = false
-            for (s in sessions) {
-                val uKey = s.username.trim().lowercase()
-                if (uKey.isBlank() || s.timestamp !in 1577836800000L..2082758400000L) continue
-                val prev = umEarliestSessionTimestamps[uKey]
-                if (prev == null || s.timestamp < prev) {
-                    umEarliestSessionTimestamps[uKey] = s.timestamp
-                    earliestChanged = true
-                }
-                val cached = cardTimestampCache[s.username]
-                if (cached == null || s.timestamp < cached) {
-                    cardTimestampCache[s.username] = s.timestamp
-                }
-            }
-            val sig = sessions.size * 31 + (sessions.firstOrNull()?.sessionId?.hashCode() ?: 0) + (sessions.lastOrNull()?.timestamp?.hashCode() ?: 0)
-            if (sig != lastSyncedUmSessionsSignature || earliestChanged) {
-                lastSyncedUmSessionsSignature = sig
-                appDao?.insertOrUpdateSessions(sessions)
-            }
-        } catch (_: Exception) {}
-    }
-
-    private suspend fun fetchRestUserManagerSessions(baseUrl: String, credential: String) {
-        if (appDao == null) return
-        val endpoints = listOf(
-            "$baseUrl/rest/user-manager/session",
-            "$baseUrl/rest/tool/user-manager/session"
-        )
-        for (url in endpoints) {
-            try {
-                val req = Request.Builder().url(url).header("Authorization", credential).build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val arr = JSONArray(resp.body?.string() ?: "[]")
-                        if (arr.length() > 0) {
-                            val parsed = mutableListOf<com.example.data.local.SessionArchiveEntity>()
-                            for (i in 0 until arr.length()) {
-                                val obj = arr.optJSONObject(i) ?: continue
-                                val username = obj.optString("user").ifBlank { obj.optString("username") }.trim()
-                                if (username.isBlank()) continue
-                                val fromRaw = obj.optString("from-time").ifBlank { obj.optString("started").ifBlank { obj.optString("start-time") } }
-                                val tillRaw = obj.optString("till-time").ifBlank { obj.optString("ended").ifBlank { obj.optString("end-time") } }
-                                val isActive = obj.optBoolean("active", false) || obj.optString("active").equals("true", true)
-                                val ts = NetworkUtils.parseRouterDateToEpoch(fromRaw)
-                                    ?: NetworkUtils.parseRouterDateToEpoch(tillRaw)
-                                    ?: if (isActive) System.currentTimeMillis() else 0L
-                                if (ts <= 0L) continue
-                                val downUsed = NetworkUtils.parseSizeToBytes(
-                                    obj.optString("download").ifBlank { obj.optString("download-used").ifBlank { obj.optString("bytes-out", "0") } }
-                                )
-                                val upUsed = NetworkUtils.parseSizeToBytes(
-                                    obj.optString("upload").ifBlank { obj.optString("upload-used").ifBlank { obj.optString("bytes-in", "0") } }
-                                )
-                                val rawId = obj.optString(".id").ifBlank { "${fromRaw}_${tillRaw}_$i" }
-                                parsed.add(
-                                    com.example.data.local.SessionArchiveEntity(
-                                        sessionId = "um_sess_${username}_$rawId",
-                                        username = username,
-                                        ipAddress = obj.optString("user-ip").ifBlank { obj.optString("ip-address") },
-                                        macAddress = obj.optString("calling-station-id").ifBlank { obj.optString("mac-address") }.uppercase(),
-                                        isOnline = isActive,
-                                        loginTime = if (fromRaw.isNotBlank()) NetworkUtils.formatArabicFullDateTimeFromString(fromRaw, ts) else NetworkUtils.formatArabicFullDateTime(ts),
-                                        logoutTime = if (isActive) "متصل حالياً" else if (tillRaw.isNotBlank()) NetworkUtils.formatArabicFullDateTimeFromString(tillRaw, ts) else "جلسة مكتملة",
-                                        duration = obj.optString("uptime", "0s"),
-                                        bytesIn = upUsed,
-                                        bytesOut = downUsed,
-                                        totalBytes = upUsed + downUsed,
-                                        terminateReason = obj.optString("terminate-cause").ifBlank { obj.optString("status").ifBlank { if (isActive) "جلسة نشطة" else "جلسة يوزرمانجر" } },
-                                        profile = obj.optString("profile").ifBlank { obj.optString("actual-profile") },
-                                        nodeName = obj.optString("nas-ip-address").ifBlank { "UserManager" },
-                                        timestamp = ts
-                                    )
-                                )
-                            }
-                            if (parsed.isNotEmpty()) {
-                                processHistoricalUmSessions(parsed)
-                                return
-                            }
-                        }
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-    }
-
-    suspend fun upsertLocalCardPreservingTimestamp(
-        card: HotspotCard,
-        source: String = if (card.isUserManagerCard) "usermanager" else "hotspot"
-    ) {
-        val dao = appDao ?: return
-        try {
-            val existingTs = cardTimestampCache[card.name]?.takeIf { it > 0L }
-                ?: dao.getLocalCardByName(card.name)?.createdTimestamp?.takeIf { it > 0L }
-                ?: getCardCreationTimestamp(card)
-            cardTimestampCache[card.name] = existingTs
-            dao.insertOrUpdateLocalCard(
-                com.example.data.local.LocalCardEntity.fromHotspotCard(
-                    card = card,
-                    existingCreatedTs = existingTs,
-                    source = source
-                )
-            )
         } catch (_: Exception) {}
     }
 
@@ -551,7 +424,7 @@ class MikrotikRepository(
                 id = "node_ap_main",
                 name = "برج الإرسال المركزي 1 (الرئيسي)",
                 ipAddress = "192.168.88.2",
-                macAddress = "",
+                macAddress = "D4:CA:6D:AA:11:01",
                 interfaceName = "ether2",
                 model = "MikroTik NetMetal 5 / Omni",
                 role = "برج إرسال رئيسي (Omni)",
@@ -1048,8 +921,6 @@ class MikrotikRepository(
             try {
                 initialSyncJob?.cancel()
                 val sessionId = ++connectionSessionId
-                lastUmHistoryFetchMs = 0L
-                lastSyncedUmSessionsSignature = 0
                 resetTrafficCalculationState()
                 _lastSyncError.value = null
 
@@ -1247,18 +1118,6 @@ class MikrotikRepository(
             val hotspotCards = hotspotCardsRes.getOrNull()
             val umCards = umCardsRes.getOrNull()
 
-            // Throttled ingestion of historical UserManager sessions (initial sync & every 3 minutes)
-            val nowMs = System.currentTimeMillis()
-            if (lastUmHistoryFetchMs == 0L || (nowMs - lastUmHistoryFetchMs) >= 180_000L) {
-                lastUmHistoryFetchMs = nowMs
-                try {
-                    val umSessions = routerOsApiClient.getUserManagerSessions().getOrNull().orEmpty()
-                    if (umSessions.isNotEmpty()) {
-                        processHistoricalUmSessions(umSessions)
-                    }
-                } catch (_: Exception) {}
-            }
-
             if (hotspotCards != null || umCards != null) {
                 val combinedCards = mutableListOf<HotspotCard>()
                 if (hotspotCards != null) {
@@ -1287,10 +1146,7 @@ class MikrotikRepository(
                 val sortedCards = sortCardsByNewestFirst(combinedCards.distinctBy { it.name })
                 if (sortedCards.isNotEmpty() || (hotspotCardsRes.isSuccess && umCardsRes.isSuccess)) {
                     _cards.value = sortedCards
-                    syncCardsToRoom(sortedCards, buildSet {
-                        if (hotspotCardsRes.isSuccess) add("hotspot")
-                        if (umCardsRes.isSuccess) add("usermanager")
-                    })
+                    syncCardsToRoom(sortedCards)
                 }
             }
 
@@ -1483,7 +1339,9 @@ class MikrotikRepository(
                                     )
                                 )
                             }
-                            _adminUsers.value = userList
+                            if (userList.isNotEmpty()) {
+                                _adminUsers.value = userList
+                            }
                         }
                     }
                 } catch (_: Exception) {}
@@ -1509,7 +1367,9 @@ class MikrotikRepository(
                                     )
                                 )
                             }
-                            _hotspotServers.value = serverList
+                            if (serverList.isNotEmpty() || _hotspotServers.value.isEmpty()) {
+                                _hotspotServers.value = serverList
+                            }
                         }
                     }
                 } catch (_: Exception) {}
@@ -1530,7 +1390,9 @@ class MikrotikRepository(
                                     )
                                 )
                             }
-                            _ipPools.value = poolList
+                            if (poolList.isNotEmpty() || _ipPools.value.isEmpty()) {
+                                _ipPools.value = poolList
+                            }
                         }
                     }
                 } catch (_: Exception) {}
@@ -1645,11 +1507,11 @@ class MikrotikRepository(
                         }
                     }
 
-                    // 3. Fetch User-Manager Users (with creation/session date fields)
+                    // 3. Fetch User-Manager Users
                     val umJob = async {
                         try {
                             val umReq = Request.Builder()
-                                .url("$baseUrl/rest/user-manager/user?.proplist=.id,name,username,password,profile,actual-profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,creation-time,start-time,till-time,end-time,last-seen,comment,disabled")
+                                .url("$baseUrl/rest/user-manager/user?.proplist=.id,name,username,password,profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,comment,disabled")
                                 .header("Authorization", credential)
                                 .build()
                             httpClient.newCall(umReq).execute().use { resp ->
@@ -1670,8 +1532,6 @@ class MikrotikRepository(
                         val activeListResult = mutableListOf<HotspotActiveUser>()
                         for (i in 0 until activeArray.length()) {
                             val obj = activeArray.getJSONObject(i)
-                            val username = obj.optString("user", "").trim()
-                            if (username.isBlank()) continue
                             val mac = obj.optString("mac-address", "").uppercase()
                             val ip = obj.optString("address", "")
                             val rawComment = obj.optString("comment", "")
@@ -1682,7 +1542,7 @@ class MikrotikRepository(
                             activeListResult.add(
                                 HotspotActiveUser(
                                     id = obj.optString(".id", "u$i"),
-                                    user = username,
+                                    user = obj.optString("user", "user$i"),
                                     address = ip,
                                     macAddress = mac,
                                     uptime = obj.optString("uptime", "0s"),
@@ -1707,8 +1567,7 @@ class MikrotikRepository(
                         anyCoreSuccess = true
                         for (i in 0 until usersArray.length()) {
                             val obj = usersArray.getJSONObject(i)
-                            val cardName = obj.optString("name", "").trim()
-                            if (cardName.isBlank()) continue
+                            val cardName = obj.optString("name", "")
                             val comment = obj.optString("comment", "")
                             val profile = obj.optString("profile", "default")
                             val price = extractPriceFromText(comment, profile, cardName)
@@ -1760,22 +1619,13 @@ class MikrotikRepository(
                                 val transLimit = com.example.data.network.NetworkUtils.parseSizeToBytes(obj.optString("transfer-limit", "0"))
 
                                 val bestLimit = if (totLimit > 0L) totLimit else if (transLimit > 0L) transLimit else dlLimit
-                                val dateHint = listOf(
-                                    obj.optString("creation-time"),
-                                    obj.optString("start-time"),
-                                    obj.optString("last-seen"),
-                                    obj.optString("till-time"),
-                                    comment
-                                ).firstNotNullOfOrNull { raw ->
-                                    if (raw.isNullOrBlank()) null else NetworkUtils.parseRouterDateToEpoch(raw)
-                                } ?: 0L
 
                                 cardList.add(
                                     HotspotCard(
                                         id = obj.optString(".id", "um$i"),
                                         name = name,
                                         password = obj.optString("password", ""),
-                                        profile = profile.ifBlank { obj.optString("actual-profile", "UserManager") },
+                                        profile = profile,
                                         uptime = obj.optString("uptime", "0s"),
                                         bytesIn = upUsed,
                                         bytesOut = downUsed,
@@ -1784,8 +1634,7 @@ class MikrotikRepository(
                                         comment = comment,
                                         disabled = obj.optBoolean("disabled", false),
                                         price = price,
-                                        cardType = "usermanager",
-                                        createdAtHint = dateHint
+                                        cardType = "usermanager"
                                     )
                                 )
                             }
@@ -1799,20 +1648,12 @@ class MikrotikRepository(
                         }
                     }
                 }
-                val nowRestMs = System.currentTimeMillis()
-                if (lastUmHistoryFetchMs == 0L || (nowRestMs - lastUmHistoryFetchMs) >= 180_000L) {
-                    lastUmHistoryFetchMs = nowRestMs
-                    fetchRestUserManagerSessions(baseUrl, credential)
-                }
                 if (hsCardsSucceeded || umCardsSucceeded) {
                     val sortedCards = sortCardsByNewestFirst(cardList.distinctBy { it.name })
-                    // Empty is a valid successful response (for example, the last card was deleted).
-                    // Failed sources have already contributed their cached cards above.
-                    _cards.value = sortedCards
-                    syncCardsToRoom(sortedCards, buildSet {
-                        if (hsCardsSucceeded) add("hotspot")
-                        if (umCardsSucceeded) add("usermanager")
-                    })
+                    if (sortedCards.isNotEmpty() || (hsCardsSucceeded && _cards.value.isEmpty())) {
+                        _cards.value = sortedCards
+                        syncCardsToRoom(sortedCards)
+                    }
                 }
 
                 // Fetch hotspot profiles
@@ -1903,7 +1744,9 @@ class MikrotikRepository(
                                 }
                             } catch (_: Exception) {}
 
-                            _profiles.value = profList
+                            if (profList.isNotEmpty()) {
+                                _profiles.value = profList
+                            }
                         }
                     }
                 } catch (_: Exception) {}
@@ -1931,7 +1774,9 @@ class MikrotikRepository(
                                     )
                                 )
                             }
-                            _ipBindings.value = bindList
+                            if (bindList.isNotEmpty()) {
+                                _ipBindings.value = bindList
+                            }
                         }
                     }
                 } catch (_: Exception) {}
@@ -2206,8 +2051,11 @@ class MikrotikRepository(
             version = "RouterOS v7.14"
         )
 
-        _activeUsers.value = _activeUsers.value.map { active ->
-            active.copy(comment = "مستخدم متصل - $routerName")
+        _activeUsers.value = _activeUsers.value.mapIndexed { idx, active ->
+            active.copy(
+                address = "$subnetPrefix.${100 + idx}",
+                comment = "مستخدم متصل - $routerName"
+            )
         }
 
         repositoryScope.launch {
@@ -2229,6 +2077,7 @@ class MikrotikRepository(
         val cardList = _cards.value
 
         val routerIpBase = config.ipAddress.takeIf { it.isNotBlank() } ?: "192.168.88.1"
+        val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else "172.16.1"
         val serverName = realIdentity.ifBlank { config.name.ifBlank { "السيرفر الرئيسي ($routerIpBase)" } }
 
         // 1. Build IP map: interface -> IP address
@@ -2297,9 +2146,9 @@ class MikrotikRepository(
 
                 val parentIf = vlanObj?.get("interface")?.takeIf { it.isNotBlank() } ?: defaultBridgeName
 
-                // Do not synthesize a host address for a VLAN. It may have no
-                // L3 address at all, and fabricated addresses cause false tower matches.
-                val assignedIp = interfaceIpMap[ifName].orEmpty()
+                val assignedIp = interfaceIpMap[ifName]
+                    ?: if (vlanId != null && vlanId > 0) "172.16.1.$vlanId"
+                    else "$subnetPrefix.254"
 
                 if (isNodeBlacklisted("node_vlan_$ifName", assignedIp, ifName, iface.macAddress, vlanId)) {
                     return@forEach
@@ -2309,10 +2158,12 @@ class MikrotikRepository(
                 val matchedNeighbor = neighbors.firstOrNull { n ->
                     val nIf = n["interface"] ?: ""
                     val nAddr = n["address"] ?: ""
+                    val nId = n["identity"] ?: ""
                     val nMac = n["mac-address"] ?: ""
 
                     nIf.equals(ifName, true) ||
-                    (assignedIp.isNotBlank() && nAddr.isNotBlank() && nAddr == assignedIp)
+                    (nAddr.isNotBlank() && nAddr == assignedIp) ||
+                    (vlanId != null && (nId == "$vlanId" || nId.contains("($vlanId)", true) || nId.contains("(${vlanId.toString().padStart(2, '0')})", true) || nAddr.endsWith(".$vlanId")))
                 }
 
                 if (matchedNeighbor != null) {
@@ -2325,7 +2176,7 @@ class MikrotikRepository(
 
                     val nIdentity = matchedNeighbor["identity"] ?: matchedNeighbor["board"] ?: "نقطة $vlanId"
                     val nPlatform = matchedNeighbor["platform"] ?: matchedNeighbor["board"] ?: "MikroTik AP"
-                    val effectiveIp = nAddr
+                    val effectiveIp = nAddr.ifBlank { assignedIp }
 
                     val displayName = when {
                         nIdentity.isNotBlank() && nIdentity != ifName -> "$nIdentity ($ifName)"
@@ -2338,7 +2189,7 @@ class MikrotikRepository(
                             id = "node_vlan_$ifName",
                             name = displayName,
                             ipAddress = effectiveIp,
-                            macAddress = nMac,
+                            macAddress = nMac.ifBlank { iface.macAddress.ifBlank { "48:A9:8A:76:FB:${"%02X".format(vlanId ?: 1)}" } },
                             interfaceName = ifName,
                             parentInterface = parentIf,
                             vlanId = vlanId,
@@ -2373,7 +2224,7 @@ class MikrotikRepository(
                             id = "node_vlan_$ifName",
                             name = displayName,
                             ipAddress = assignedIp,
-                            macAddress = iface.macAddress,
+                            macAddress = iface.macAddress.ifBlank { "48:A9:8A:76:FB:${"%02X".format(vlanId ?: 1)}" },
                             interfaceName = ifName,
                             parentInterface = parentIf,
                             vlanId = vlanId,
@@ -2548,7 +2399,9 @@ class MikrotikRepository(
                 val matchIdx = candidateSubNodes.indexOfFirst { c ->
                     c.id == dbNode.id ||
                     (dbNode.ipAddress.isNotBlank() && c.ipAddress == dbNode.ipAddress) ||
-                    (dbNode.macAddress.isNotBlank() && c.macAddress.isNotBlank() && c.macAddress.equals(dbNode.macAddress, true))
+                    (dbNode.macAddress.isNotBlank() && c.macAddress.equals(dbNode.macAddress, true)) ||
+                    (dbNode.vlanId != null && c.vlanId == dbNode.vlanId) ||
+                    (dbNode.interfaceName.isNotBlank() && c.interfaceName.equals(dbNode.interfaceName, true))
                 }
                 if (matchIdx >= 0) {
                     val live = candidateSubNodes[matchIdx]
@@ -2565,7 +2418,7 @@ class MikrotikRepository(
             }
         }
 
-        // 7. Deduplicate only on actual IP/MAC values or stable IDs, never a shared interface/VLAN label.
+        // 7. Strict Final Deduplication of Sub-Nodes by IP, then MAC, then ID
         val deduplicatedSubNodes = mutableListOf<com.example.data.model.NetworkNode>()
         val seenIps = mutableSetOf<String>()
         val seenMacs = mutableSetOf<String>()
@@ -2576,13 +2429,13 @@ class MikrotikRepository(
             val cleanMac = node.macAddress.trim().uppercase()
             val cleanId = node.id.trim()
 
-            val ipClash = cleanIp.isNotBlank() && cleanIp != routerIpBase && seenIps.contains(cleanIp)
-            val macClash = cleanMac.isNotBlank() && seenMacs.contains(cleanMac)
+            val ipClash = cleanIp.isNotBlank() && cleanIp != routerIpBase && cleanIp != "$subnetPrefix.254" && seenIps.contains(cleanIp)
+            val macClash = cleanMac.isNotBlank() && !cleanMac.startsWith("48:A9:8A:76:FB") && seenMacs.contains(cleanMac)
             val idClash = seenIds.contains(cleanId)
 
             if (!ipClash && !macClash && !idClash) {
-                if (cleanIp.isNotBlank() && cleanIp != routerIpBase) seenIps.add(cleanIp)
-                if (cleanMac.isNotBlank()) seenMacs.add(cleanMac)
+                if (cleanIp.isNotBlank() && cleanIp != routerIpBase && cleanIp != "$subnetPrefix.254") seenIps.add(cleanIp)
+                if (cleanMac.isNotBlank() && !cleanMac.startsWith("48:A9:8A:76:FB")) seenMacs.add(cleanMac)
                 seenIds.add(cleanId)
                 deduplicatedSubNodes.add(node)
             }
@@ -2639,12 +2492,11 @@ class MikrotikRepository(
             id = "node_main_router",
             name = serverName,
             ipAddress = routerIpBase,
-            macAddress = "",
+            macAddress = "D4:CA:6D:AA:11:01",
             interfaceName = "ALL",
             model = _resourceState.value.boardName.ifBlank { "MikroTik Router" },
             role = "السيرفر الرئيسي (Gateway)",
             isOnline = true,
-            status = com.example.data.model.NodeStatus.ACTIVE,
             connectedUsers = remainingClients.size,
             uptime = _resourceState.value.uptime,
             nodeType = com.example.data.model.NetworkNodeType.MAIN_TOWER,
@@ -2681,7 +2533,7 @@ class MikrotikRepository(
         val sessionList = mutableListOf<com.example.data.model.UserSessionRecord>()
         val activeUsernames = _activeUsers.value.map { it.user }.toSet()
 
-        _activeUsers.value.forEach { active ->
+        _activeUsers.value.forEachIndexed { index, active ->
             val cleanMac = active.macAddress.uppercase()
             val hostName = active.hostName.ifBlank { active.comment.ifBlank { "" } }
             val detected = if (active.deviceModel.isNotBlank()) {
@@ -2719,7 +2571,7 @@ class MikrotikRepository(
                 com.example.data.model.UserSessionRecord(
                     id = "sess_active_${active.user}",
                     username = active.user,
-                    ipAddress = active.address,
+                    ipAddress = active.address.ifBlank { "$subnetPrefix.${100 + index}" },
                     macAddress = cleanMac.ifBlank { "غير مسجل" },
                     isOnline = true,
                     loginTime = loginDisplay,
@@ -3068,29 +2920,22 @@ class MikrotikRepository(
                     val processedNames = mutableSetOf<String>()
 
                     for (c in combinedCards) {
-                        val cached = currentInMemory[c.name]
-                        val merged = if (cached != null) {
-                            c.copy(
-                                price = c.price.ifBlank { cached.price },
-                                cardType = c.cardType.ifBlank { cached.cardType }
-                            )
-                        } else c
-                        mergedCards.add(merged)
+                        mergedCards.add(c)
                         processedNames.add(c.name)
                     }
-                    // Preserve cached cards only for a source whose request failed.
+                    // Keep recent in-memory cards that router might not have returned immediately
                     for ((name, card) in currentInMemory) {
-                        val sourceFailed = if (card.isUserManagerCard) umCardsRes.isFailure else hotspotCardsRes.isFailure
-                        if (!processedNames.contains(name) && sourceFailed) mergedCards.add(card)
+                        if (!processedNames.contains(name)) {
+                            mergedCards.add(card)
+                        }
                     }
 
                     val distinctCards = mergedCards.distinctBy { it.name }
                     val sortedCards = sortCardsByNewestFirst(distinctCards)
-                    _cards.value = sortedCards
-                    syncCardsToRoom(sortedCards, buildSet {
-                        if (hotspotCardsRes.isSuccess) add("hotspot")
-                        if (umCardsRes.isSuccess) add("usermanager")
-                    })
+                    if (sortedCards.isNotEmpty()) {
+                        _cards.value = sortedCards
+                        syncCardsToRoom(sortedCards)
+                    }
                 }
             } else {
                 try {
@@ -3108,8 +2953,7 @@ class MikrotikRepository(
                             val userArray = JSONArray(userResp.body?.string() ?: "[]")
                             for (i in 0 until userArray.length()) {
                                 val obj = userArray.getJSONObject(i)
-                                val name = obj.optString("name", "").trim()
-                                if (name.isBlank()) continue
+                                val name = obj.optString("name", "card$i")
                                 val comment = obj.optString("comment", "")
                                 val profile = obj.optString("profile", "default")
                                 val price = extractPriceFromText(comment, profile, name)
@@ -3139,7 +2983,7 @@ class MikrotikRepository(
 
                     try {
                         val umReq = Request.Builder()
-                            .url("$baseUrl/rest/user-manager/user?.proplist=.id,name,username,password,profile,actual-profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,creation-time,start-time,till-time,end-time,last-seen,comment,disabled")
+                            .url("$baseUrl/rest/user-manager/user?.proplist=.id,name,username,password,profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,comment,disabled")
                             .header("Authorization", credential)
                             .build()
                         httpClient.newCall(umReq).execute().use { umResp ->
@@ -3149,20 +2993,11 @@ class MikrotikRepository(
                                 val existingNames = cardList.map { it.name }.toSet()
                                 for (i in 0 until umArray.length()) {
                                     val obj = umArray.getJSONObject(i)
-                                    val name = obj.optString("name", "").ifBlank { obj.optString("username", "") }
+                                    val name = obj.optString("name", "")
                                     if (name.isNotBlank() && !existingNames.contains(name)) {
                                         val comment = obj.optString("comment", "")
-                                        val profile = obj.optString("actual-profile").ifBlank { obj.optString("profile", "default") }
+                                        val profile = obj.optString("actual-profile", obj.optString("profile", "default"))
                                         val price = extractPriceFromText(comment, profile, name)
-                                        val dateHint = listOf(
-                                            obj.optString("creation-time"),
-                                            obj.optString("start-time"),
-                                            obj.optString("last-seen"),
-                                            obj.optString("till-time"),
-                                            comment
-                                        ).firstNotNullOfOrNull { raw ->
-                                            if (raw.isNullOrBlank()) null else NetworkUtils.parseRouterDateToEpoch(raw)
-                                        } ?: 0L
                                         cardList.add(
                                             HotspotCard(
                                                 id = obj.optString(".id", "um$i"),
@@ -3178,8 +3013,7 @@ class MikrotikRepository(
                                                 comment = comment,
                                                 disabled = obj.optBoolean("disabled", false),
                                                 price = price,
-                                                cardType = "usermanager",
-                                                createdAtHint = dateHint
+                                                cardType = "usermanager"
                                             )
                                         )
                                     }
@@ -3203,27 +3037,20 @@ class MikrotikRepository(
                         val processedNames = mutableSetOf<String>()
 
                         for (c in cardList) {
-                            val cached = currentInMemory[c.name]
-                            val merged = if (cached != null) {
-                                c.copy(
-                                    price = c.price.ifBlank { cached.price },
-                                    cardType = c.cardType.ifBlank { cached.cardType }
-                                )
-                            } else c
-                            mergedList.add(merged)
+                            mergedList.add(c)
                             processedNames.add(c.name)
                         }
                         for ((name, card) in currentInMemory) {
-                            val sourceFailed = if (card.isUserManagerCard) !umOk else !hsOk
-                            if (!processedNames.contains(name) && sourceFailed) mergedList.add(card)
+                            if (!processedNames.contains(name)) {
+                                mergedList.add(card)
+                            }
                         }
 
                         val sortedCards = sortCardsByNewestFirst(mergedList.distinctBy { it.name })
-                        _cards.value = sortedCards
-                        syncCardsToRoom(sortedCards, buildSet {
-                            if (hsOk) add("hotspot")
-                            if (umOk) add("usermanager")
-                        })
+                        if (sortedCards.isNotEmpty()) {
+                            _cards.value = sortedCards
+                            syncCardsToRoom(sortedCards)
+                        }
                     }
                 } catch (_: Exception) {}
             }
@@ -3526,7 +3353,9 @@ class MikrotikRepository(
             }
             val targetCard = _cards.value.firstOrNull { it.name == card.name || it.id == card.id }
             if (targetCard != null) {
-                upsertLocalCardPreservingTimestamp(targetCard)
+                try {
+                    appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(targetCard))
+                } catch (_: Exception) {}
             }
             Result.success(true)
         }
@@ -3622,7 +3451,9 @@ class MikrotikRepository(
             _cards.value = _cards.value.map {
                 if (it.id == updatedCard.id || it.name == updatedCard.name) updatedCard else it
             }
-            upsertLocalCardPreservingTimestamp(updatedCard)
+            try {
+                appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updatedCard))
+            } catch (_: Exception) {}
             Result.success(true)
         }
     }
@@ -3643,7 +3474,7 @@ class MikrotikRepository(
                     }
                     val updated = _cards.value.firstOrNull { it.id == cardId || (targetName.isNotBlank() && it.name == targetName) }
                     if (updated != null) {
-                        upsertLocalCardPreservingTimestamp(updated)
+                        try { appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updated)) } catch (_: Exception) {}
                     }
                     return@withContext socketRes
                 }
@@ -3664,7 +3495,7 @@ class MikrotikRepository(
                         }
                         val updated = _cards.value.firstOrNull { it.id == cardId }
                         if (updated != null) {
-                            upsertLocalCardPreservingTimestamp(updated)
+                            try { appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updated)) } catch (_: Exception) {}
                         }
                         return@withContext Result.success(true)
                     }
@@ -3678,7 +3509,7 @@ class MikrotikRepository(
             }
             val updated = _cards.value.firstOrNull { it.id == cardId }
             if (updated != null) {
-                upsertLocalCardPreservingTimestamp(updated)
+                try { appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(updated)) } catch (_: Exception) {}
             }
             Result.success(true)
         }
@@ -3787,7 +3618,6 @@ class MikrotikRepository(
                 CodeCharType.LETTERS_ONLY -> "ABCDEFGHJKLMNPQRSTUVWXYZ"
             }
 
-            val batchTimestamp = System.currentTimeMillis()
             var attempts = 0
             while (generatedCards.size < config.count && attempts < config.count * 10) {
                 attempts++
@@ -3810,7 +3640,7 @@ class MikrotikRepository(
                     val limitBytes = if (config.dataLimitMB > 0) config.dataLimitMB * 1024 * 1024L else 0L
 
                     val card = HotspotCard(
-                        id = "gen_${batchTimestamp}_${generatedCards.size}",
+                        id = "gen_${System.currentTimeMillis()}_${generatedCards.size}",
                         name = code,
                         password = password,
                         profile = cleanProfileName,
@@ -4041,12 +3871,6 @@ class MikrotikRepository(
                         }
                     }
 
-                    if (addedCards.isNotEmpty()) {
-                        addedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = batchTimestamp - i }
-                        val preMerged = (addedCards + _cards.value).distinctBy { it.name }
-                        _cards.value = sortCardsByNewestFirst(preMerged)
-                    }
-
                     // Re-sync all cards (both Hotspot & User-Manager) directly from router
                     refreshCardsFromRouter()
                 }
@@ -4065,7 +3889,8 @@ class MikrotikRepository(
                     )
                 }
 
-                addedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = batchTimestamp - i }
+                val now = System.currentTimeMillis()
+                addedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = now - i }
                 val currentList = _cards.value.toMutableList()
                 currentList.addAll(0, addedCards)
                 val sorted = sortCardsByNewestFirst(currentList.distinctBy { it.name })
@@ -4075,7 +3900,8 @@ class MikrotikRepository(
             }
 
             // Demo Mode: Add generated cards locally
-            generatedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = batchTimestamp - i }
+            val now = System.currentTimeMillis()
+            generatedCards.forEachIndexed { i, c -> cardTimestampCache[c.name] = now - i }
             val currentList = _cards.value.toMutableList()
             currentList.addAll(0, generatedCards)
             val sorted = sortCardsByNewestFirst(currentList.distinctBy { it.name })
@@ -4491,7 +4317,9 @@ class MikrotikRepository(
         _cards.value = _cards.value.map {
             if (it.id == card.id || it.name == card.name) activated else it
         }
-        upsertLocalCardPreservingTimestamp(activated)
+        try {
+            appDao?.insertOrUpdateLocalCard(com.example.data.local.LocalCardEntity.fromHotspotCard(activated))
+        } catch (_: Exception) {}
         return Result.success(true)
     }
 
@@ -4728,65 +4556,85 @@ class MikrotikRepository(
 
     suspend fun addNetworkNode(node: com.example.data.model.NetworkNode): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            val dao = appDao ?: return@withContext Result.failure(Exception("قاعدة البيانات المحلية غير متاحة"))
-            try {
-                dao.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
-            } catch (e: Exception) {
-                return@withContext Result.failure(e)
-            }
-
             deletedNodeIds.remove(node.id)
             if (node.ipAddress.isNotBlank()) deletedNodeKeys.remove(node.ipAddress)
             if (node.interfaceName.isNotBlank()) deletedNodeKeys.remove(node.interfaceName)
             if (node.macAddress.isNotBlank()) deletedNodeKeys.remove(node.macAddress.uppercase())
             if (node.vlanId != null) deletedNodeKeys.remove("vlan_${node.vlanId}")
 
-            if (customAddedNodes.none { it.id == node.id }) customAddedNodes.add(0, node)
+            if (customAddedNodes.none { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }) {
+                customAddedNodes.add(0, node)
+            }
             val list = _networkNodes.value.toMutableList()
-            val existingIdx = list.indexOfFirst { it.id == node.id }
-            if (existingIdx >= 0) list[existingIdx] = node else list.add(0, node)
-            _networkNodes.value = list.distinctBy { it.id }
+            if (list.none { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }) {
+                list.add(0, node)
+            }
+            _networkNodes.value = list.distinctBy { it.id.ifBlank { it.ipAddress } }
+
+            try {
+                appDao?.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
+            } catch (_: Exception) {}
+
             Result.success(true)
         }
     }
 
     suspend fun updateNetworkNode(node: com.example.data.model.NetworkNode): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            val dao = appDao ?: return@withContext Result.failure(Exception("قاعدة البيانات المحلية غير متاحة"))
-            try {
-                dao.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
-            } catch (e: Exception) {
-                return@withContext Result.failure(e)
-            }
-
             deletedNodeIds.remove(node.id)
             if (node.ipAddress.isNotBlank()) deletedNodeKeys.remove(node.ipAddress)
             if (node.interfaceName.isNotBlank()) deletedNodeKeys.remove(node.interfaceName)
             if (node.macAddress.isNotBlank()) deletedNodeKeys.remove(node.macAddress.uppercase())
             if (node.vlanId != null) deletedNodeKeys.remove("vlan_${node.vlanId}")
 
-            val customIdx = customAddedNodes.indexOfFirst { it.id == node.id }
-            if (customIdx >= 0) customAddedNodes[customIdx] = node else customAddedNodes.add(node)
+            val customIdx = customAddedNodes.indexOfFirst { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }
+            if (customIdx >= 0) {
+                customAddedNodes[customIdx] = node
+            } else {
+                customAddedNodes.add(node)
+            }
+
             val currentList = _networkNodes.value.toMutableList()
-            val listIdx = currentList.indexOfFirst { it.id == node.id }
-            if (listIdx >= 0) currentList[listIdx] = node else currentList.add(node)
+            val listIdx = currentList.indexOfFirst { it.id == node.id || (node.ipAddress.isNotBlank() && it.ipAddress == node.ipAddress) }
+            if (listIdx >= 0) {
+                currentList[listIdx] = node
+            } else {
+                currentList.add(node)
+            }
             _networkNodes.value = currentList
+
+            try {
+                appDao?.insertOrUpdateNetworkNodes(listOf(com.example.data.local.NetworkNodeEntity.fromNetworkNode(node)))
+            } catch (_: Exception) {}
+
             Result.success(true)
         }
     }
 
     suspend fun deleteNetworkNode(nodeId: String): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            val dao = appDao ?: return@withContext Result.failure(Exception("قاعدة البيانات المحلية غير متاحة"))
-            try {
-                dao.deleteNetworkNodeEntity(nodeId)
-            } catch (e: Exception) {
-                return@withContext Result.failure(e)
+            val existing = _networkNodes.value.firstOrNull { it.id == nodeId }
+                ?: customAddedNodes.firstOrNull { it.id == nodeId }
+            deletedNodeIds.add(nodeId)
+            existing?.let {
+                if (it.ipAddress.isNotBlank()) deletedNodeKeys.add(it.ipAddress)
+                if (it.interfaceName.isNotBlank()) deletedNodeKeys.add(it.interfaceName)
+                if (it.macAddress.isNotBlank()) deletedNodeKeys.add(it.macAddress.uppercase())
+                if (it.vlanId != null) deletedNodeKeys.add("vlan_${it.vlanId}")
             }
 
-            deletedNodeIds.add(nodeId)
-            customAddedNodes.removeAll { it.id == nodeId }
-            _networkNodes.value = _networkNodes.value.filter { it.id != nodeId }
+            customAddedNodes.removeAll {
+                it.id == nodeId || (existing != null && it.ipAddress.isNotBlank() && it.ipAddress == existing.ipAddress)
+            }
+            _networkNodes.value = _networkNodes.value.filter {
+                it.id != nodeId && (existing == null || it.ipAddress.isBlank() || it.ipAddress != existing.ipAddress)
+            }
+
+            try {
+                appDao?.deleteNetworkNodesFlexible(nodeId, existing?.ipAddress.orEmpty(), existing?.interfaceName.orEmpty())
+            } catch (_: Exception) {
+                try { appDao?.deleteNetworkNodeEntity(nodeId) } catch (_: Exception) {}
+            }
             Result.success(true)
         }
     }
