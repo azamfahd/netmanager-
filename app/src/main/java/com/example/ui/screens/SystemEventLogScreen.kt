@@ -793,7 +793,7 @@ private fun DatabaseManagementDialog(
                 Spacer(modifier = Modifier.height(4.dp))
                 Text("تأمين وحفظ البيانات:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 Text(
-                    "يتم حفظ كافة السجلات والعمليات بشكل دائم في قاعدة البيانات المحلية والسحابية (Firestore) لضمان عدم ضياع أي بيانات ولتوفير أرشفة كاملة للنشاط.",
+                    "يتم حفظ كافة السجلات والعمليات بشكل دائم في قاعدة البيانات المحلية (Room / SQLite) ومزامنتها مباشرة مع الراوتر لضمان عدم ضياع أي بيانات.",
                     style = MaterialTheme.typography.bodySmall,
                     color = CyberGreenPrimary
                 )

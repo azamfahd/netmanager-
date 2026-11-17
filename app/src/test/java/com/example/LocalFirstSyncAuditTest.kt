@@ -222,4 +222,137 @@ class LocalFirstSyncAuditTest {
         assertTrue(commentedExpiredCard.isExpiredQuota)
         assertTrue(commentedExpiredCard.isExpired)
     }
+
+    @Test
+    fun testNetworkNodeRouterScopingIsolation() {
+        val sharedNode = com.example.data.model.NetworkNode(
+            id = "eth2",
+            name = "Tower North",
+            ipAddress = "10.0.0.2",
+            macAddress = "AA:BB:CC:DD:EE:01",
+            interfaceName = "ether2",
+            firmwareVersion = "7.15"
+        )
+
+        val entityRouterA = com.example.data.local.NetworkNodeEntity.fromNetworkNode(sharedNode, "192.168.88.1")
+        val entityRouterB = com.example.data.local.NetworkNodeEntity.fromNetworkNode(sharedNode, "10.10.0.1")
+
+        assertEquals("192.168.88.1", entityRouterA.routerIp)
+        assertEquals("10.10.0.1", entityRouterB.routerIp)
+        assertFalse(entityRouterA == entityRouterB)
+        assertEquals("7.15", entityRouterA.toNetworkNode().firmwareVersion)
+    }
+
+    @Test
+    fun testSnapshotSignatureDetectsValueChangesWithSameCount() {
+        val baseSnapshot = com.example.data.local.RouterSnapshot(
+            ipAddress = "192.168.88.1",
+            routerName = "MainRouter",
+            resource = com.example.data.model.RouterResource(
+                uptime = "1d 02:00:00",
+                version = "7.14",
+                boardName = "RB5009",
+                cpuLoad = 12
+            ),
+            routerBoard = com.example.data.model.RouterBoardInfo(model = "RB5009UG+S+"),
+            cards = listOf(
+                HotspotCard(id = "*1", name = "card100", password = "123", profile = "1day", bytesIn = 1000L, price = "200")
+            ),
+            profiles = listOf(
+                com.example.data.model.HotspotProfile(id = "*1", name = "1day", rateLimit = "2M/2M", priceNumber = 200.0)
+            ),
+            activeUsers = listOf(
+                com.example.data.model.HotspotActiveUser(
+                    id = "*10",
+                    user = "card100",
+                    address = "10.5.50.10",
+                    macAddress = "AA:BB:CC:DD:EE:10",
+                    uptime = "10m",
+                    bytesIn = 500L,
+                    bytesOut = 1200L
+                )
+            ),
+            servers = listOf(
+                com.example.data.model.HotspotServerInfo(id = "*1", name = "hotspot1", interfaceName = "bridge", profile = "default", addressPool = "hs-pool", disabled = false)
+            ),
+            nodes = listOf(
+                com.example.data.model.NetworkNode(
+                    id = "wlan1",
+                    name = "AP-1",
+                    ipAddress = "10.5.50.200",
+                    connectedUsers = 5,
+                    pingMs = 4L,
+                    isOnline = true
+                )
+            ),
+            logs = emptyList(),
+            ipBindings = listOf(
+                com.example.data.model.IpBinding(id = "*1", macAddress = "00:11:22:33:44:55", address = "10.5.50.2", type = "bypassed", disabled = false)
+            )
+        )
+
+        val sigBase = com.example.data.local.RouterCacheManager.computeSnapshotSignature(baseSnapshot)
+        val sigSameCopy = com.example.data.local.RouterCacheManager.computeSnapshotSignature(baseSnapshot.copy())
+        assertEquals(sigBase, sigSameCopy)
+
+        // Same counts, only node pingMs & connectedUsers change -> MUST change signature
+        val updatedNodeSnapshot = baseSnapshot.copy(
+            nodes = listOf(baseSnapshot.nodes.first().copy(connectedUsers = 6, pingMs = 18L))
+        )
+        assertFalse(sigBase == com.example.data.local.RouterCacheManager.computeSnapshotSignature(updatedNodeSnapshot))
+
+        // Same counts, only card bytesIn changes -> MUST change signature
+        val updatedCardSnapshot = baseSnapshot.copy(
+            cards = listOf(baseSnapshot.cards.first().copy(bytesIn = 999_000L))
+        )
+        assertFalse(sigBase == com.example.data.local.RouterCacheManager.computeSnapshotSignature(updatedCardSnapshot))
+
+        // Same counts, only profile price changes -> MUST change signature
+        val updatedProfileSnapshot = baseSnapshot.copy(
+            profiles = listOf(baseSnapshot.profiles.first().copy(priceNumber = 350.0))
+        )
+        assertFalse(sigBase == com.example.data.local.RouterCacheManager.computeSnapshotSignature(updatedProfileSnapshot))
+
+        // Same counts, only ipBinding disabled flag changes -> MUST change signature
+        val updatedBindingSnapshot = baseSnapshot.copy(
+            ipBindings = listOf(baseSnapshot.ipBindings.first().copy(disabled = true))
+        )
+        assertFalse(sigBase == com.example.data.local.RouterCacheManager.computeSnapshotSignature(updatedBindingSnapshot))
+
+        assertTrue(com.example.data.local.RouterCacheManager.hasPersistableData(baseSnapshot))
+    }
+
+    @Test
+    fun testRealRouterModelDefaultsContainNoFakeDemoValues() {
+        val resource = com.example.data.model.RouterResource()
+        val board = com.example.data.model.RouterBoardInfo()
+
+        assertEquals("0s", resource.uptime)
+        assertEquals("", resource.version)
+        assertEquals("", resource.boardName)
+        assertEquals(0, resource.cpuLoad)
+        assertEquals(0L, resource.freeMemoryBytes)
+        assertEquals(0L, resource.totalMemoryBytes)
+        assertEquals("", resource.voltage)
+        assertEquals("", resource.temperature)
+
+        assertEquals("", board.model)
+        assertEquals("", board.serialNumber)
+        assertFalse(board.routerboard)
+    }
+
+    @Test
+    fun testRepositoryWorksWithoutFirebaseAndSetsDemoDataExplicitly() {
+        val repo = com.example.data.network.MikrotikRepository(appDao = null)
+        assertEquals("", repo.resourceState.value.boardName)
+        assertTrue(repo.cards.value.isEmpty())
+        assertTrue(repo.networkNodes.value.isEmpty())
+
+        repo.populateDemoData()
+        assertTrue(repo.resourceState.value.boardName.contains("Demo"))
+        assertTrue(repo.cards.value.isNotEmpty())
+        assertTrue(repo.networkNodes.value.isNotEmpty())
+    }
 }
+
+

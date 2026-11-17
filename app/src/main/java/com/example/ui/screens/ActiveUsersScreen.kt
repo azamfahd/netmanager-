@@ -173,7 +173,7 @@ fun ActiveUsersScreen(
             )
 
             Button(
-                onClick = { viewModel.refreshData() },
+                onClick = { viewModel.refreshData(forceLiveRefresh = true, notifyOnError = true) },
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = RouterBlue

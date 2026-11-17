@@ -62,6 +62,12 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCardAssignments(assignments: List<PosCardAssignmentEntity>)
 
+    @Query("SELECT DISTINCT cardName FROM pos_card_assignments WHERE isSold = 0")
+    suspend fun getUnsoldAssignedCardNamesSync(): List<String>
+
+    @Query("UPDATE pos_card_assignments SET isSold = 1, soldAt = :soldAt WHERE isSold = 0 AND cardName IN (:cardNames)")
+    suspend fun markCardsAsSoldBatch(cardNames: List<String>, soldAt: Long)
+
     @Query("UPDATE pos_card_assignments SET isSold = 1, soldAt = :soldAt WHERE cardName = :cardName AND isSold = 0")
     suspend fun markCardAsSold(cardName: String, soldAt: Long)
 
@@ -110,6 +116,9 @@ interface AppDao {
     @Query("SELECT * FROM session_archive ORDER BY timestamp DESC")
     fun getAllArchivedSessions(): Flow<List<SessionArchiveEntity>>
 
+    @Query("DELETE FROM session_archive WHERE sessionId LIKE 'sess_card_%'")
+    suspend fun deleteLegacyCardSnapshotSessions()
+
     @Query("SELECT * FROM session_archive WHERE isOnline = 1 ORDER BY timestamp DESC")
     fun getActiveArchivedSessions(): Flow<List<SessionArchiveEntity>>
 
@@ -143,7 +152,7 @@ interface AppDao {
     @Query("SELECT * FROM user_login_history WHERE username = :username ORDER BY timestamp DESC")
     fun getLoginHistoryForUser(username: String): Flow<List<UserLoginHistoryEntity>>
 
-    @Query("SELECT * FROM user_login_history ORDER BY timestamp DESC LIMIT 100")
+    @Query("SELECT * FROM user_login_history ORDER BY timestamp DESC LIMIT 5000")
     fun getAllLoginHistory(): Flow<List<UserLoginHistoryEntity>>
 
     @Query("SELECT * FROM user_login_history WHERE username = :username AND logoutTime = 'متصل الآن' ORDER BY timestamp DESC LIMIT 1")
@@ -164,8 +173,11 @@ interface AppDao {
     // ==========================================
     // Network Nodes & Heartbeat Status Storage
     // ==========================================
-    @Query("SELECT * FROM network_nodes ORDER BY lastCheckTime DESC")
-    fun getAllNetworkNodesFlow(): Flow<List<NetworkNodeEntity>>
+    @Query("SELECT * FROM network_nodes WHERE routerIp = :routerIp ORDER BY lastCheckTime DESC")
+    fun getNetworkNodesByRouterFlow(routerIp: String): Flow<List<NetworkNodeEntity>>
+
+    @Query("SELECT * FROM network_nodes WHERE routerIp = :routerIp")
+    suspend fun getNetworkNodesByRouterSync(routerIp: String): List<NetworkNodeEntity>
 
     @Query("SELECT * FROM network_nodes")
     suspend fun getAllNetworkNodesSync(): List<NetworkNodeEntity>
@@ -173,14 +185,26 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateNetworkNodes(nodes: List<NetworkNodeEntity>)
 
-    @Query("UPDATE network_nodes SET status = :status, isOnline = :isOnline, pingMs = :pingMs, lastCheckTime = :lastCheckTime WHERE id = :nodeId")
-    suspend fun updateNodeHeartbeat(nodeId: String, status: String, isOnline: Boolean, pingMs: Long, lastCheckTime: Long)
+    @Query("UPDATE network_nodes SET status = :status, isOnline = :isOnline, pingMs = :pingMs, lastCheckTime = :lastCheckTime WHERE routerIp = :routerIp AND id = :nodeId")
+    suspend fun updateNodeHeartbeat(routerIp: String, nodeId: String, status: String, isOnline: Boolean, pingMs: Long, lastCheckTime: Long)
 
-    @Query("DELETE FROM network_nodes WHERE id = :nodeId")
-    suspend fun deleteNetworkNodeEntity(nodeId: String)
+    @Query("DELETE FROM network_nodes WHERE routerIp = :routerIp AND id = :nodeId")
+    suspend fun deleteNetworkNodeEntity(routerIp: String, nodeId: String)
 
-    @Query("DELETE FROM network_nodes WHERE id = :nodeId OR (ipAddress != '' AND ipAddress = :ipAddress) OR (interfaceName != '' AND interfaceName = :interfaceName)")
-    suspend fun deleteNetworkNodesFlexible(nodeId: String, ipAddress: String, interfaceName: String)
+    @Query("DELETE FROM network_nodes WHERE routerIp = :routerIp AND (id = :nodeId OR (ipAddress != '' AND ipAddress = :ipAddress) OR (interfaceName != '' AND interfaceName = :interfaceName))")
+    suspend fun deleteNetworkNodesFlexible(routerIp: String, nodeId: String, ipAddress: String, interfaceName: String)
+
+    @Query("DELETE FROM network_nodes WHERE routerIp = :routerIp AND id NOT IN (:activeIds)")
+    suspend fun deleteStaleNodesForRouter(routerIp: String, activeIds: List<String>)
+
+    @Query("DELETE FROM network_nodes WHERE routerIp = :routerIp")
+    suspend fun deleteAllNodesForRouter(routerIp: String)
+
+    @Query("DELETE FROM network_nodes WHERE routerIp = ''")
+    suspend fun deleteUnscopedLegacyNodes()
+
+    @Query("DELETE FROM network_nodes WHERE id LIKE 'node_home_%' OR id LIKE 'demo_%' OR id = 'node_ap_main'")
+    suspend fun purgeDemoNodes()
 
     // ==========================================
     // System Event Logs (Add, Edit, Delete Operations)

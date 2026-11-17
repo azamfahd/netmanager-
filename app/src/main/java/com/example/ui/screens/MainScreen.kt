@@ -67,7 +67,6 @@ enum class MainTab(val title: String, val icon: ImageVector) {
 @Composable
 fun MainScreen(
     viewModel: MainViewModel,
-    onTriggerSignIn: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val navController = rememberNavController()
@@ -92,6 +91,20 @@ fun MainScreen(
     LaunchedEffect(Unit) {
         viewModel.toastEvent.collectLatest { message ->
             snackbarHostState.showSnackbar(message)
+        }
+    }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshData(forceLiveRefresh = true)
+                viewModel.runHeartbeatCheck(silent = true)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -142,7 +155,10 @@ fun MainScreen(
                 },
                 actions = {
                     IconButton(
-                        onClick = { viewModel.refreshData() },
+                        onClick = {
+                            viewModel.refreshData(forceLiveRefresh = true, forceHistorySync = true, notifyOnError = true)
+                            viewModel.runHeartbeatCheck(silent = true)
+                        },
                         modifier = Modifier.testTag("btn_top_refresh")
                     ) {
                         Icon(
@@ -163,8 +179,16 @@ fun MainScreen(
                     }
                     
                     StatusPill(
-                        text = if (connectedState?.isOffline == true) "أوفلاين" else "متصل",
-                        type = if (connectedState?.isOffline == true) StatusType.WARNING else StatusType.SUCCESS,
+                        text = when {
+                            connectedState?.isSyncing == true -> "جاري المزامنة..."
+                            connectedState?.isOffline == true -> "أوفلاين"
+                            else -> "متصل"
+                        },
+                        type = when {
+                            connectedState?.isSyncing == true -> StatusType.INFO
+                            connectedState?.isOffline == true -> StatusType.WARNING
+                            else -> StatusType.SUCCESS
+                        },
                         modifier = Modifier.padding(end = 8.dp)
                     )
                 }
@@ -193,6 +217,13 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            if (connectedState?.isSyncing == true) {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                )
+            }
             // Update Banner
             if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
                 val availableRelease = (updateCheckState as UpdateCheckState.UpdateAvailable).release
@@ -239,8 +270,7 @@ fun MainScreen(
                         },
                         onOpenAnalytics = { username, type ->
                             navController.navigate(Screen.UsageAnalytics(username, type))
-                        },
-                        onTriggerSignIn = onTriggerSignIn
+                        }
                     )
                 }
                 composable<Screen.UsageAnalytics> { backStackEntry ->
@@ -346,7 +376,7 @@ fun MainScreen(
                         onOpenAnalytics = { type ->
                             navController.navigate(Screen.UsageAnalytics(args.username, type))
                         },
-                        onRefresh = { viewModel.refreshData() }
+                        onRefresh = { viewModel.refreshData(forceLiveRefresh = true, notifyOnError = true) }
                     )
                 }
             }
@@ -454,20 +484,30 @@ fun MainPagerContent(
     onOpenPrintScreen: (List<com.example.data.model.HotspotCard>) -> Unit,
     onOpenSessionDetail: (String) -> Unit,
     onOpenAdminAudit: () -> Unit,
-    onOpenAnalytics: (String, String) -> Unit,
-    onTriggerSignIn: () -> Unit
+    onOpenAnalytics: (String, String) -> Unit
 ) {
     val pagerState = rememberPagerState(initialPage = 0) { MainTab.entries.size }
     val scope = rememberCoroutineScope()
     val tabScrollState = rememberScrollState()
     var showDashboardPrintDialog by remember { mutableStateOf(false) }
 
-    // Smoothly scroll the floating dock so that the selected tab is always in view
+    // Smoothly scroll the floating dock so that the selected tab is always in view and sync fresh data
     LaunchedEffect(pagerState.currentPage) {
         val totalTabs = MainTab.entries.size
         if (totalTabs > 1 && tabScrollState.maxValue > 0) {
             val targetScroll = (tabScrollState.maxValue.toFloat() * (pagerState.currentPage.toFloat() / (totalTabs - 1).toFloat())).toInt()
             tabScrollState.animateScrollTo(targetScroll)
+        }
+        val currentTab = MainTab.entries[pagerState.currentPage]
+        when (currentTab) {
+            MainTab.NODES -> {
+                viewModel.refreshData(forceLiveRefresh = true)
+                viewModel.runHeartbeatCheck(silent = true)
+            }
+            MainTab.ACTIVE_USERS, MainTab.CARDS, MainTab.PROFILES, MainTab.DASHBOARD, MainTab.TOOLS, MainTab.FINANCE -> {
+                viewModel.refreshData(forceLiveRefresh = true)
+            }
+            else -> {}
         }
     }
 
@@ -540,7 +580,6 @@ fun MainPagerContent(
                 MainTab.TOOLS -> NetworkToolsScreen(
                     viewModel = viewModel,
                     onOpenSystemEventLog = { scope.launch { pagerState.animateScrollToPage(MainTab.LOGS.ordinal) } },
-                    onTriggerSignIn = onTriggerSignIn,
                     onOpenAdminAudit = onOpenAdminAudit,
                     modifier = Modifier.padding(bottom = 78.dp)
                 )

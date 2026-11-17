@@ -106,12 +106,6 @@ object FinanceAnalyticsEngine {
 
     fun extractTimestampFromCardMetadata(card: HotspotCard, nowMillis: Long): Long? {
         extractExplicitDateFromCardMetadata(card, nowMillis)?.let { return it }
-
-        val uptimeSec = NetworkUtils.parseUptimeToSeconds(card.uptime)
-        if (uptimeSec > 0L) {
-            val approx = nowMillis - (uptimeSec * 1000L)
-            if (approx in MIN_VALID_EPOCH_MS..nowMillis) return approx
-        }
         return null
     }
 
@@ -400,7 +394,8 @@ object FinanceAnalyticsEngine {
         loginHistory: List<UserLoginHistoryEntity>,
         archivedSessions: List<SessionArchiveEntity>,
         savedMonthlyRecords: List<MonthlyProfitRecordEntity>,
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        savedPackageBreakdownsByMonth: Map<String, List<MonthlyPackageSales>> = emptyMap()
     ): List<MonthlySalesSummary> {
         val currentYm = timestampToYearMonth(nowMillis)
         val packagePriceMap = resolveAllPackagePricings(profiles, allCards, pricings, assignments)
@@ -621,12 +616,20 @@ object FinanceAnalyticsEngine {
         dataMonths.addAll(extraGenByMonth.keys)
         dataMonths.addAll(extraBytesByMonth.keys)
 
-        val savedRecordsMap = savedMonthlyRecords.associateBy { it.monthKey }
-        val nonEmptySavedMonths = savedMonthlyRecords
+        val validSavedRecords = savedMonthlyRecords.filter { rec ->
+            rec.year in 2020..2035 &&
+                rec.month in 1..12 &&
+                rec.totalRevenue.isFinite() && rec.totalRevenue >= 0.0 &&
+                rec.totalCost.isFinite() && rec.totalCost >= 0.0 &&
+                rec.netProfit.isFinite() && rec.netProfit >= 0.0 &&
+                rec.soldCardsCount >= 0 &&
+                rec.totalCardsCount >= rec.soldCardsCount &&
+                rec.totalBytesConsumed >= 0L
+        }
+        val savedRecordsMap = validSavedRecords.associateBy { it.monthKey }
+        val nonEmptySavedMonths = validSavedRecords
             .filter {
-                it.year in 2020..2035 &&
-                    it.month in 1..12 &&
-                    (it.soldCardsCount > 0 || it.totalCardsCount > 0 || it.totalRevenue > 0.0 || it.totalBytesConsumed > 0L)
+                it.soldCardsCount > 0 || it.totalCardsCount > 0 || it.totalRevenue > 0.0 || it.totalBytesConsumed > 0L
             }
             .map { YearMonth(it.year, it.month) }
 
@@ -664,64 +667,46 @@ object FinanceAnalyticsEngine {
             val extraGen = extraGenByMonth[ym] ?: 0
             val extraTargetRev = extraTargetRevByMonth[ym] ?: 0.0
             val monthBytes = bytesByMonth[ym] ?: 0L
-
-            val hasLiveData = genItems.isNotEmpty() || soldItems.isNotEmpty() || extraGen > 0 || monthBytes > 0L
             val savedRec = savedRecordsMap[ym.key]
 
-            if (!hasLiveData && savedRec != null &&
-                (savedRec.soldCardsCount > 0 || savedRec.totalCardsCount > 0 || savedRec.totalRevenue > 0.0 || savedRec.totalBytesConsumed > 0L)
-            ) {
-                val gen = savedRec.totalCardsCount.coerceAtLeast(savedRec.soldCardsCount)
-                val sold = savedRec.soldCardsCount
-                val unsold = (gen - sold).coerceAtLeast(0)
-                val rev = savedRec.totalRevenue
-                val cost = savedRec.totalCost
-                val profit = savedRec.netProfit.takeIf { it > 0.0 } ?: (rev - cost).coerceAtLeast(0.0)
-                val salesPct = if (gen > 0) ((sold.toFloat() / gen.toFloat()) * 100f).coerceIn(0f, 100f) else if (sold > 0) 100f else 0f
-                val pkgList = if (savedRec.topSellingProfile.isNotBlank() && sold > 0) {
-                    listOf(
-                        MonthlyPackageSales(
-                            packageName = savedRec.topSellingProfile,
-                            cardsSold = sold,
-                            totalRevenue = rev,
-                            netProfit = profit,
-                            sharePercentage = 100f
-                        )
-                    )
-                } else emptyList()
+            val liveGen = genItems.size + extraGen
+            val liveSold = soldItems.size
+            val liveRev = soldItems.sumOf { it.salePrice }
+            val liveCost = soldItems.sumOf { it.costPrice }
+            val liveBytes = monthBytes
 
-                MonthlySalesSummary(
-                    monthKey = ym.key,
-                    monthName = ym.labelAr,
-                    totalCardsGenerated = gen,
-                    totalCardsSold = sold,
-                    totalCardsUnsold = unsold,
-                    totalRevenue = rev,
-                    totalCost = cost,
-                    netProfit = profit,
-                    potentialUnsoldValue = 0.0,
-                    salesPercentage = salesPct,
-                    targetDeficit = 0.0,
-                    isCurrentMonth = (ym == currentYm),
-                    packageBreakdown = pkgList,
-                    dailyBreakdown = emptyList(),
-                    totalBytesConsumed = savedRec.totalBytesConsumed
+            val hasLivePresence = liveGen > 0 || liveSold > 0 || liveRev > 0.0
+            val gen = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.totalCardsCount > liveGen) savedRec.totalCardsCount else liveGen
+            val sold = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.soldCardsCount > liveSold) savedRec.soldCardsCount else liveSold
+            val unsold = if (hasLivePresence) unsoldItems.size else if (ym != currentYm && savedRec != null) (gen - sold).coerceAtLeast(0) else unsoldItems.size
+            val rev = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.totalRevenue > liveRev) savedRec.totalRevenue else liveRev
+            val cost = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.totalCost > liveCost) savedRec.totalCost else liveCost
+            val profit = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.netProfit > (rev - cost)) savedRec.netProfit else (rev - cost).coerceAtLeast(0.0)
+            val totalBytes = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.totalBytesConsumed > liveBytes) savedRec.totalBytesConsumed else liveBytes
+
+            val restoredBreakdown = savedPackageBreakdownsByMonth[ym.key].orEmpty()
+            val pkgList = when {
+                restoredBreakdown.isNotEmpty() -> restoredBreakdown
+                sold > 0 && rev > 0.0 -> listOf(
+                    MonthlyPackageSales(
+                        packageName = savedRec?.topSellingProfile?.takeIf { it.isNotBlank() } ?: "باقة عامة",
+                        cardsSold = sold,
+                        totalRevenue = rev,
+                        netProfit = profit,
+                        sharePercentage = 100f
+                    )
                 )
-            } else {
-                val totalGen = genItems.size + extraGen
-                val totalSold = soldItems.size
-                val totalUnsold = unsoldItems.size
-                val revenue = soldItems.sumOf { it.salePrice }
-                val cost = soldItems.sumOf { it.costPrice }
-                val profit = (revenue - cost).coerceAtLeast(0.0)
-                val potentialUnsold = unsoldItems.sumOf { it.salePrice }
-                val targetRev = genItems.sumOf { it.salePrice } + extraTargetRev
-                val deficit = (targetRev - revenue).coerceAtLeast(0.0)
-                val salesPct = when {
-                    totalGen > 0 -> ((totalSold.toFloat() / totalGen.toFloat()) * 100f).coerceIn(0f, 100f)
-                    totalSold > 0 -> 100f
-                    else -> 0f
-                }
+                else -> emptyList()
+            }
+
+            val potentialUnsold = unsoldItems.sumOf { it.salePrice }
+            val targetRev = genItems.sumOf { it.salePrice } + extraTargetRev
+            val deficit = (targetRev - rev).coerceAtLeast(0.0)
+            val salesPct = when {
+                gen > 0 -> ((sold.toFloat() / gen.toFloat()) * 100f).coerceIn(0f, 100f)
+                sold > 0 -> 100f
+                else -> 0f
+            }
 
                 val pkgBreakdown = soldItems
                     .groupBy { it.profileKey }
@@ -733,8 +718,8 @@ object FinanceAnalyticsEngine {
                         val pkgCost = pkgItems.sumOf { it.costPrice }
                         val pkgProfit = (pkgRev - pkgCost).coerceAtLeast(0.0)
                         val share = when {
-                            revenue > 0.0 -> ((pkgRev / revenue) * 100f).toFloat().coerceIn(0f, 100f)
-                            totalSold > 0 -> ((pkgSold.toFloat() / totalSold.toFloat()) * 100f).coerceIn(0f, 100f)
+                            rev > 0.0 -> ((pkgRev / rev) * 100f).toFloat().coerceIn(0f, 100f)
+                            sold > 0 -> ((pkgSold.toFloat() / sold.toFloat()) * 100f).coerceIn(0f, 100f)
                             else -> 0f
                         }
                         MonthlyPackageSales(
@@ -768,24 +753,23 @@ object FinanceAnalyticsEngine {
                         )
                     }
 
-                MonthlySalesSummary(
-                    monthKey = ym.key,
-                    monthName = ym.labelAr,
-                    totalCardsGenerated = totalGen,
-                    totalCardsSold = totalSold,
-                    totalCardsUnsold = totalUnsold,
-                    totalRevenue = revenue,
-                    totalCost = cost,
-                    netProfit = profit,
-                    potentialUnsoldValue = potentialUnsold,
-                    salesPercentage = salesPct,
-                    targetDeficit = deficit,
-                    isCurrentMonth = (ym == currentYm),
-                    packageBreakdown = pkgBreakdown,
-                    dailyBreakdown = dailyBreakdown,
-                    totalBytesConsumed = monthBytes
-                )
-            }
+            MonthlySalesSummary(
+                monthKey = ym.key,
+                monthName = ym.labelAr,
+                totalCardsGenerated = gen,
+                totalCardsSold = sold,
+                totalCardsUnsold = unsold,
+                totalRevenue = rev,
+                totalCost = cost,
+                netProfit = profit,
+                potentialUnsoldValue = potentialUnsold,
+                salesPercentage = salesPct,
+                targetDeficit = deficit,
+                isCurrentMonth = (ym == currentYm),
+                packageBreakdown = if (restoredBreakdown.isNotEmpty()) restoredBreakdown else if (pkgBreakdown.isNotEmpty()) pkgBreakdown else pkgList,
+                dailyBreakdown = dailyBreakdown,
+                totalBytesConsumed = totalBytes
+            )
         }
 
         return rawSummaries.mapIndexed { index, item ->
