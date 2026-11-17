@@ -1151,7 +1151,8 @@ class MikrotikRepository(
             val description: String,
             val port: Int,
             val useHttps: Boolean,
-            val targetPathUrl: String? = null
+            val targetPathUrl: String? = null,
+            val isMikroTikWebFig: Boolean = false
         ) : VerifyConnectOutcome()
         data class Failure(
             val message: String,
@@ -1169,6 +1170,16 @@ class MikrotikRepository(
         val port: Int,
         val useHttps: Boolean
     )
+
+    private sealed class RaceProtocolWinner {
+        data class SocketSuccess(val config: RouterConnectionConfig) : RaceProtocolWinner()
+        data class RestSuccess(
+            val config: RouterConnectionConfig,
+            val baseUrl: String,
+            val credential: String,
+            val resourceBody: String
+        ) : RaceProtocolWinner()
+    }
 
     private sealed class WebEndpointInspection {
         data class CloudWebPortal(
@@ -1358,218 +1369,257 @@ class MikrotikRepository(
                     appDao?.deleteUnscopedLegacyNodes()
                 } catch (_: Exception) {}
 
-                // Verify DNS first when connecting to a domain / DDNS hostname
-                if (!RouterConnectionParser.isIpv4(cleanConfig.ipAddress)) {
-                    val dnsOk = NetworkUtils.resolveHostAddress(cleanConfig.ipAddress)
-                    if (!dnsOk) {
-                        return@withContext VerifyConnectOutcome.Failure(
-                            "تعذر الوصول إلى النطاق (${cleanConfig.ipAddress}). تأكد من صحة اسم الدومين ومن توفر اتصال بالإنترنت أو الشبكة المحلية."
-                        )
-                    }
+                // Direct, single-stage protocol candidates (no sequential DNS/port-scan pre-stage so MikroTik PSD never triggers)
+                val socketCandidates = mutableListOf<EndpointCandidate>()
+                val restCandidates = mutableListOf<EndpointCandidate>()
+                fun addSocketCandidate(port: Int, useTls: Boolean) {
+                    val c = EndpointCandidate(CandidateProto.SOCKET_API, port, useTls)
+                    if (c !in socketCandidates) socketCandidates.add(c)
+                }
+                fun addRestCandidate(port: Int, useHttps: Boolean) {
+                    val c = EndpointCandidate(CandidateProto.REST_HTTP, port, useHttps)
+                    if (c !in restCandidates) restCandidates.add(c)
                 }
 
-                // Probe open ports on the target host in parallel so closed ports don't cause long timeouts
-                val probedHost = if (cleanConfig.autoDetectProtocol) {
-                    NetworkUtils.probeTargetHost(cleanConfig.ipAddress, cleanConfig.port)
-                } else {
-                    null
-                }
-                val openPorts = probedHost?.openPorts.orEmpty()
-
-                val candidates = mutableListOf<EndpointCandidate>()
-                fun addCandidate(proto: CandidateProto, port: Int, useHttps: Boolean) {
-                    val c = EndpointCandidate(proto, port, useHttps)
-                    if (c !in candidates) candidates.add(c)
-                }
-
-                // Primary user-selected / URL-derived endpoint
                 when (cleanConfig.port) {
-                    8728 -> addCandidate(CandidateProto.SOCKET_API, 8728, false)
-                    8729 -> addCandidate(CandidateProto.SOCKET_API, 8729, true)
-                    443 -> addCandidate(CandidateProto.REST_HTTP, 443, true)
+                    8728 -> addSocketCandidate(8728, false)
+                    8729 -> addSocketCandidate(8729, true)
+                    443 -> addRestCandidate(443, true)
                     80, 8080 -> {
-                        addCandidate(CandidateProto.REST_HTTP, cleanConfig.port, cleanConfig.useHttps)
-                        if (cleanConfig.useHttps) addCandidate(CandidateProto.REST_HTTP, cleanConfig.port, false)
+                        addRestCandidate(cleanConfig.port, cleanConfig.useHttps)
+                        if (cleanConfig.useHttps) addRestCandidate(cleanConfig.port, false)
                     }
                     else -> {
                         if (cleanConfig.useHttps) {
-                            addCandidate(CandidateProto.REST_HTTP, cleanConfig.port, true)
-                            addCandidate(CandidateProto.SOCKET_API, cleanConfig.port, true)
+                            addRestCandidate(cleanConfig.port, true)
+                            addSocketCandidate(cleanConfig.port, true)
                         } else {
-                            addCandidate(CandidateProto.SOCKET_API, cleanConfig.port, false)
-                            addCandidate(CandidateProto.REST_HTTP, cleanConfig.port, false)
+                            addSocketCandidate(cleanConfig.port, false)
+                            addRestCandidate(cleanConfig.port, false)
                         }
                     }
                 }
 
-                // Smart Multi-Protocol Cascade across any open MikroTik endpoints on the host
                 if (cleanConfig.autoDetectProtocol) {
-                    val portsPool = if (openPorts.isNotEmpty()) openPorts else listOf(8728, 8729, 443, 80, 8080)
-                    if (8728 in portsPool) addCandidate(CandidateProto.SOCKET_API, 8728, false)
-                    if (8729 in portsPool) addCandidate(CandidateProto.SOCKET_API, 8729, true)
-                    if (443 in portsPool) addCandidate(CandidateProto.REST_HTTP, 443, true)
-                    if (80 in portsPool) addCandidate(CandidateProto.REST_HTTP, 80, false)
-                    if (8080 in portsPool) addCandidate(CandidateProto.REST_HTTP, 8080, false)
+                    addSocketCandidate(8728, false)
+                    addSocketCandidate(8729, true)
+                    addRestCandidate(443, true)
+                    addRestCandidate(80, false)
+                    addRestCandidate(8080, false)
                 }
 
-                // Filter to reachable ports when parallel probe succeeded (keeps primary if user disabled autoDetect)
-                val activeCandidates = if (openPorts.isNotEmpty()) {
-                    candidates.filter { it.port in openPorts }.ifEmpty { candidates }
-                } else {
-                    candidates
-                }
+                val isLocalTarget = RouterConnectionParser.isPrivateOrLocalIpv4(cleanConfig.ipAddress)
+                val socketTimeoutMs = if (isLocalTarget) 3500 else 6500
 
-                var authRejectedMsg: String? = null
-                var lastSslMsg: String? = null
+                val authRejectedRef = java.util.concurrent.atomic.AtomicReference<String?>(null)
+                val lastSslRef = java.util.concurrent.atomic.AtomicReference<String?>(null)
+                val dnsFailedRef = java.util.concurrent.atomic.AtomicBoolean(false)
+                val winnerClaimed = java.util.concurrent.atomic.AtomicBoolean(false)
+                val winnerRef = java.util.concurrent.atomic.AtomicReference<RaceProtocolWinner?>(null)
 
-                for (candidate in activeCandidates) {
-                    if (candidate.proto == CandidateProto.SOCKET_API) {
-                        val socketResult = routerOsApiClient.connectAndLogin(
-                            host = cleanConfig.ipAddress,
-                            port = candidate.port,
-                            username = cleanConfig.username,
-                            password = cleanConfig.password,
-                            timeoutMs = if (RouterConnectionParser.isPrivateOrLocalIpv4(cleanConfig.ipAddress)) 6000 else 10000,
-                            useTls = candidate.useHttps || candidate.port == 8729
-                        )
-                        if (socketResult.isSuccess) {
-                            val workingConfig = cleanConfig.copy(
+                // Race Socket API worker and OkHttp REST worker in parallel
+                coroutineScope {
+                    var socketJob: Job? = null
+                    var restJob: Job? = null
+
+                    socketJob = launch(Dispatchers.IO) {
+                        for (candidate in socketCandidates) {
+                            if (winnerClaimed.get() || authRejectedRef.get() != null) break
+                            val socketResult = routerOsApiClient.connectAndLogin(
+                                host = cleanConfig.ipAddress,
                                 port = candidate.port,
-                                useHttps = candidate.useHttps || candidate.port == 8729
+                                username = cleanConfig.username,
+                                password = cleanConfig.password,
+                                timeoutMs = socketTimeoutMs,
+                                useTls = candidate.useHttps || candidate.port == 8729
                             )
-                            activeConfig = workingConfig
-                            isApiSocketMode = true
-                            performFastInitialHandshake()
-                            var initialSyncError: Exception? = null
-                            syncMutex.withLock {
-                                if (connectionSessionId == sessionId && activeConfig != null) {
-                                    try {
-                                        fetchLiveRouterDataFromSocket()
-                                    } catch (e: Exception) {
-                                        _lastSyncError.value = e.message
-                                        initialSyncError = e
-                                    }
+                            if (socketResult.isSuccess) {
+                                val workingConfig = cleanConfig.copy(
+                                    port = candidate.port,
+                                    useHttps = candidate.useHttps || candidate.port == 8729
+                                )
+                                if (winnerClaimed.compareAndSet(false, true)) {
+                                    winnerRef.set(RaceProtocolWinner.SocketSuccess(workingConfig))
+                                    restJob?.cancel()
+                                } else {
+                                    routerOsApiClient.disconnect()
                                 }
-                            }
-                            return@withContext if (initialSyncError != null) {
-                                VerifyConnectOutcome.Failure(initialSyncError?.message ?: "تعذر جلب البيانات من الراوتر")
-                            } else {
-                                VerifyConnectOutcome.MikroTikSuccess(workingConfig)
-                            }
-                        } else {
-                            val err = socketResult.exceptionOrNull()?.message.orEmpty()
-                            if (err.contains("بيانات الدخول") || err.contains("المصادقة") || err.contains("كلمة المرور")) {
-                                authRejectedMsg = err
                                 break
-                            }
-                            if (err.contains("SSL", ignoreCase = true)) {
-                                lastSslMsg = err
+                            } else {
+                                val throwable = socketResult.exceptionOrNull()
+                                if (throwable is java.net.UnknownHostException) {
+                                    dnsFailedRef.set(true)
+                                }
+                                val err = throwable?.message.orEmpty()
+                                if (err.contains("بيانات الدخول") || err.contains("المصادقة") || err.contains("كلمة المرور")) {
+                                    authRejectedRef.compareAndSet(null, err)
+                                    restJob?.cancel()
+                                    break
+                                }
+                                if (err.contains("SSL", ignoreCase = true)) {
+                                    lastSslRef.compareAndSet(null, err)
+                                }
                             }
                         }
-                    } else {
-                        val protocol = if (candidate.useHttps) "https" else "http"
-                        val baseUrl = "$protocol://${cleanConfig.ipAddress}:${candidate.port}"
-                        val credential = Credentials.basic(cleanConfig.username, cleanConfig.password)
-                        try {
-                            val request = Request.Builder()
-                                .url("$baseUrl/rest/system/resource")
-                                .header("Authorization", credential)
-                                .build()
+                    }
 
-                            probeHttpClient.newCall(request).execute().use { response ->
-                                if (response.isSuccessful) {
-                                    val body = response.body?.string().orEmpty()
-                                    if (body.trimStart().startsWith("{")) {
-                                        parseResource(body)
-                                        routerOsApiClient.disconnect()
-                                        isApiSocketMode = false
-                                        val workingConfig = cleanConfig.copy(
-                                            port = candidate.port,
-                                            useHttps = candidate.useHttps
-                                        )
-                                        activeConfig = workingConfig
-                                        var restSyncError: Exception? = null
-                                        syncMutex.withLock {
-                                            if (connectionSessionId == sessionId && activeConfig != null) {
-                                                try {
-                                                    fetchLiveRouterData(baseUrl, credential)
-                                                } catch (e: Exception) {
-                                                    _lastSyncError.value = e.message
-                                                    restSyncError = e
-                                                }
+                    restJob = launch(Dispatchers.IO) {
+                        val credential = Credentials.basic(cleanConfig.username, cleanConfig.password)
+                        for (candidate in restCandidates) {
+                            if (winnerClaimed.get() || authRejectedRef.get() != null) break
+                            val protocol = if (candidate.useHttps) "https" else "http"
+                            val baseUrl = "$protocol://${cleanConfig.ipAddress}:${candidate.port}"
+                            try {
+                                val request = Request.Builder()
+                                    .url("$baseUrl/rest/system/resource")
+                                    .header("Authorization", credential)
+                                    .build()
+
+                                probeHttpClient.newCall(request).execute().use { response ->
+                                    if (response.isSuccessful) {
+                                        val body = response.body?.string().orEmpty()
+                                        if (body.trimStart().startsWith("{")) {
+                                            val workingConfig = cleanConfig.copy(
+                                                port = candidate.port,
+                                                useHttps = candidate.useHttps
+                                            )
+                                            if (winnerClaimed.compareAndSet(false, true)) {
+                                                winnerRef.set(
+                                                    RaceProtocolWinner.RestSuccess(
+                                                        config = workingConfig,
+                                                        baseUrl = baseUrl,
+                                                        credential = credential,
+                                                        resourceBody = body
+                                                    )
+                                                )
+                                                socketJob?.cancel()
                                             }
+                                            return@launch
                                         }
-                                        return@withContext if (restSyncError != null) {
-                                            VerifyConnectOutcome.Failure(restSyncError?.message ?: "تعذر جلب بيانات REST من الراوتر")
-                                        } else {
-                                            VerifyConnectOutcome.MikroTikSuccess(workingConfig)
+                                    } else if (response.code == 401 || response.code == 403) {
+                                        val errBody = response.body?.string().orEmpty().trimStart()
+                                        if (errBody.startsWith("{") || response.header("WWW-Authenticate").orEmpty().contains("Basic", ignoreCase = true)) {
+                                            authRejectedRef.compareAndSet(
+                                                null,
+                                                "خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة للاتصال بـ REST API في الراوتر."
+                                            )
+                                            socketJob?.cancel()
+                                            return@launch
                                         }
-                                    }
-                                } else if (response.code == 401 || response.code == 403) {
-                                    // Verify if it's RouterOS REST auth rejection (not HTML web portal)
-                                    val errBody = response.body?.string().orEmpty().trimStart()
-                                    if (errBody.startsWith("{") || response.header("WWW-Authenticate").orEmpty().contains("Basic", ignoreCase = true)) {
-                                        authRejectedMsg = "خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة للاتصال بـ REST API في الراوتر."
                                     }
                                 }
-                            }
-                        } catch (e: javax.net.ssl.SSLException) {
-                            lastSslMsg = "فشل التفاوض الأمني HTTPS على المنفذ (${candidate.port}): شهادة غير موثوقة أو غير صالحة."
-                        } catch (_: Exception) {}
+                            } catch (e: javax.net.ssl.SSLException) {
+                                lastSslRef.compareAndSet(
+                                    null,
+                                    "فشل التفاوض الأمني HTTPS على المنفذ (${candidate.port}): شهادة غير موثوقة أو غير صالحة."
+                                )
+                            } catch (e: java.net.UnknownHostException) {
+                                dnsFailedRef.set(true)
+                            } catch (_: Exception) {}
+                        }
                     }
+
+                    socketJob.join()
+                    restJob.join()
                 }
 
-                val rejectedAuth = authRejectedMsg
+                when (val winner = winnerRef.get()) {
+                    is RaceProtocolWinner.SocketSuccess -> {
+                        activeConfig = winner.config
+                        isApiSocketMode = true
+                        var initialSyncError: Exception? = null
+                        syncMutex.withLock {
+                            if (connectionSessionId == sessionId && activeConfig != null) {
+                                try {
+                                    fetchLiveRouterDataFromSocket()
+                                } catch (e: Exception) {
+                                    _lastSyncError.value = e.message
+                                    initialSyncError = e
+                                }
+                            }
+                        }
+                        return@withContext if (initialSyncError != null) {
+                            VerifyConnectOutcome.Failure(initialSyncError?.message ?: "تعذر جلب البيانات من الراوتر")
+                        } else {
+                            VerifyConnectOutcome.MikroTikSuccess(winner.config)
+                        }
+                    }
+                    is RaceProtocolWinner.RestSuccess -> {
+                        parseResource(winner.resourceBody)
+                        routerOsApiClient.disconnect()
+                        isApiSocketMode = false
+                        activeConfig = winner.config
+                        var restSyncError: Exception? = null
+                        syncMutex.withLock {
+                            if (connectionSessionId == sessionId && activeConfig != null) {
+                                try {
+                                    fetchLiveRouterData(winner.baseUrl, winner.credential)
+                                } catch (e: Exception) {
+                                    _lastSyncError.value = e.message
+                                    restSyncError = e
+                                }
+                            }
+                        }
+                        return@withContext if (restSyncError != null) {
+                            VerifyConnectOutcome.Failure(restSyncError?.message ?: "تعذر جلب بيانات REST من الراوتر")
+                        } else {
+                            VerifyConnectOutcome.MikroTikSuccess(winner.config)
+                        }
+                    }
+                    null -> {}
+                }
+
+                val rejectedAuth = authRejectedRef.get()
                 if (rejectedAuth != null) {
                     return@withContext VerifyConnectOutcome.Failure(rejectedAuth)
                 }
 
-                // Neither RouterOS Socket API nor RouterOS REST worked — inspect if the host is a Cloud Web AC Portal (e.g. APlusWiFi) or WebFig
+                // Neither RouterOS Socket API nor RouterOS REST succeeded — inspect Web endpoint directly
                 val webInspection = inspectWebEndpoint(
                     host = cleanConfig.ipAddress,
-                    openPorts = openPorts,
+                    openPorts = emptyList(),
                     preferredPort = cleanConfig.port,
                     preferredHttps = cleanConfig.useHttps,
                     preferredPath = cleanConfig.preferredPath
                 )
                 when (webInspection) {
                     is WebEndpointInspection.CloudWebPortal -> {
-                        val isEmailOrDomainPortal = webInspection.isAplusWifi ||
-                            cleanConfig.username.contains("@") ||
-                            parsedHost.isDomain ||
-                            !cleanConfig.preferredPath.isNullOrBlank()
-                        if (isEmailOrDomainPortal) {
-                            val label = if (webInspection.isAplusWifi) {
-                                "لوحة تحكم APlusWiFi السحابية"
-                            } else {
-                                webInspection.title.ifBlank { "لوحة تحكم السيرفر عبر الويب" }
-                            }
-                            return@withContext VerifyConnectOutcome.WebPortalDetected(
-                                url = webInspection.url,
-                                serverName = cleanConfig.name.ifBlank { cleanConfig.ipAddress },
-                                isAplusWifi = webInspection.isAplusWifi,
-                                description = "تم التعرف على السيرفر (${cleanConfig.ipAddress}) كـ $label.",
-                                port = webInspection.port,
-                                useHttps = webInspection.useHttps,
-                                targetPathUrl = webInspection.targetPathUrl
-                            )
+                        val label = if (webInspection.isAplusWifi) {
+                            "لوحة تحكم APlusWiFi السحابية"
                         } else {
-                            return@withContext VerifyConnectOutcome.Failure(
-                                message = "تم الوصول لصفحة ويب على (${cleanConfig.ipAddress}) لكن منافذ MikroTik API (8728/8729) و REST مغلقة. يمكنك فتح لوحة الويب عبر المتصفح الداخلي.",
-                                fallbackPortalUrl = webInspection.url
-                            )
+                            webInspection.title.ifBlank { "لوحة تحكم السيرفر عبر الويب" }
                         }
+                        return@withContext VerifyConnectOutcome.WebPortalDetected(
+                            url = webInspection.url,
+                            serverName = cleanConfig.name.ifBlank { cleanConfig.ipAddress },
+                            isAplusWifi = webInspection.isAplusWifi,
+                            description = "تم التعرف على السيرفر (${cleanConfig.ipAddress}) كـ $label.",
+                            port = webInspection.port,
+                            useHttps = webInspection.useHttps,
+                            targetPathUrl = webInspection.targetPathUrl,
+                            isMikroTikWebFig = false
+                        )
                     }
                     is WebEndpointInspection.MikroTikWebFig -> {
-                        return@withContext VerifyConnectOutcome.Failure(
-                            message = "تم الوصول إلى صفحة WebFig لراوتر ميكروتك على (${cleanConfig.ipAddress})، لكن خدمة API (8728/8729) أو REST غير مفعلة أو محجوبة. فعّل api من IP -> Services أو افتح WebFig بالمتصفح الداخلي.",
-                            fallbackPortalUrl = webInspection.url
+                        return@withContext VerifyConnectOutcome.WebPortalDetected(
+                            url = webInspection.url,
+                            serverName = cleanConfig.name.ifBlank { "راوتر ${cleanConfig.ipAddress}" },
+                            isAplusWifi = false,
+                            description = "تم الوصول إلى واجهة WebFig لراوتر ميكروتك (${cleanConfig.ipAddress}) وفتحها مباشرة.",
+                            port = webInspection.port,
+                            useHttps = webInspection.useHttps,
+                            targetPathUrl = webInspection.url,
+                            isMikroTikWebFig = true
                         )
                     }
                     WebEndpointInspection.None -> {
+                        val lastSslMsg = lastSslRef.get()
                         val extraSslNote = if (lastSslMsg != null) "\n($lastSslMsg)" else ""
-                        val portsNote = if (openPorts.isNotEmpty()) "المنافذ المفتوحة المكتشفة: ${openPorts.joinToString(", ")}." else "لم يستجب أي منفذ اتصال."
-                        val errorMsg = "تعذر الاتصال بالسيرفر أو الراوتر (${cleanConfig.ipAddress}). $portsNote$extraSslNote\nتأكد من تفعيل خدمة API (8728) أو REST، أو من اتصال جهازك بالشبكة/الإنترنت."
+                        val errorMsg = if (dnsFailedRef.get() && !RouterConnectionParser.isIpv4(cleanConfig.ipAddress)) {
+                            "تعذر الوصول إلى النطاق (${cleanConfig.ipAddress}). تأكد من صحة اسم الدومين ومن توفر اتصال بالإنترنت أو الشبكة المحلية."
+                        } else {
+                            "تعذر الاتصال بالسيرفر أو الراوتر (${cleanConfig.ipAddress}).$extraSslNote\nتأكد من اتصال جهازك بنفس شبكة الراوتر أو بالإنترنت، ومن صحة العنوان وبيانات الدخول."
+                        }
                         return@withContext VerifyConnectOutcome.Failure(errorMsg)
                     }
                 }

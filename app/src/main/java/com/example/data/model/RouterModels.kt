@@ -66,8 +66,12 @@ sealed class ConnectionState {
         val username: String,
         val password: String,
         val isAplusWifi: Boolean = false,
+        val isMikroTikWebFig: Boolean = false,
         val subtitle: String = "",
-        val targetPathUrl: String? = null
+        val targetPathUrl: String? = null,
+        val isOfflinePreview: Boolean = false,
+        val cachedArchivePath: String? = null,
+        val lastSavedTime: Long = 0L
     ) : ConnectionState()
     data class Error(val message: String) : ConnectionState()
 }

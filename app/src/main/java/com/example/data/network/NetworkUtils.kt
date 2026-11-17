@@ -132,8 +132,9 @@ object NetworkUtils {
 
             // Target candidates to probe: detected gateway first, then standard 192.168.88.1 if gateway is different
             val ipCandidates = if (gateway != "192.168.88.1") listOf(gateway, "192.168.88.1") else listOf(gateway)
-            // MikroTik standard service ports to test
-            val portsToTest = listOf(8728, 8729, 8291, 80, 443, 8080)
+            // Probe only MikroTik API & Web/REST ports gently in staggered pairs to avoid triggering router PSD port-scan rules
+            val primaryPair = listOf(8728, 80)
+            val secondaryPair = listOf(8729, 443)
 
             var resolvedIp = gateway
             var activePort = 8728
@@ -143,28 +144,19 @@ object NetworkUtils {
             var serviceType = "MikroTik API (8728)"
 
             for (targetIp in ipCandidates) {
-                // Test all candidate ports in parallel with short timeout for instant response
-                val testedPorts = coroutineScope {
-                    portsToTest.map { port ->
-                        async {
-                            val open = testSocketConnection(targetIp, port, timeoutMs = 450)
-                            port to open
-                        }
-                    }.awaitAll()
+                val pair1 = coroutineScope {
+                    primaryPair.map { port -> async { port to testSocketConnection(targetIp, port, timeoutMs = 750) } }.awaitAll()
                 }
-
-                val reachablePorts = testedPorts.filter { it.second }.map { it.first }
+                kotlinx.coroutines.delay(120)
+                val pair2 = coroutineScope {
+                    secondaryPair.map { port -> async { port to testSocketConnection(targetIp, port, timeoutMs = 750) } }.awaitAll()
+                }
+                val reachablePorts = (pair1 + pair2).filter { it.second }.map { it.first }
                 if (reachablePorts.isNotEmpty()) {
                     resolvedIp = targetIp
                     foundReachable = true
                     openPortsList = reachablePorts
 
-                    // Intelligently select best port for MikroTik connection:
-                    // 1) 8728 API is premier
-                    // 2) 8729 API-SSL
-                    // 3) 80 HTTP / REST
-                    // 4) 443 HTTPS
-                    // 5) First open port
                     activePort = when {
                         reachablePorts.contains(8728) -> 8728
                         reachablePorts.contains(8729) -> 8729
@@ -176,7 +168,6 @@ object NetworkUtils {
                     serviceType = when (activePort) {
                         8728 -> "منفذ MikroTik API الرسمي (8728)"
                         8729 -> "منفذ MikroTik API-SSL المشفر (8729)"
-                        8291 -> "منفذ WinBox النشط (8291)"
                         80 -> "منفذ WebFig / REST (80)"
                         443 -> "منفذ WebFig HTTPS (443)"
                         else -> "منفذ مخصص ($activePort)"
@@ -198,6 +189,21 @@ object NetworkUtils {
                 else
                     "تم التعرف على عنوان بوابة الشبكة ($resolvedIp) تلقائياً من شبكتك المتصلة"
             )
+        }
+    }
+
+    fun isNetworkOnline(context: Context): Boolean {
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+            val network = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(network) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -257,20 +263,23 @@ object NetworkUtils {
             )
         }
 
-        val basePorts = listOf(8728, 8729, 443, 80, 8080, 8291)
+        val basePorts = listOf(8728, 8729, 443, 80)
         val portsToTest = if (preferredPort != null && preferredPort !in basePorts) {
             listOf(preferredPort) + basePorts
         } else {
             basePorts
         }
-        val timeoutMs = if (RouterConnectionParser.isPrivateOrLocalIpv4(cleanHost)) 650 else 2200
+        val timeoutMs = if (RouterConnectionParser.isPrivateOrLocalIpv4(cleanHost)) 800 else 2200
 
-        val testedPorts = coroutineScope {
-            portsToTest.map { port ->
-                async {
-                    port to testSocketConnection(cleanHost, port, timeoutMs = timeoutMs)
-                }
-            }.awaitAll()
+        val testedPorts = mutableListOf<Pair<Int, Boolean>>()
+        portsToTest.chunked(2).forEachIndexed { idx, chunk ->
+            if (idx > 0) kotlinx.coroutines.delay(110)
+            val chunkRes = coroutineScope {
+                chunk.map { port ->
+                    async { port to testSocketConnection(cleanHost, port, timeoutMs = timeoutMs) }
+                }.awaitAll()
+            }
+            testedPorts.addAll(chunkRes)
         }
 
         val reachablePorts = testedPorts.filter { it.second }.map { it.first }

@@ -57,7 +57,13 @@ fun AppNavigation(viewModel: MainViewModel) {
         is ConnectionState.WebPortal -> {
             WebPortalScreen(
                 portalState = state,
-                onDisconnect = { viewModel.disconnect() }
+                onDisconnect = { viewModel.disconnect() },
+                onRetryApiConnection = if (state.isMikroTikWebFig) {
+                    { viewModel.retryApiConnectionFromWebPortal(state) }
+                } else {
+                    null
+                },
+                onArchiveSaved = { meta -> viewModel.notifyPortalSnapshotSaved(meta) }
             )
         }
         else -> {

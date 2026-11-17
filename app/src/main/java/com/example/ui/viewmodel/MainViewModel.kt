@@ -1560,26 +1560,53 @@ class MainViewModel(
         serverName: String,
         username: String,
         password: String,
-        isAplusWifi: Boolean = url.contains("apluswifi.com", ignoreCase = true)
+        isAplusWifi: Boolean = url.contains("apluswifi.com", ignoreCase = true),
+        isMikroTikWebFig: Boolean = false
     ) {
         _fallbackWebPortalUrl.value = null
+        val cachedMeta = appContext?.let { ctx ->
+            com.example.data.local.WebPortalCacheManager.loadMeta(ctx, url)
+        }
+        val deviceOffline = appContext?.let { ctx ->
+            !NetworkUtils.isNetworkOnline(ctx)
+        } ?: false
+        val useOfflineArchive = deviceOffline && cachedMeta?.hasValidArchive == true
+        val resolvedTitle = serverName.ifBlank { cachedMeta?.serverName ?: url }
         _connectionState.value = ConnectionState.WebPortal(
-            serverName = serverName.ifBlank { url },
-            url = url,
-            username = username,
+            serverName = resolvedTitle,
+            url = if (useOfflineArchive) (cachedMeta?.lastVisitedUrl?.ifBlank { url } ?: url) else url,
+            username = username.ifBlank { cachedMeta?.username.orEmpty() },
             password = password,
-            isAplusWifi = isAplusWifi,
-            subtitle = if (isAplusWifi) "لوحة تحكم APlusWiFi السحابية" else "واجهة التحكم عبر الويب"
+            isAplusWifi = isAplusWifi || (cachedMeta?.isAplusWifi == true),
+            isMikroTikWebFig = isMikroTikWebFig || (cachedMeta?.isMikroTikWebFig == true),
+            subtitle = when {
+                isMikroTikWebFig || cachedMeta?.isMikroTikWebFig == true -> "واجهة إدارة الراوتر WebFig"
+                isAplusWifi || cachedMeta?.isAplusWifi == true -> "لوحة تحكم APlusWiFi السحابية"
+                else -> "واجهة التحكم عبر الويب"
+            },
+            targetPathUrl = cachedMeta?.targetPathUrl,
+            isOfflinePreview = useOfflineArchive,
+            cachedArchivePath = cachedMeta?.archiveFilePath,
+            lastSavedTime = cachedMeta?.lastSavedTime ?: 0L
         )
     }
 
     private val _latestCachedSnapshot = MutableStateFlow<com.example.data.local.RouterSnapshot?>(null)
     val latestCachedSnapshot: StateFlow<com.example.data.local.RouterSnapshot?> = _latestCachedSnapshot.asStateFlow()
 
+    private val _latestCachedPortal = MutableStateFlow<com.example.data.local.CachedPortalMeta?>(null)
+    val latestCachedPortal: StateFlow<com.example.data.local.CachedPortalMeta?> = _latestCachedPortal.asStateFlow()
+
+    fun notifyPortalSnapshotSaved(meta: com.example.data.local.CachedPortalMeta) {
+        _latestCachedPortal.value = meta
+    }
+
     fun refreshCachedSnapshot(context: Context) {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val snapshot = com.example.data.local.RouterCacheManager.getLatestSnapshot(context)
             _latestCachedSnapshot.value = snapshot
+            val portalMeta = com.example.data.local.WebPortalCacheManager.getLatestCachedPortal(context)
+            _latestCachedPortal.value = portalMeta
         }
     }
 
@@ -1597,31 +1624,83 @@ class MainViewModel(
                 com.example.data.local.RouterCacheManager.getLatestSnapshot(ctx)
             }
 
-            if (snapshot == null) {
-                _toastEvent.emit("لا توجد بيانات راوتر محفوظة محلياً بعد. يرجى الاتصال بالراوتر أولاً لحفظ البيانات.")
+            if (snapshot != null) {
+                repository.restoreFromSnapshot(snapshot)
+                _currentConfig.value = RouterConnectionConfig(
+                    ipAddress = snapshot.ipAddress,
+                    name = snapshot.routerName
+                )
+
+                val displayRouterName = snapshot.routerName.ifBlank { "راوتر MikroTik (${snapshot.ipAddress})" }
+                _connectionState.value = ConnectionState.Connected(
+                    routerName = displayRouterName,
+                    ipAddress = snapshot.ipAddress,
+                    isDemo = false,
+                    isSyncing = false,
+                    isFromCache = true,
+                    isOffline = true,
+                    lastSyncTime = snapshot.timestamp,
+                    offlineReason = "وضع التصفح والعمل المحلي (بدون إنترنت)"
+                )
+                _toastEvent.emit("⚡ تم الدخول للبيانات المحلية بنجاح! الكروت (${snapshot.cards.size}) والباقات متاحة للعمل.")
+                startAutoRefresh()
                 return@launch
             }
 
-            repository.restoreFromSnapshot(snapshot)
-            _currentConfig.value = RouterConnectionConfig(
-                ipAddress = snapshot.ipAddress,
-                name = snapshot.routerName
-            )
+            // Fall back to saved offline Web Portal archive if present
+            val portalMeta = if (!targetIp.isNullOrBlank()) {
+                com.example.data.local.WebPortalCacheManager.loadMeta(ctx, targetIp)
+            } else {
+                com.example.data.local.WebPortalCacheManager.getLatestCachedPortal(ctx)
+            }
+            if (portalMeta != null) {
+                val savedRouter = if (portalMeta.host.isNotBlank()) {
+                    database.appDao().getSavedRouterByIp(portalMeta.host)
+                } else null
+                _connectionState.value = ConnectionState.WebPortal(
+                    serverName = portalMeta.serverName.ifBlank { portalMeta.host },
+                    url = portalMeta.lastVisitedUrl.ifBlank { portalMeta.baseUrl },
+                    username = portalMeta.username.ifBlank { savedRouter?.username.orEmpty() },
+                    password = savedRouter?.password.orEmpty(),
+                    isAplusWifi = portalMeta.isAplusWifi,
+                    isMikroTikWebFig = portalMeta.isMikroTikWebFig,
+                    subtitle = "وضع الأوفلاين • نسخة محفوظة محلياً",
+                    targetPathUrl = portalMeta.targetPathUrl,
+                    isOfflinePreview = true,
+                    cachedArchivePath = portalMeta.archiveFilePath,
+                    lastSavedTime = portalMeta.lastSavedTime
+                )
+                _toastEvent.emit("🟠 وضع التصفح المؤقت (بدون إنترنت): تم فتح آخر نسخة محفوظة من (${portalMeta.serverName})")
+                return@launch
+            }
 
-            val displayRouterName = snapshot.routerName.ifBlank { "راوتر MikroTik (${snapshot.ipAddress})" }
-            _connectionState.value = ConnectionState.Connected(
-                routerName = displayRouterName,
-                ipAddress = snapshot.ipAddress,
-                isDemo = false,
-                isSyncing = false,
-                isFromCache = true,
-                isOffline = true,
-                lastSyncTime = snapshot.timestamp,
-                offlineReason = "وضع التصفح والعمل المحلي (بدون إنترنت)"
-            )
-            _toastEvent.emit("⚡ تم الدخول للبيانات المحلية بنجاح! الكروت (${snapshot.cards.size}) والباقات متاحة للعمل.")
-            startAutoRefresh()
+            _toastEvent.emit("لا توجد بيانات راوتر أو لوحة ويب محفوظة محلياً بعد. يرجى الاتصال أولاً لحفظ النسخة.")
         }
+    }
+
+    fun retryApiConnectionFromWebPortal(portal: ConnectionState.WebPortal) {
+        val ctx = appContext
+        val parsed = com.example.data.network.RouterConnectionParser.normalizeHostInput(portal.url)
+        val host = parsed.host.ifBlank {
+            runCatching { android.net.Uri.parse(portal.url).host }.getOrNull().orEmpty()
+        }
+        if (host.isBlank()) {
+            viewModelScope.launch {
+                _toastEvent.emit("تعذر استخراج عنوان الراوتر لإعادة تجربة منفذ API (8728)")
+            }
+            return
+        }
+        val config = RouterConnectionConfig(
+            name = portal.serverName,
+            ipAddress = host,
+            port = 8728,
+            username = portal.username,
+            password = portal.password,
+            useHttps = false,
+            autoDetectProtocol = true,
+            isDemoMode = false
+        )
+        connectToRouter(config, saveToFavorites = true, context = ctx)
     }
 
     fun forceSaveCurrentLocalSnapshot(context: Context) {
@@ -1678,6 +1757,37 @@ class MainViewModel(
             val targetContext = context ?: appContext
             _currentConfig.value = normalizedConfig
 
+            val cachedPortalMeta = if (!normalizedConfig.isDemoMode && targetContext != null && normalizedConfig.ipAddress.isNotBlank()) {
+                com.example.data.local.WebPortalCacheManager.loadMeta(targetContext, normalizedConfig.ipAddress)
+            } else {
+                null
+            }
+
+            // Immediate offline launch for saved remote/domain Web Portals when device has no internet
+            val isRemoteDomain = !com.example.data.network.RouterConnectionParser.isIpv4(normalizedConfig.ipAddress)
+            if (isRemoteDomain &&
+                cachedPortalMeta != null &&
+                cachedPortalMeta.hasValidArchive &&
+                targetContext != null &&
+                !NetworkUtils.isNetworkOnline(targetContext)
+            ) {
+                _toastEvent.emit("🟠 لا يوجد اتصال بالإنترنت — تم فتح آخر نسخة محفوظة من (${cachedPortalMeta.serverName}) تلقائياً")
+                _connectionState.value = ConnectionState.WebPortal(
+                    serverName = cachedPortalMeta.serverName.ifBlank { normalizedConfig.ipAddress },
+                    url = cachedPortalMeta.lastVisitedUrl.ifBlank { cachedPortalMeta.baseUrl },
+                    username = normalizedConfig.username.ifBlank { cachedPortalMeta.username },
+                    password = normalizedConfig.password,
+                    isAplusWifi = cachedPortalMeta.isAplusWifi,
+                    isMikroTikWebFig = cachedPortalMeta.isMikroTikWebFig,
+                    subtitle = "وضع الأوفلاين • نسخة محفوظة محلياً",
+                    targetPathUrl = cachedPortalMeta.targetPathUrl,
+                    isOfflinePreview = true,
+                    cachedArchivePath = cachedPortalMeta.archiveFilePath,
+                    lastSavedTime = cachedPortalMeta.lastSavedTime
+                )
+                return@launch
+            }
+
             var hasLoadedFromCache = false
             var cachedSnapshotTimestamp = 0L
             // 1. FAST INSTANT LOGIN FROM CACHE (دخول سريع فوري من الكاش):
@@ -1703,8 +1813,8 @@ class MainViewModel(
 
             if (!hasLoadedFromCache) {
                 _connectionState.value = ConnectionState.Verifying(
-                    "جاري الفحص الذكي والاتصال بالسيرفر (${normalizedConfig.ipAddress})...",
-                    0.5f
+                    "جاري الاتصال المباشر بالسيرفر (${normalizedConfig.ipAddress})...",
+                    0.65f
                 )
             }
 
@@ -1810,6 +1920,23 @@ class MainViewModel(
                             )
                         )
                     }
+                    if (targetContext != null) {
+                        val initialMeta = com.example.data.local.CachedPortalMeta(
+                            host = normalizedConfig.ipAddress,
+                            serverName = savedName,
+                            baseUrl = outcome.url,
+                            lastVisitedUrl = cachedPortalMeta?.lastVisitedUrl?.ifBlank { outcome.url } ?: outcome.url,
+                            lastPageTitle = cachedPortalMeta?.lastPageTitle.orEmpty(),
+                            targetPathUrl = outcome.targetPathUrl ?: cachedPortalMeta?.targetPathUrl,
+                            username = normalizedConfig.username,
+                            isAplusWifi = outcome.isAplusWifi,
+                            isMikroTikWebFig = outcome.isMikroTikWebFig,
+                            archiveFilePath = cachedPortalMeta?.archiveFilePath,
+                            lastSavedTime = cachedPortalMeta?.lastSavedTime ?: 0L
+                        )
+                        com.example.data.local.WebPortalCacheManager.saveMeta(targetContext, initialMeta)
+                        _latestCachedPortal.value = initialMeta
+                    }
                     _toastEvent.emit(outcome.description)
                     _connectionState.value = ConnectionState.WebPortal(
                         serverName = savedName,
@@ -1817,8 +1944,16 @@ class MainViewModel(
                         username = normalizedConfig.username,
                         password = normalizedConfig.password,
                         isAplusWifi = outcome.isAplusWifi,
-                        subtitle = if (outcome.isAplusWifi) "لوحة تحكم APlusWiFi السحابية" else "لوحة تحكم السيرفر عبر الويب",
-                        targetPathUrl = outcome.targetPathUrl
+                        isMikroTikWebFig = outcome.isMikroTikWebFig,
+                        subtitle = when {
+                            outcome.isMikroTikWebFig -> "واجهة إدارة الراوتر WebFig"
+                            outcome.isAplusWifi -> "لوحة تحكم APlusWiFi السحابية"
+                            else -> "لوحة تحكم السيرفر عبر الويب"
+                        },
+                        targetPathUrl = outcome.targetPathUrl,
+                        isOfflinePreview = false,
+                        cachedArchivePath = cachedPortalMeta?.archiveFilePath,
+                        lastSavedTime = cachedPortalMeta?.lastSavedTime ?: 0L
                     )
                 }
 
@@ -1839,6 +1974,21 @@ class MainViewModel(
                             offlineReason = "تعذر الاتصال المباشر: $error"
                         )
                         startAutoRefresh()
+                    } else if (cachedPortalMeta != null) {
+                        _toastEvent.emit("🟠 تعذر الاتصال المباشر — تم فتح آخر نسخة محفوظة من لوحة التحكم (وضع الأوفلاين).")
+                        _connectionState.value = ConnectionState.WebPortal(
+                            serverName = cachedPortalMeta.serverName.ifBlank { normalizedConfig.ipAddress },
+                            url = cachedPortalMeta.lastVisitedUrl.ifBlank { cachedPortalMeta.baseUrl },
+                            username = normalizedConfig.username.ifBlank { cachedPortalMeta.username },
+                            password = normalizedConfig.password,
+                            isAplusWifi = cachedPortalMeta.isAplusWifi,
+                            isMikroTikWebFig = cachedPortalMeta.isMikroTikWebFig,
+                            subtitle = "وضع الأوفلاين • نسخة محفوظة محلياً",
+                            targetPathUrl = cachedPortalMeta.targetPathUrl,
+                            isOfflinePreview = true,
+                            cachedArchivePath = cachedPortalMeta.archiveFilePath,
+                            lastSavedTime = cachedPortalMeta.lastSavedTime
+                        )
                     } else {
                         _connectionState.value = ConnectionState.Error(error)
                         _toastEvent.emit(error)
@@ -2695,6 +2845,10 @@ class MainViewModel(
             var restoredFromPerRouterSnapshot = false
             val ctx = appContext
             if (ctx != null) {
+                try {
+                    val latestPortal = com.example.data.local.WebPortalCacheManager.getLatestCachedPortal(ctx)
+                    _latestCachedPortal.value = latestPortal
+                } catch (_: Exception) {}
                 try {
                     val latest = com.example.data.local.RouterCacheManager.getLatestSnapshot(ctx)
                     if (latest != null) {

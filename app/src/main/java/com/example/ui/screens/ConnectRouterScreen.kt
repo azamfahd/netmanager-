@@ -58,7 +58,11 @@ import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudOff
+import com.example.data.local.CachedPortalMeta
+import com.example.data.local.WebPortalCacheManager
 import com.example.data.model.UpdateCheckState
+import com.example.data.network.NetworkUtils
 import com.example.data.network.RouterConnectionParser
 import com.example.ui.components.AppUpdateDialog
 import com.example.ui.components.UpdateBanner
@@ -141,6 +145,7 @@ fun ConnectRouterScreen(
     val showUpdateBanner by viewModel.showUpdateBanner.collectAsStateWithLifecycle()
     var showUpdateDialog by remember { mutableStateOf(false) }
     val latestSnapshot by viewModel.latestCachedSnapshot.collectAsStateWithLifecycle()
+    val latestCachedPortal by viewModel.latestCachedPortal.collectAsStateWithLifecycle()
 
     // User credentials (supports router usernames and cloud portal emails)
     var username by remember { mutableStateOf("admin") }
@@ -396,6 +401,81 @@ fun ConnectRouterScreen(
                                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text("فتح البيانات الآن", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Offline Web Portal Cache Access Card (للدخول أوفلاين إلى لوحات الدومين المحفوظة مثل APlusWiFi)
+            if (latestCachedPortal != null) {
+                item {
+                    val cachedPortal = latestCachedPortal!!
+                    val isOnlineNow = NetworkUtils.isNetworkOnline(context)
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (isOnlineNow) Color(0xFFFFF8E1) else Color(0xFFFFE0B2),
+                        border = BorderStroke(1.2.dp, Color(0xFFFB8C00)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("offline_portal_cache_banner")
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFFE65100)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isOnlineNow) Icons.Default.Language else Icons.Default.CloudOff,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    Column {
+                                        Text(
+                                            text = if (isOnlineNow) "نسخة لوحة الويب محفوظة للتصفح المؤقت" else "تنبيه: بدون إنترنت • النسخة المحفوظة جاهزة",
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = Color(0xFF6D3500)
+                                        )
+                                        val timeText = if (cachedPortal.lastSavedTime > 0L) {
+                                            " • ${WebPortalCacheManager.formatSavedTimeAr(cachedPortal.lastSavedTime)}"
+                                        } else ""
+                                        Text(
+                                            text = "${cachedPortal.serverName} (${cachedPortal.host})$timeText",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF7A3E00)
+                                        )
+                                    }
+                                }
+
+                                Button(
+                                    onClick = {
+                                        viewModel.enterOfflineMode(cachedPortal.host, context)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE65100)),
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.testTag("open_offline_portal_btn")
+                                ) {
+                                    Icon(Icons.Default.CloudOff, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("تصفح أوفلاين", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                                 }
                             }
                         }
@@ -842,11 +922,12 @@ fun ConnectRouterScreen(
                                 }
                             }
 
-                            if (latestSnapshot != null) {
+                            if (latestSnapshot != null || latestCachedPortal != null) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Button(
                                     onClick = {
-                                        viewModel.enterOfflineMode(latestSnapshot?.ipAddress, context)
+                                        val offlineTarget = latestSnapshot?.ipAddress ?: latestCachedPortal?.host
+                                        viewModel.enterOfflineMode(offlineTarget, context)
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = StatusActiveGreen),
                                     shape = RoundedCornerShape(8.dp),
@@ -854,7 +935,15 @@ fun ConnectRouterScreen(
                                 ) {
                                     Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("فتح البيانات المحفوظة محلياً (وضع الأوفلاين)", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    Text(
+                                        text = if (latestSnapshot != null) {
+                                            "فتح البيانات المحفوظة محلياً (وضع الأوفلاين)"
+                                        } else {
+                                            "فتح نسخة لوحة الويب المحفوظة (وضع الأوفلاين)"
+                                        },
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp
+                                    )
                                 }
                             }
                         }
@@ -904,9 +993,12 @@ fun ConnectRouterScreen(
 
                             savedRouters.forEach { router ->
                                 var cacheSummary by remember(router.ipAddress) { mutableStateOf<com.example.data.local.RouterCacheSummary?>(null) }
+                                var portalCacheMeta by remember(router.ipAddress) { mutableStateOf<CachedPortalMeta?>(null) }
                                 LaunchedEffect(router.ipAddress) {
                                     cacheSummary = com.example.data.local.RouterCacheManager.getCacheSummary(context, router.ipAddress)
+                                    portalCacheMeta = WebPortalCacheManager.loadMeta(context, router.ipAddress)
                                 }
+                                val hasAnyCache = cacheSummary != null || (portalCacheMeta != null)
 
                                 Surface(
                                     shape = RoundedCornerShape(14.dp),
@@ -947,7 +1039,7 @@ fun ConnectRouterScreen(
                                                     contentAlignment = Alignment.Center
                                                 ) {
                                                     Icon(
-                                                        imageVector = Icons.Default.Router,
+                                                        imageVector = if (portalCacheMeta != null && cacheSummary == null) Icons.Default.Language else Icons.Default.Router,
                                                         contentDescription = null,
                                                         tint = RouterBlue,
                                                         modifier = Modifier.size(20.dp)
@@ -972,6 +1064,19 @@ fun ConnectRouterScreen(
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                                             ) {
+                                                if (portalCacheMeta != null && cacheSummary == null) {
+                                                    OutlinedButton(
+                                                        onClick = { viewModel.enterOfflineMode(router.ipAddress, context) },
+                                                        shape = RoundedCornerShape(8.dp),
+                                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                                        modifier = Modifier.height(34.dp)
+                                                    ) {
+                                                        Icon(Icons.Default.CloudOff, contentDescription = null, modifier = Modifier.size(13.dp))
+                                                        Spacer(modifier = Modifier.width(3.dp))
+                                                        Text("أوفلاين", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
+
                                                 Button(
                                                     onClick = {
                                                         username = router.username
@@ -990,19 +1095,19 @@ fun ConnectRouterScreen(
                                                     },
                                                     shape = RoundedCornerShape(8.dp),
                                                     colors = ButtonDefaults.buttonColors(
-                                                        containerColor = if (cacheSummary != null) StatusActiveGreen else RouterBlue
+                                                        containerColor = if (hasAnyCache) StatusActiveGreen else RouterBlue
                                                     ),
                                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                                     modifier = Modifier.height(34.dp)
                                                 ) {
                                                     Icon(
-                                                        imageVector = if (cacheSummary != null) Icons.Default.Bolt else Icons.Default.Login,
+                                                        imageVector = if (hasAnyCache) Icons.Default.Bolt else Icons.Default.Login,
                                                         contentDescription = null,
                                                         modifier = Modifier.size(14.dp)
                                                     )
                                                     Spacer(modifier = Modifier.width(4.dp))
                                                     Text(
-                                                        text = if (cacheSummary != null) "⚡ دخول فوري" else "دخول سريع",
+                                                        text = if (hasAnyCache) "⚡ دخول فوري" else "دخول سريع",
                                                         fontSize = 11.sp,
                                                         fontWeight = FontWeight.Bold
                                                     )
@@ -1059,6 +1164,52 @@ fun ConnectRouterScreen(
                                                         fontSize = 9.sp,
                                                         color = MaterialTheme.colorScheme.outline
                                                     )
+                                                }
+                                            }
+                                        } else if (portalCacheMeta != null) {
+                                            val meta = portalCacheMeta!!
+                                            Surface(
+                                                color = Color(0xFFFFF3E0),
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = BorderStroke(0.6.dp, Color(0xFFFB8C00)),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                        modifier = Modifier.weight(1f)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.CloudOff,
+                                                            contentDescription = null,
+                                                            tint = Color(0xFFE65100),
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                        Text(
+                                                            text = if (meta.hasValidArchive) {
+                                                                "نسخة ويب محفوظة محلياً • جاهز للتصفح أوفلاين"
+                                                            } else {
+                                                                "مسجل كلوحة ويب • سيتم الحفظ التلقائي عند الفتح"
+                                                            },
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            color = Color(0xFF6D3500)
+                                                        )
+                                                    }
+                                                    if (meta.lastSavedTime > 0L) {
+                                                        Text(
+                                                            text = WebPortalCacheManager.formatSavedTimeAr(meta.lastSavedTime),
+                                                            fontSize = 9.sp,
+                                                            color = Color(0xFF8D4E00)
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }
@@ -1738,9 +1889,12 @@ fun SavedRouterItem(
 ) {
     val context = LocalContext.current
     var cacheSummary by remember(router.ipAddress) { mutableStateOf<com.example.data.local.RouterCacheSummary?>(null) }
+    var portalMeta by remember(router.ipAddress) { mutableStateOf<CachedPortalMeta?>(null) }
     LaunchedEffect(router.ipAddress) {
         cacheSummary = com.example.data.local.RouterCacheManager.getCacheSummary(context, router.ipAddress)
+        portalMeta = WebPortalCacheManager.loadMeta(context, router.ipAddress)
     }
+    val hasAnyCache = cacheSummary != null || portalMeta != null
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1769,7 +1923,7 @@ fun SavedRouterItem(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Router,
+                            imageVector = if (portalMeta != null && cacheSummary == null) Icons.Default.Language else Icons.Default.Router,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(20.dp)
@@ -1794,18 +1948,18 @@ fun SavedRouterItem(
                         onClick = onConnect,
                         shape = RoundedCornerShape(8.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (cacheSummary != null) StatusActiveGreen else MaterialTheme.colorScheme.primary
+                            containerColor = if (hasAnyCache) StatusActiveGreen else MaterialTheme.colorScheme.primary
                         ),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                         modifier = Modifier.height(34.dp)
                     ) {
                         Icon(
-                            imageVector = if (cacheSummary != null) Icons.Default.Bolt else Icons.Default.Login,
+                            imageVector = if (hasAnyCache) Icons.Default.Bolt else Icons.Default.Login,
                             contentDescription = null,
                             modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text(if (cacheSummary != null) "⚡ دخول فوري" else "اتصال", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(if (hasAnyCache) "⚡ دخول فوري" else "اتصال", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                     IconButton(onClick = onDelete) {
                         Icon(
@@ -1840,6 +1994,32 @@ fun SavedRouterItem(
                             text = cacheSummary?.formattedTime ?: "",
                             fontSize = 9.sp,
                             color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                }
+            } else if (portalMeta != null && portalMeta?.hasValidArchive == true) {
+                Surface(
+                    color = Color(0xFFFFF3E0),
+                    shape = RoundedCornerShape(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "🟠 نسخة ويب محفوظة للتصفح بدون إنترنت",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF6D3500)
+                        )
+                        Text(
+                            text = WebPortalCacheManager.formatSavedTimeAr(portalMeta?.lastSavedTime ?: 0L),
+                            fontSize = 9.sp,
+                            color = Color(0xFF8D4E00)
                         )
                     }
                 }

@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
 import android.os.Message
 import android.print.PrintAttributes
@@ -24,7 +26,9 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,12 +45,15 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
@@ -63,20 +70,26 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -86,7 +99,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import com.example.data.local.CachedPortalMeta
+import com.example.data.local.WebPortalCacheManager
 import com.example.data.model.ConnectionState
+import com.example.data.network.NetworkUtils
+import com.example.data.network.RouterConnectionParser
 import com.example.ui.theme.StatusActiveGreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -163,6 +180,8 @@ private class WebPortalJsBridge(
 fun WebPortalScreen(
     portalState: ConnectionState.WebPortal,
     onDisconnect: () -> Unit,
+    onRetryApiConnection: (() -> Unit)? = null,
+    onArchiveSaved: ((CachedPortalMeta) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -177,6 +196,58 @@ fun WebPortalScreen(
     var pendingUploadCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     var bookmarks by remember(portalState.url) {
         mutableStateOf(PortalBookmarkStore.load(context, portalState.url))
+    }
+
+    val hostName = remember(portalState.url) {
+        runCatching { Uri.parse(portalState.url).host }.getOrNull().orEmpty()
+    }
+    val isLocalHost = remember(portalState.isMikroTikWebFig, hostName) {
+        portalState.isMikroTikWebFig || RouterConnectionParser.isPrivateOrLocalIpv4(hostName)
+    }
+    val archiveFile = remember(portalState.url, portalState.cachedArchivePath) {
+        portalState.cachedArchivePath?.takeIf { it.isNotBlank() }?.let { File(it) }
+            ?: WebPortalCacheManager.getArchiveTargetFile(context, portalState.url)
+    }
+    var hasSavedArchive by remember(portalState.url) {
+        mutableStateOf(archiveFile.exists() && archiveFile.length() > 0L)
+    }
+    var lastSavedTimeMs by remember(portalState.url) {
+        mutableLongStateOf(portalState.lastSavedTime)
+    }
+    var isDeviceOnline by remember {
+        mutableStateOf(NetworkUtils.isNetworkOnline(context))
+    }
+    var showingOfflineArchive by remember(portalState.url, portalState.isOfflinePreview) {
+        mutableStateOf(portalState.isOfflinePreview || (!isLocalHost && !NetworkUtils.isNetworkOnline(context) && archiveFile.exists()))
+    }
+    val isEffectiveOffline = showingOfflineArchive || (!isLocalHost && !isDeviceOnline)
+
+    DisposableEffect(context) {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                isDeviceOnline = true
+            }
+
+            override fun onLost(network: Network) {
+                isDeviceOnline = NetworkUtils.isNetworkOnline(context)
+            }
+        }
+        runCatching { cm?.registerDefaultNetworkCallback(callback) }
+        onDispose {
+            runCatching { cm?.unregisterNetworkCallback(callback) }
+        }
+    }
+
+    LaunchedEffect(isDeviceOnline) {
+        if (isDeviceOnline && showingOfflineArchive) {
+            val targetLiveUrl = currentUrl.takeIf { it.startsWith("http", ignoreCase = true) } ?: portalState.url
+            showingOfflineArchive = false
+            mainFrameError = null
+            webViewRef?.settings?.cacheMode = WebSettings.LOAD_DEFAULT
+            webViewRef?.loadUrl(targetLiveUrl)
+            Toast.makeText(context, "✅ عاد الاتصال بالإنترنت — جاري التحديث المباشر", Toast.LENGTH_SHORT).show()
+        }
     }
 
     val fileChooserLauncher = rememberLauncherForActivityResult(
@@ -344,7 +415,8 @@ fun WebPortalScreen(
                         (el.placeholder || '') + ' ' + (el.getAttribute('autocomplete') || '') + ' ' +
                         (el.getAttribute('aria-label') || '')).toLowerCase();
                     if (meta.indexOf('email') >= 0 || meta.indexOf('user') >= 0 || meta.indexOf('login') >= 0 ||
-                        meta.indexOf('account') >= 0 || meta.indexOf('بريد') >= 0 || meta.indexOf('مستخدم') >= 0) {
+                        meta.indexOf('account') >= 0 || meta.indexOf('name') >= 0 ||
+                        meta.indexOf('بريد') >= 0 || meta.indexOf('مستخدم') >= 0) {
                         pickedUser = el;
                         break;
                     }
@@ -467,7 +539,18 @@ fun WebPortalScreen(
                     IconButton(
                         onClick = {
                             mainFrameError = null
-                            webViewRef?.reload()
+                            val wv = webViewRef
+                            if (wv != null) {
+                                if (showingOfflineArchive || wv.url?.startsWith("file://", ignoreCase = true) == true) {
+                                    val liveUrl = currentUrl.takeIf { it.startsWith("http", ignoreCase = true) } ?: portalState.url
+                                    showingOfflineArchive = false
+                                    wv.settings.cacheMode = WebSettings.LOAD_DEFAULT
+                                    wv.loadUrl(liveUrl)
+                                } else {
+                                    wv.settings.cacheMode = WebSettings.LOAD_DEFAULT
+                                    wv.reload()
+                                }
+                            }
                         },
                         modifier = Modifier.testTag("web_portal_reload_btn")
                     ) {
@@ -495,7 +578,10 @@ fun WebPortalScreen(
             }
 
             Surface(
-                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                color = if (isEffectiveOffline)
+                    Color(0xFFFFF3E0)
+                else
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -506,20 +592,163 @@ fun WebPortalScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = currentUrl,
+                        text = if (showingOfflineArchive) "نسخة محفوظة: $currentUrl" else currentUrl,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        color = if (isEffectiveOffline) Color(0xFF8D4E00) else MaterialTheme.colorScheme.onPrimaryContainer,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (portalState.isAplusWifi) "APlusWiFi" else "Web Console",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    // Prominent Status Badge Pill (Offline Cached vs Live Auto-Save)
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = if (isEffectiveOffline) Color(0xFFE65100) else StatusActiveGreen,
+                        modifier = Modifier.testTag("web_portal_status_badge")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isEffectiveOffline) Icons.Default.CloudOff else Icons.Default.CloudDone,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = when {
+                                    isEffectiveOffline -> "أوفلاين • نسخة محفوظة"
+                                    hasSavedArchive -> "متصل • حفظ تلقائي"
+                                    portalState.isAplusWifi -> "APlusWiFi مباشر"
+                                    portalState.isMikroTikWebFig -> "WebFig مباشر"
+                                    else -> "متصل مباشر"
+                                },
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Dedicated Offline Alert Banner (تنبيه واضح لوضع الأوفلاين والنسخة المؤقتة)
+            AnimatedVisibility(visible = isEffectiveOffline) {
+                Surface(
+                    color = Color(0xFFFFE0B2),
+                    border = BorderStroke(1.dp, Color(0xFFFB8C00)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("web_portal_offline_alert_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFE65100)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudOff,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "تنبيه: وضع التصفح المؤقت (بدون إنترنت)",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF6D3500)
+                                )
+                                Text(
+                                    text = if (lastSavedTimeMs > 0L) {
+                                        "تعرض الآن آخر نسخة محفوظة بتاريخ: ${WebPortalCacheManager.formatSavedTimeAr(lastSavedTimeMs)}"
+                                    } else {
+                                        "انقطع الاتصال — يتم التصفح من الذاكرة المؤقتة المحلية"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF7A3E00)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                val onlineNow = NetworkUtils.isNetworkOnline(context)
+                                isDeviceOnline = onlineNow
+                                val targetLiveUrl = currentUrl.takeIf { it.startsWith("http", true) } ?: portalState.url
+                                if (onlineNow || isLocalHost) {
+                                    showingOfflineArchive = false
+                                    mainFrameError = null
+                                    webViewRef?.settings?.cacheMode = WebSettings.LOAD_DEFAULT
+                                    webViewRef?.loadUrl(targetLiveUrl)
+                                } else {
+                                    Toast.makeText(context, "ما زال الجهاز بدون اتصال إنترنت — متاح التصفح المحلي للنسخة المحفوظة", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            border = BorderStroke(1.dp, Color(0xFFE65100)),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("تحديث", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF6D3500))
+                        }
+                    }
+                }
+            }
+
+            // Optional 1-tap upgrade strip when inside MikroTik WebFig fallback mode
+            if (portalState.isMikroTikWebFig && onRetryApiConnection != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "واجهة WebFig للراوتر مفتوحة • فعّل API من IP -> Services للإدارة الكاملة",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = onRetryApiConnection,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("web_portal_retry_api_btn")
+                        ) {
+                            Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("تجربة API (8728)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
 
@@ -602,6 +831,16 @@ fun WebPortalScreen(
 
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
+                            settings.databaseEnabled = true
+                            // Allow local MHT WebArchive file:// loading without opening file-to-file or universal access
+                            settings.allowFileAccess = true
+                            settings.allowFileAccessFromFileURLs = false
+                            settings.allowUniversalAccessFromFileURLs = false
+                            settings.cacheMode = if (showingOfflineArchive || (!isLocalHost && !isDeviceOnline)) {
+                                WebSettings.LOAD_CACHE_ELSE_NETWORK
+                            } else {
+                                WebSettings.LOAD_DEFAULT
+                            }
                             settings.useWideViewPort = true
                             settings.loadWithOverviewMode = true
                             settings.builtInZoomControls = true
@@ -718,6 +957,9 @@ fun WebPortalScreen(
                                     if (scheme == "http" || scheme == "https") {
                                         return false
                                     }
+                                    if (scheme == "file" && reqUrl.path == archiveFile.absolutePath) {
+                                        return false
+                                    }
                                     return try {
                                         ctx.startActivity(Intent(Intent.ACTION_VIEW, reqUrl))
                                         true
@@ -729,12 +971,21 @@ fun WebPortalScreen(
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                     isLoading = true
                                     mainFrameError = null
-                                    if (!url.isNullOrBlank()) currentUrl = url
+                                    if (!url.isNullOrBlank() && !url.startsWith("file://", ignoreCase = true)) {
+                                        currentUrl = url
+                                    }
                                 }
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     isLoading = false
-                                    if (!url.isNullOrBlank()) currentUrl = url
+                                    if (url != null && url.startsWith("file://", ignoreCase = true)) {
+                                        showingOfflineArchive = true
+                                        return
+                                    }
+                                    if (!url.isNullOrBlank()) {
+                                        currentUrl = url
+                                        showingOfflineArchive = false
+                                    }
                                     // Wire window.print() inside portal pages directly to native Android Print/PDF
                                     view?.evaluateJavascript(
                                         "window.print = function(){ if(window.NetManagerBridge){ window.NetManagerBridge.triggerNativePrint(); } };",
@@ -747,6 +998,37 @@ fun WebPortalScreen(
                                             injectCredentialsAutoFill(view, showFeedback = false)
                                         }, 650L)
                                     }
+                                    // Automatically snapshot rendered portal DOM into local MHT WebArchive after hydration
+                                    if (url != null && url.startsWith("http", ignoreCase = true)) {
+                                        view?.postDelayed({
+                                            val targetFile = WebPortalCacheManager.getArchiveTargetFile(context, portalState.url)
+                                            view.saveWebArchive(targetFile.absolutePath, false) { savedPath ->
+                                                if (!savedPath.isNullOrBlank()) {
+                                                    val savedFile = File(savedPath)
+                                                    if (savedFile.exists() && savedFile.length() > 0L) {
+                                                        val now = System.currentTimeMillis()
+                                                        hasSavedArchive = true
+                                                        lastSavedTimeMs = now
+                                                        val meta = CachedPortalMeta(
+                                                            host = hostName.ifBlank { portalState.url },
+                                                            serverName = portalState.serverName,
+                                                            baseUrl = portalState.url,
+                                                            lastVisitedUrl = url,
+                                                            lastPageTitle = pageTitle,
+                                                            targetPathUrl = portalState.targetPathUrl,
+                                                            username = portalState.username,
+                                                            isAplusWifi = portalState.isAplusWifi,
+                                                            isMikroTikWebFig = portalState.isMikroTikWebFig,
+                                                            archiveFilePath = savedPath,
+                                                            lastSavedTime = now
+                                                        )
+                                                        WebPortalCacheManager.saveMeta(context, meta)
+                                                        onArchiveSaved?.invoke(meta)
+                                                    }
+                                                }
+                                            }
+                                        }, 1400L)
+                                    }
                                 }
 
                                 override fun onReceivedError(
@@ -756,14 +1038,34 @@ fun WebPortalScreen(
                                 ) {
                                     if (request?.isForMainFrame == true) {
                                         isLoading = false
-                                        val desc = error?.description?.toString()?.takeIf { it.isNotBlank() }
-                                        mainFrameError = desc ?: "تعذر تحميل صفحة لوحة التحكم. تحقق من اتصال الإنترنت وحاول مجدداً."
+                                        val failingUrl = request.url?.toString().orEmpty()
+                                        if (!failingUrl.startsWith("file://", ignoreCase = true) &&
+                                            archiveFile.exists() && archiveFile.length() > 0L
+                                        ) {
+                                            showingOfflineArchive = true
+                                            mainFrameError = null
+                                            view?.settings?.cacheMode = WebSettings.LOAD_CACHE_ELSE_NETWORK
+                                            view?.loadUrl("file://${archiveFile.absolutePath}")
+                                            Toast.makeText(
+                                                context,
+                                                "🟠 انقطع الاتصال — تم التحويل لآخر نسخة محفوظة تلقائياً",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else {
+                                            val desc = error?.description?.toString()?.takeIf { it.isNotBlank() }
+                                            mainFrameError = desc ?: "تعذر تحميل صفحة لوحة التحكم. تحقق من اتصال الإنترنت وحاول مجدداً."
+                                        }
                                     }
                                 }
                             }
 
                             webViewRef = this
-                            loadUrl(portalState.url)
+                            val initialUrl = if (showingOfflineArchive && archiveFile.exists() && archiveFile.length() > 0L) {
+                                "file://${archiveFile.absolutePath}"
+                            } else {
+                                portalState.url
+                            }
+                            loadUrl(initialUrl)
                         }
                     },
                     update = { wv ->
