@@ -113,10 +113,14 @@ fun SystemEventLogScreen(
         eventLogs.filter { log ->
             val matchesAction = when (selectedActionFilter) {
                 "الكل" -> true
-                "إضافة" -> log.actionType == "إضافة"
-                "تعديل" -> log.actionType == "تعديل"
+                "إضافة" -> log.actionType.contains("إضافة")
+                "تعديل" -> log.actionType.contains("تعديل")
                 "حذف" -> log.actionType == "حذف"
-                "الراوتر" -> log.actionType in listOf("إعادة تشغيل", "طرد", "اتصال", "قطع الاتصال")
+                "الراوتر" -> log.actionType in listOf(
+                    "إعادة تشغيل", "طرد", "اتصال", "قطع الاتصال",
+                    "تسجيل دخول", "تسجيل دخول ذكي", "فصل اتصال",
+                    "تصفح أوفلاين", "فتح لوحة ويب", "تصفح لوحة التحكم"
+                )
                 "فاشلة" -> log.status == "FAILED"
                 else -> true
             }
@@ -134,8 +138,8 @@ fun SystemEventLogScreen(
     }
 
     // Statistics counts
-    val addCount = remember(eventLogs) { eventLogs.count { it.actionType == "إضافة" } }
-    val editCount = remember(eventLogs) { eventLogs.count { it.actionType == "تعديل" } }
+    val addCount = remember(eventLogs) { eventLogs.count { it.actionType.contains("إضافة") } }
+    val editCount = remember(eventLogs) { eventLogs.count { it.actionType.contains("تعديل") } }
     val deleteCount = remember(eventLogs) { eventLogs.count { it.actionType == "حذف" } }
     val failedCount = remember(eventLogs) { eventLogs.count { it.status == "FAILED" } }
 
@@ -171,13 +175,6 @@ fun SystemEventLogScreen(
                         modifier = Modifier.testTag("btn_db_manager")
                     ) {
                         Icon(Icons.Default.ListAlt, contentDescription = "إدارة وقاعدة البيانات")
-                    }
-                    IconButton(
-                        onClick = { shareLogs(context, eventLogs) },
-                        enabled = eventLogs.isNotEmpty(),
-                        modifier = Modifier.testTag("btn_share_event_logs")
-                    ) {
-                        Icon(Icons.Default.Share, contentDescription = "مشاركة السجل")
                     }
                     IconButton(
                         onClick = { shareLogs(context, eventLogs) },

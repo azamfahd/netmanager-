@@ -36,7 +36,7 @@ object FinanceAnalyticsEngine {
         val salePrice: Double,
         val costPrice: Double
     ) {
-        val profitPerCard: Double get() = (salePrice - costPrice).coerceAtLeast(0.0)
+        val profitPerCard: Double get() = salePrice - costPrice
         val marginPercent: Double get() = if (salePrice > 0.0) (profitPerCard / salePrice) * 100.0 else 0.0
     }
 
@@ -295,7 +295,7 @@ object FinanceAnalyticsEngine {
             val soldInWindow = soldNamesInWindow.size
             val totalRev = soldInWindow * pricing.salePrice
             val totalCost = soldInWindow * pricing.costPrice
-            val netProfit = (totalRev - totalCost).coerceAtLeast(0.0)
+            val netProfit = totalRev - totalCost
 
             DetailedPackageProfitStat(
                 profileName = pricing.displayName,
@@ -316,12 +316,17 @@ object FinanceAnalyticsEngine {
             )
         }
 
-        val totalNetworkProfit = rawStats.sumOf { it.netProfit }.coerceAtLeast(1.0)
+        val totalPositiveProfit = rawStats.filter { it.netProfit > 0.0 }.sumOf { it.netProfit }
         val totalNetworkSold = rawStats.sumOf { it.soldCardsCount }.coerceAtLeast(1)
 
         return rawStats.map { stat ->
+            val sharePct = if (stat.netProfit > 0.0 && totalPositiveProfit > 0.0) {
+                ((stat.netProfit / totalPositiveProfit) * 100f).toFloat().coerceIn(0f, 100f)
+            } else {
+                0f
+            }
             stat.copy(
-                profitSharePercent = ((stat.netProfit / totalNetworkProfit) * 100f).toFloat().coerceIn(0f, 100f),
+                profitSharePercent = sharePct,
                 salesSharePercent = ((stat.soldCardsCount.toFloat() / totalNetworkSold.toFloat()) * 100f).coerceIn(0f, 100f)
             )
         }.sortedWith(
@@ -681,7 +686,7 @@ object FinanceAnalyticsEngine {
             val unsold = if (hasLivePresence) unsoldItems.size else if (ym != currentYm && savedRec != null) (gen - sold).coerceAtLeast(0) else unsoldItems.size
             val rev = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.totalRevenue > liveRev) savedRec.totalRevenue else liveRev
             val cost = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.totalCost > liveCost) savedRec.totalCost else liveCost
-            val profit = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.netProfit > (rev - cost)) savedRec.netProfit else (rev - cost).coerceAtLeast(0.0)
+            val profit = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.netProfit > (rev - cost)) savedRec.netProfit else (rev - cost)
             val totalBytes = if (ym != currentYm && savedRec != null && !hasLivePresence && savedRec.totalBytesConsumed > liveBytes) savedRec.totalBytesConsumed else liveBytes
 
             val restoredBreakdown = savedPackageBreakdownsByMonth[ym.key].orEmpty()
@@ -716,7 +721,7 @@ object FinanceAnalyticsEngine {
                         val pkgSold = pkgItems.size
                         val pkgRev = pkgItems.sumOf { it.salePrice }
                         val pkgCost = pkgItems.sumOf { it.costPrice }
-                        val pkgProfit = (pkgRev - pkgCost).coerceAtLeast(0.0)
+                        val pkgProfit = pkgRev - pkgCost
                         val share = when {
                             rev > 0.0 -> ((pkgRev / rev) * 100f).toFloat().coerceIn(0f, 100f)
                             sold > 0 -> ((pkgSold.toFloat() / sold.toFloat()) * 100f).coerceIn(0f, 100f)
@@ -749,7 +754,7 @@ object FinanceAnalyticsEngine {
                             dayLabel = "$dayNum $monthShortName",
                             cardsSold = dayItems.size,
                             revenue = dayRev,
-                            profit = (dayRev - dayCost).coerceAtLeast(0.0)
+                            profit = dayRev - dayCost
                         )
                     }
 

@@ -1,6 +1,7 @@
 package com.example.data.local
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
@@ -18,6 +19,14 @@ data class PosAgentEntity(
 
 @Entity(
     tableName = "pos_card_assignments",
+    foreignKeys = [
+        ForeignKey(
+            entity = PosAgentEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["agentId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
     indices = [
         Index(value = ["agentId"]),
         Index(value = ["isSold"]),
@@ -44,6 +53,14 @@ data class PosCardAssignmentEntity(
 
 @Entity(
     tableName = "pos_payments",
+    foreignKeys = [
+        ForeignKey(
+            entity = PosAgentEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["agentId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
     indices = [
         Index(value = ["agentId"]),
         Index(value = ["paymentDate"])

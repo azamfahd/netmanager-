@@ -137,13 +137,16 @@ fun UsageAnalyticsScreen(
                 }
             }
 
-            // Deep App Inspection Action Button
+            // Deep App Inspection Action Button (only enabled when a real subscriber IP is known)
             item {
+                val activeIp = subscriberProfile?.usedIpAddresses?.firstOrNull()?.takeIf { it.isNotBlank() }
                 Button(
                     onClick = {
-                        val ip = subscriberProfile?.usedIpAddresses?.firstOrNull() ?: "192.168.88.10"
-                        viewModel.inspectSubscriberTraffic(ip)
+                        if (activeIp != null) {
+                            viewModel.inspectSubscriberTraffic(activeIp)
+                        }
                     },
+                    enabled = activeIp != null && !isInspecting,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = themeColor)
@@ -151,11 +154,14 @@ fun UsageAnalyticsScreen(
                     if (isInspecting) {
                         CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("جاري فحص وتصنيف التطبيقات النشطة...")
+                        Text("جاري فحص الجلسات النشطة عبر الراوتر...")
                     } else {
                         Icon(Icons.Default.Analytics, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("فحص وتصنيف التطبيقات العميق (YouTube, Insta, TikTok...) ⚡", fontWeight = FontWeight.Bold)
+                        Text(
+                            text = if (activeIp != null) "فحص الاتصالات الحية من جدول الراوتر ($activeIp)" else "لا يوجد عنوان IP نشط لفحص اتصالاته الآن",
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
@@ -163,7 +169,7 @@ fun UsageAnalyticsScreen(
             // 2. Visual Chart (Doughnut)
             item {
                 Text(
-                    text = if (inspectedApps.isNotEmpty()) "تحليل التطبيقات والمنصات المكتشفة" else "توزيع الاستهلاك حسب الجلسات والأجهزة",
+                    text = if (inspectedApps.isNotEmpty()) "تصنيف الاتصالات الحية المكتشفة عبر الراوتر" else "توزيع الاستهلاك حسب الجلسات المسجلة",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 4.dp)
@@ -175,23 +181,47 @@ fun UsageAnalyticsScreen(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(20.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(20.dp)
-                    ) {
-                        // Doughnut Chart using Canvas
-                        Box(
-                            modifier = Modifier.size(120.dp),
-                            contentAlignment = Alignment.Center
+                    if (displayItems.isEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Canvas(modifier = Modifier.size(120.dp)) {
-                                var startAngle = -90f
-                                if (displayItems.isEmpty()) {
-                                    drawCircle(color = Color.LightGray.copy(alpha = 0.3f), style = androidx.compose.ui.graphics.drawscope.Stroke(width = 25f))
-                                } else {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(28.dp)
+                            )
+                            Text(
+                                text = "لا توجد بيانات جلسات أو اتصالات مسجلة لهذا المشترك حالياً",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "يعرض التطبيق القياسات الحقيقية المستلمة من الراوتر فقط دون أي بيانات تقديرية.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(20.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(20.dp)
+                        ) {
+                            // Doughnut Chart using Canvas
+                            Box(
+                                modifier = Modifier.size(120.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Canvas(modifier = Modifier.size(120.dp)) {
+                                    var startAngle = -90f
                                     displayItems.forEach { item ->
                                         val sweepAngle = (item.percentage / 100f) * 360f
                                         drawArc(
@@ -204,32 +234,32 @@ fun UsageAnalyticsScreen(
                                         startAngle += sweepAngle
                                     }
                                 }
-                            }
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(if (inspectedApps.isNotEmpty()) "تطبيقات" else "توزيع", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(if (inspectedApps.isNotEmpty()) "مكتشفة" else "الجلسات", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                            }
-                        }
-
-                        // Legend
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            displayItems.take(4).forEach { item ->
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(10.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(item.color))
-                                    )
-                                    Text(text = item.appName, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                                    Text(text = "${item.percentage.toInt()}%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(if (inspectedApps.isNotEmpty()) "اتصالات" else "توزيع", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(if (inspectedApps.isNotEmpty()) "حية" else "الجلسات", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                                 }
                             }
-                            if (displayItems.size > 4) {
-                                Text(text = "+ ${displayItems.size - 4} أخرى", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                            // Legend
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                displayItems.take(4).forEach { item ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(10.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(item.color))
+                                        )
+                                        Text(text = item.appName, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                                        Text(text = "${item.percentage.toInt()}%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                                if (displayItems.size > 4) {
+                                    Text(text = "+ ${displayItems.size - 4} أخرى", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                     }
@@ -239,7 +269,7 @@ fun UsageAnalyticsScreen(
             // 3. Detailed Usage List
             item {
                 Text(
-                    text = if (inspectedApps.isNotEmpty()) "قائمة التطبيقات والمنصات النشطة للمشترك" else "سجل الجلسات التفصيلي للاستهلاك",
+                    text = if (inspectedApps.isNotEmpty()) "الاتصالات والنطاقات النشطة المكتشفة" else "سجل الجلسات التفصيلي للاستهلاك",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 4.dp)
@@ -290,7 +320,7 @@ fun AppUsageListItem(item: AppUsageItem, type: String) {
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = item.appName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                Text(text = "الجهاز: ${item.category}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(text = "التصنيف: ${item.category}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             Column(horizontalAlignment = Alignment.End) {

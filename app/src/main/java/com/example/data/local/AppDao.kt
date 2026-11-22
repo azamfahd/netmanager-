@@ -284,6 +284,9 @@ interface AppDao {
     @Query("SELECT * FROM router_task_queue WHERE status = 'PENDING' AND nextAttemptTimestamp <= :currentTime ORDER BY createdAt ASC")
     suspend fun getPendingTasksReady(currentTime: Long): List<RouterTaskEntity>
 
+    @Query("SELECT * FROM router_task_queue WHERE status IN ('PENDING', 'FAILED') ORDER BY createdAt ASC")
+    suspend fun getAllRetryableTasks(): List<RouterTaskEntity>
+
     @Query("SELECT * FROM router_task_queue WHERE status != 'COMPLETED' ORDER BY createdAt DESC")
     fun getAllActiveTasksFlow(): Flow<List<RouterTaskEntity>>
 
@@ -307,6 +310,9 @@ interface AppDao {
 
     @Query("DELETE FROM router_task_queue WHERE cardName = :cardName")
     suspend fun deleteTasksByCardName(cardName: String)
+
+    @Query("DELETE FROM router_task_queue WHERE cardName = :cardName AND taskType = :taskType AND status IN ('PENDING', 'FAILED')")
+    suspend fun deletePendingTasksByCardAndType(cardName: String, taskType: String)
 
     @Query("DELETE FROM router_task_queue WHERE status = 'COMPLETED'")
     suspend fun clearCompletedTasks()

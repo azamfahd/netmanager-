@@ -2,6 +2,7 @@ package com.example.data.local
 
 import android.content.Context
 import android.net.Uri
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
@@ -19,7 +20,8 @@ data class CachedPortalMeta(
     val isAplusWifi: Boolean = false,
     val isMikroTikWebFig: Boolean = false,
     val archiveFilePath: String? = null,
-    val lastSavedTime: Long = 0L
+    val lastSavedTime: Long = 0L,
+    val recentActions: List<String> = emptyList()
 ) {
     val hasValidArchive: Boolean
         get() = !archiveFilePath.isNullOrBlank() && File(archiveFilePath).let { it.exists() && it.length() > 0L }
@@ -30,6 +32,7 @@ object WebPortalCacheManager {
     private const val DIR_NAME = "portal_cache"
     private const val META_FILE = "meta.json"
     private const val ARCHIVE_FILE = "archive_latest.mht"
+    private const val MAX_RECENT_ACTIONS = 30
 
     fun extractHostKey(hostOrUrl: String): String {
         val trimmed = hostOrUrl.trim()
@@ -52,6 +55,12 @@ object WebPortalCacheManager {
     @Synchronized
     fun saveMeta(context: Context, meta: CachedPortalMeta) {
         try {
+            val existing = loadMeta(context, meta.host.ifBlank { meta.baseUrl })
+            val mergedActions = if (meta.recentActions.isNotEmpty()) {
+                meta.recentActions.take(MAX_RECENT_ACTIONS)
+            } else {
+                existing?.recentActions.orEmpty().take(MAX_RECENT_ACTIONS)
+            }
             val dir = getHostDir(context, meta.host.ifBlank { meta.baseUrl })
             val target = File(dir, META_FILE)
             val tmp = File(dir, "$META_FILE.tmp")
@@ -67,6 +76,9 @@ object WebPortalCacheManager {
                 put("isMikroTikWebFig", meta.isMikroTikWebFig)
                 put("archiveFilePath", meta.archiveFilePath ?: "")
                 put("lastSavedTime", meta.lastSavedTime)
+                put("recentActions", JSONArray().apply {
+                    mergedActions.forEach { put(it) }
+                })
             }
             tmp.writeText(json.toString())
             if (tmp.exists()) {
@@ -74,6 +86,55 @@ object WebPortalCacheManager {
                 tmp.renameTo(target)
             }
         } catch (_: Exception) {}
+    }
+
+    @Synchronized
+    fun updateLastVisitedUrl(
+        context: Context,
+        hostOrUrl: String,
+        visitedUrl: String,
+        pageTitle: String = ""
+    ) {
+        if (hostOrUrl.isBlank() || visitedUrl.isBlank() || visitedUrl.startsWith("file://", ignoreCase = true)) {
+            return
+        }
+        val existing = loadMeta(context, hostOrUrl)
+        val cleanTitle = pageTitle.trim().take(60)
+        val pathSummary = runCatching { Uri.parse(visitedUrl).path?.ifBlank { "/" } }.getOrNull() ?: visitedUrl
+        val timestampedEntry = "${SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())} • " +
+            if (cleanTitle.isNotBlank() && !cleanTitle.equals(visitedUrl, ignoreCase = true)) {
+                "$cleanTitle ($pathSummary)"
+            } else {
+                pathSummary
+            }
+        val currentActions = existing?.recentActions.orEmpty().toMutableList()
+        if (currentActions.firstOrNull()?.substringAfter(" • ") != timestampedEntry.substringAfter(" • ")) {
+            currentActions.add(0, timestampedEntry)
+        }
+        val updated = (existing ?: CachedPortalMeta(
+            host = extractHostKey(hostOrUrl),
+            serverName = cleanTitle.ifBlank { extractHostKey(hostOrUrl) },
+            baseUrl = hostOrUrl,
+            lastVisitedUrl = visitedUrl
+        )).copy(
+            lastVisitedUrl = visitedUrl,
+            lastPageTitle = cleanTitle.ifBlank { existing?.lastPageTitle.orEmpty() },
+            recentActions = currentActions.take(MAX_RECENT_ACTIONS)
+        )
+        saveMeta(context, updated)
+    }
+
+    @Synchronized
+    fun appendPortalActivity(
+        context: Context,
+        hostOrUrl: String,
+        activitySummary: String
+    ) {
+        if (hostOrUrl.isBlank() || activitySummary.isBlank()) return
+        val existing = loadMeta(context, hostOrUrl) ?: return
+        val formatted = "${SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())} • ${activitySummary.trim()}"
+        val updatedActions = (listOf(formatted) + existing.recentActions).take(MAX_RECENT_ACTIONS)
+        saveMeta(context, existing.copy(recentActions = updatedActions))
     }
 
     @Synchronized
@@ -111,6 +172,15 @@ object WebPortalCacheManager {
             val host = json.optString("host")
             val baseUrl = json.optString("baseUrl")
             if (host.isBlank() && baseUrl.isBlank()) return null
+            val actionsArr = json.optJSONArray("recentActions")
+            val actions = buildList {
+                if (actionsArr != null) {
+                    for (i in 0 until actionsArr.length()) {
+                        val item = actionsArr.optString(i).trim()
+                        if (item.isNotBlank()) add(item)
+                    }
+                }
+            }
             CachedPortalMeta(
                 host = host,
                 serverName = json.optString("serverName").ifBlank { host },
@@ -122,7 +192,8 @@ object WebPortalCacheManager {
                 isAplusWifi = json.optBoolean("isAplusWifi", false),
                 isMikroTikWebFig = json.optBoolean("isMikroTikWebFig", false),
                 archiveFilePath = archivePath,
-                lastSavedTime = json.optLong("lastSavedTime", 0L)
+                lastSavedTime = json.optLong("lastSavedTime", 0L),
+                recentActions = actions
             )
         } catch (_: Exception) {
             null

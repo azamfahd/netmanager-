@@ -38,10 +38,19 @@ data class ResolvedCardTarget(
 
 class RouterOsApiClient {
 
+    companion object {
+        private const val TRANSACTION_SO_TIMEOUT_MS = 15_000
+    }
+
     private val socketLock = Any()
     private var socket: Socket? = null
     private var inStream: InputStream? = null
     private var outStream: OutputStream? = null
+
+    private val cmdSocketLock = Any()
+    private var cmdSocket: Socket? = null
+    private var cmdInStream: InputStream? = null
+    private var cmdOutStream: OutputStream? = null
 
     @Volatile
     private var lastHost: String = ""
@@ -55,6 +64,9 @@ class RouterOsApiClient {
     private var lastUseTls: Boolean = false
     @Volatile
     private var isExplicitlyClosed: Boolean = false
+
+    @Volatile
+    private var lastConnectTimeoutMs: Int = 2500
 
     private val cachedProfiles = mutableListOf<HotspotProfile>()
 
@@ -76,12 +88,34 @@ class RouterOsApiClient {
         false
     }
 
-    private fun createRouterSocket(host: String, port: Int, timeoutMs: Int, useTls: Boolean): Socket {
+    private fun resolveSocketAddress(host: String, port: Int): InetSocketAddress {
+        val clean = host.trim()
+        if (RouterConnectionParser.isIpv4(clean)) {
+            val parts = clean.split('.')
+            if (parts.size == 4) {
+                val bytes = ByteArray(4) { idx -> parts[idx].toInt().toByte() }
+                val addr = java.net.InetAddress.getByAddress(clean, bytes)
+                return InetSocketAddress(addr, port)
+            }
+        }
+        return InetSocketAddress(clean, port)
+    }
+
+    private fun createRouterSocket(
+        host: String,
+        port: Int,
+        connectTimeoutMs: Int,
+        handshakeTimeoutMs: Int,
+        useTls: Boolean
+    ): Socket {
+        val effectiveConnectTimeout = connectTimeoutMs.coerceIn(500, 15000)
+        val effectiveHandshakeTimeout = handshakeTimeoutMs.coerceIn(1000, 10000)
         val tcpSocket = Socket()
         tcpSocket.tcpNoDelay = true
         tcpSocket.keepAlive = true
-        tcpSocket.connect(InetSocketAddress(host, port), timeoutMs.coerceAtLeast(6000))
-        tcpSocket.soTimeout = 25000 // 25 seconds adequate for heavy UserManager database transactions
+        tcpSocket.connect(resolveSocketAddress(host, port), effectiveConnectTimeout)
+        // Use tight read timeout during TLS handshake & /login so dead/non-API ports fail fast instead of stalling 25s
+        tcpSocket.soTimeout = effectiveHandshakeTimeout
         if (!useTls) {
             return tcpSocket
         }
@@ -96,7 +130,7 @@ class RouterOsApiClient {
                 sslSocket.enabledCipherSuites = enabled.toTypedArray()
             }
         } catch (_: Exception) {}
-        sslSocket.soTimeout = 25000
+        sslSocket.soTimeout = effectiveHandshakeTimeout
         sslSocket.startHandshake()
         return sslSocket
     }
@@ -106,17 +140,21 @@ class RouterOsApiClient {
         port: Int = 8728,
         username: String,
         password: String,
-        timeoutMs: Int = 6000,
+        timeoutMs: Int = 2500,
         useTls: Boolean = (port == 8729)
     ): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             synchronized(socketLock) {
+                var phase = "TCP_CONNECT"
+                val parsed = RouterConnectionParser.normalizeHostInput(host)
+                val cleanHost = parsed.host.ifBlank { host.trim() }
+                val effectiveConnectMs = timeoutMs.coerceIn(500, 15000)
+                val effectiveHandshakeMs = (effectiveConnectMs + 800).coerceIn(1200, 6000)
                 try {
                     closeSocketOnlyLocked()
+                    synchronized(cmdSocketLock) { closeCmdSocketOnlyLocked() }
                     synchronized(cachedProfiles) { cachedProfiles.clear() }
                     isExplicitlyClosed = false
-                    val parsed = RouterConnectionParser.normalizeHostInput(host)
-                    val cleanHost = parsed.host.ifBlank { host.trim() }
                     val cleanUser = username.trim()
                     val effectiveUseTls = useTls || port == 8729
                     lastHost = cleanHost
@@ -124,12 +162,20 @@ class RouterOsApiClient {
                     lastUsername = cleanUser
                     lastPassword = password
                     lastUseTls = effectiveUseTls
+                    lastConnectTimeoutMs = effectiveConnectMs
 
-                    val sock = createRouterSocket(cleanHost, port, timeoutMs, effectiveUseTls)
+                    val sock = createRouterSocket(
+                        host = cleanHost,
+                        port = port,
+                        connectTimeoutMs = effectiveConnectMs,
+                        handshakeTimeoutMs = effectiveHandshakeMs,
+                        useTls = effectiveUseTls
+                    )
                     socket = sock
                     inStream = sock.getInputStream()
                     outStream = sock.getOutputStream()
 
+                    phase = "LOGIN_HANDSHAKE"
                     // Attempt RouterOS v6.43+ and v7 login
                     writeSentenceLocked(listOf("/login", "=name=$cleanUser", "=password=$password"))
                     var response = readSingleSentenceLocked()
@@ -143,6 +189,7 @@ class RouterOsApiClient {
 
                     // Success
                     if (replyType == "!done" && response.none { it.startsWith("=ret=") }) {
+                        runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
                         return@synchronized Result.success(true)
                     }
 
@@ -161,6 +208,7 @@ class RouterOsApiClient {
                         writeSentenceLocked(listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
                         response = readSingleSentenceLocked()
                         if (response.firstOrNull() == "!done") {
+                            runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
                             return@synchronized Result.success(true)
                         }
                     }
@@ -181,10 +229,21 @@ class RouterOsApiClient {
                     Result.failure(Exception(userFriendlyError))
                 } catch (e: UnknownHostException) {
                     closeSocketOnlyLocked()
-                    Result.failure(Exception("تعذر حل اسم النطاق (${host.trim()}). تأكد من كتابة العنوان بشكل صحيح واتصال الجهاز بالإنترنت أو الشبكة."))
+                    Result.failure(e)
                 } catch (e: SSLException) {
                     closeSocketOnlyLocked()
-                    Result.failure(Exception("فشل التفاوض الأمني SSL على المنفذ ($port): ${e.localizedMessage ?: "شهادة غير موثوقة أو غير صالحة"}"))
+                    Result.failure(Exception("فشل التفاوض الأمني SSL على المنفذ ($port): ${e.localizedMessage ?: "شهادة غير موثوقة أو غير صالحة"}", e))
+                } catch (e: java.net.SocketTimeoutException) {
+                    closeSocketOnlyLocked()
+                    val reason = if (phase == "TCP_CONNECT") {
+                        "انتهى وقت محاولة الوصول (${effectiveConnectMs}ms) إلى الراوتر ($cleanHost:$port)."
+                    } else {
+                        "اتصل الجهاز بالمنفذ ($port) لكن انتهى وقت انتظار رد المصادقة (${effectiveHandshakeMs}ms) — تأكد أن المنفذ مخصص لـ RouterOS API."
+                    }
+                    Result.failure(java.net.SocketTimeoutException(reason).apply { initCause(e) })
+                } catch (e: java.net.ConnectException) {
+                    closeSocketOnlyLocked()
+                    Result.failure(java.net.ConnectException("رفض الراوتر ($cleanHost) الاتصال المباشر على المنفذ ($port) — تأكد من تفعيل خدمة api من IP -> Services.").apply { initCause(e) })
                 } catch (e: Exception) {
                     closeSocketOnlyLocked()
                     Result.failure(e)
@@ -247,7 +306,10 @@ class RouterOsApiClient {
                 if (!ensureConnected()) {
                     return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
                 }
-                val sentences = executeSentence(listOf("/ip/hotspot/active/print"))
+                val sentences = executeQueryWithProplist(
+                    command = "/ip/hotspot/active/print",
+                    proplist = ".id,user,address,mac-address,uptime,bytes-in,bytes-out,login-by,session-time-left,comment"
+                )
                 val list = mutableListOf<HotspotActiveUser>()
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
@@ -281,7 +343,10 @@ class RouterOsApiClient {
                 if (!ensureConnected()) {
                     return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
                 }
-                val sentences = executeSentence(listOf("/ip/hotspot/user/print"))
+                val sentences = executeQueryWithProplist(
+                    command = "/ip/hotspot/user/print",
+                    proplist = ".id,name,password,profile,uptime,bytes-in,bytes-out,limit-uptime,limit-bytes-total,limit-bytes-out,limit-bytes-in,comment,disabled"
+                )
                 val list = mutableListOf<HotspotCard>()
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
@@ -426,9 +491,11 @@ class RouterOsApiClient {
                                 val lData = v7Limitations[bLimitName] ?: continue
                                 val downLimit = lData["download-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
                                 val upLimit = lData["upload-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
-                                val totalLimit = lData["transfer-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
-                                    ?: lData["total-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) } ?: 0L
-                                    ?: (if (downLimit > 0L || upLimit > 0L) downLimit + upLimit else 0L)
+                                val transferLimit = lData["transfer-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) }?.takeIf { it > 0L }
+                                val explicitTotal = lData["total-limit"]?.let { com.example.data.network.NetworkUtils.parseSizeToBytes(it) }?.takeIf { it > 0L }
+                                val totalLimit = transferLimit
+                                    ?: explicitTotal
+                                    ?: if (downLimit > 0L || upLimit > 0L) downLimit + upLimit else 0L
 
                                 if (totalLimit > 0L) {
                                     resolvedDataLimit = formatBytes(totalLimit)
@@ -585,14 +652,14 @@ class RouterOsApiClient {
                 var isUserManager = profile.source.contains("usermanager")
 
                 if (!profileId.startsWith("*")) {
-                    val printSentences = executeSentence(listOf("/ip/hotspot/user/profile/print", "?name=${profile.name}"))
+                    val printSentences = executeCommandSentence(listOf("/ip/hotspot/user/profile/print", "?name=${profile.name}"))
                     val hsRe = printSentences.firstOrNull { it.firstOrNull() == "!re" }
                     if (hsRe != null) {
                         val map = parseSentenceToMap(hsRe)
                         profileId = map[".id"] ?: profileId
                     } else {
                         // Check User Manager
-                        val umPrint = executeSentence(listOf("/user-manager/profile/print", "?name=${profile.name}"))
+                        val umPrint = executeCommandSentence(listOf("/user-manager/profile/print", "?name=${profile.name}"))
                         val umRe = umPrint.firstOrNull { it.firstOrNull() == "!re" }
                         if (umRe != null) {
                             val map = parseSentenceToMap(umRe)
@@ -609,7 +676,7 @@ class RouterOsApiClient {
                     words.add("=validity=$valTime")
                     val priceNum = profile.priceNumber.takeIf { it > 0 } ?: profile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 0.0
                     if (priceNum > 0) words.add("=price=${priceNum.toInt()}")
-                    val sentences = executeSentence(words)
+                    val sentences = executeCommandSentence(words)
                     val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                     if (trap != null) {
                         val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل تحديث باقة يوزرمانجر"
@@ -638,7 +705,7 @@ class RouterOsApiClient {
                     words.add("=comment=${profile.comment}")
                 }
 
-                val sentences = executeSentence(words)
+                val sentences = executeCommandSentence(words)
                 val trapSentence = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                 if (trapSentence != null) {
                     val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
@@ -843,7 +910,15 @@ class RouterOsApiClient {
     suspend fun kickUser(userId: String): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                val sentences = executeSentence(listOf("/ip/hotspot/active/remove", "=.id=$userId"))
+                val sentences = executeCommandSentence(listOf("/ip/hotspot/active/remove", "=.id=$userId"))
+                val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (trap != null) {
+                    val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "تعذر فصل المشترك"
+                    if (msg.contains("no such item", true) || msg.contains("not found", true)) {
+                        return@withContext Result.success(true)
+                    }
+                    return@withContext Result.failure(Exception(msg))
+                }
                 val isDone = sentences.any { it.firstOrNull() == "!done" }
                 Result.success(isDone)
             } catch (e: Exception) {
@@ -857,13 +932,13 @@ class RouterOsApiClient {
         if (cleanName.isBlank()) return
         try {
             if (system == null || system == CardTargetSystem.HOTSPOT) {
-                val sentences = executeSentence(listOf("/ip/hotspot/active/print", "?user=$cleanName"))
+                val sentences = executeCommandSentence(listOf("/ip/hotspot/active/print", "?user=$cleanName"))
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
                         val map = parseSentenceToMap(s)
                         val actId = map[".id"]
                         if (!actId.isNullOrBlank()) {
-                            executeSentence(listOf("/ip/hotspot/active/remove", "=.id=$actId"))
+                            executeCommandSentence(listOf("/ip/hotspot/active/remove", "=.id=$actId"))
                         }
                     }
                 }
@@ -871,13 +946,13 @@ class RouterOsApiClient {
 
             if (system == null || system == CardTargetSystem.USER_MANAGER_V7) {
                 try {
-                    val sentences = executeSentence(listOf("/user-manager/session/print", "?user=$cleanName"))
+                    val sentences = executeCommandSentence(listOf("/user-manager/session/print", "?user=$cleanName"))
                     for (s in sentences) {
                         if (s.firstOrNull() == "!re") {
                             val map = parseSentenceToMap(s)
                             val actId = map[".id"]
                             if (!actId.isNullOrBlank()) {
-                                executeSentence(listOf("/user-manager/session/remove", "=.id=$actId"))
+                                executeCommandSentence(listOf("/user-manager/session/remove", "=.id=$actId"))
                             }
                         }
                     }
@@ -886,13 +961,13 @@ class RouterOsApiClient {
 
             if (system == null || system == CardTargetSystem.USER_MANAGER_V6) {
                 try {
-                    val sentences = executeSentence(listOf("/tool/user-manager/active-sessions/print", "?user=$cleanName"))
+                    val sentences = executeCommandSentence(listOf("/tool/user-manager/active-sessions/print", "?user=$cleanName"))
                     for (s in sentences) {
                         if (s.firstOrNull() == "!re") {
                             val map = parseSentenceToMap(s)
                             val actId = map[".id"] ?: map["user"]
                             if (!actId.isNullOrBlank()) {
-                                executeSentence(listOf("/tool/user-manager/active-sessions/remove", "=numbers=$actId"))
+                                executeCommandSentence(listOf("/tool/user-manager/active-sessions/remove", "=numbers=$actId"))
                             }
                         }
                     }
@@ -905,9 +980,9 @@ class RouterOsApiClient {
         val targetName = cardName.trim().ifBlank { cardId.trim() }
         if (targetName.isBlank()) return null
 
-        suspend fun queryItem(cmd: String, filter: String): Map<String, String>? {
+        fun queryItem(cmd: String, filter: String): Map<String, String>? {
             return try {
-                val sentences = executeSentence(listOf(cmd, filter))
+                val sentences = executeCommandSentence(listOf(cmd, filter))
                 val re = sentences.firstOrNull { it.firstOrNull() == "!re" }
                 if (re != null) parseSentenceToMap(re) else null
             } catch (_: Exception) {
@@ -984,8 +1059,9 @@ class RouterOsApiClient {
                 // 2. Disconnect active session first immediately
                 disconnectActiveSession(targetName, resolved?.system)
 
+                var realTrapError: String? = null
                 fun executeRemoval(cmd: String, idParam: String): Result<Boolean> {
-                    val sentences = executeSentence(listOf(cmd, idParam))
+                    val sentences = executeCommandSentence(listOf(cmd, idParam))
                     val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                     if (trap != null) {
                         val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "رفض الراوتر حذف الكرت"
@@ -996,11 +1072,14 @@ class RouterOsApiClient {
                         // Fallback: If .id was rejected as unknown parameter, retry with numbers
                         if (idParam.startsWith("=.id=") && (msg.contains("unknown parameter", true) || msg.contains("syntax", true))) {
                             val altParam = "=numbers=" + idParam.removePrefix("=.id=")
-                            val altSentences = executeSentence(listOf(cmd, altParam))
+                            val altSentences = executeCommandSentence(listOf(cmd, altParam))
                             val altTrap = altSentences.firstOrNull { it.firstOrNull() == "!trap" }
                             if (altTrap == null && altSentences.any { it.firstOrNull() == "!done" }) {
                                 return Result.success(true)
                             }
+                        }
+                        if (!msg.contains("no such command", true) && !msg.contains("unknown command", true)) {
+                            realTrapError = msg
                         }
                         return Result.failure(Exception(msg))
                     }
@@ -1029,6 +1108,7 @@ class RouterOsApiClient {
                         }
                     }
                     if (res.isSuccess) return@withContext res
+                    if (realTrapError != null) return@withContext Result.failure(Exception(realTrapError!!))
                 }
 
                 // Fallback removal across systems
@@ -1052,6 +1132,9 @@ class RouterOsApiClient {
                     if (um6Res.isSuccess) return@withContext um6Res
                 }
 
+                if (realTrapError != null) {
+                    return@withContext Result.failure(Exception(realTrapError!!))
+                }
                 // If not found anywhere on the router, it has already been removed
                 Result.success(true)
             } catch (e: Exception) {
@@ -1061,6 +1144,10 @@ class RouterOsApiClient {
     }
 
     suspend fun toggleCardDisabled(cardId: String, currentDisabled: Boolean, cardName: String = ""): Result<Boolean> {
+        return setCardDisabled(cardId, targetDisabled = !currentDisabled, cardName = cardName)
+    }
+
+    suspend fun setCardDisabled(cardId: String, targetDisabled: Boolean, cardName: String = ""): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
                 if (!ensureConnected()) {
@@ -1068,18 +1155,24 @@ class RouterOsApiClient {
                 }
                 val targetName = cardName.trim().ifBlank { cardId.trim() }
                 val resolved = resolveCardTarget(cardId, targetName)
-                    ?: ResolvedCardTarget(CardTargetSystem.HOTSPOT, cardId, targetName)
 
-                val willDisable = !currentDisabled
+                val willDisable = targetDisabled
                 val newVal = if (willDisable) "yes" else "no"
 
                 // Disconnect active session if disabling
                 if (willDisable) {
-                    disconnectActiveSession(targetName, resolved.system)
+                    disconnectActiveSession(targetName, resolved?.system)
+                }
+
+                fun isMissingItemTrap(msg: String): Boolean {
+                    return msg.contains("no such item", ignoreCase = true) ||
+                        msg.contains("not found", ignoreCase = true) ||
+                        msg.contains("no such command", ignoreCase = true) ||
+                        msg.contains("unknown command", ignoreCase = true)
                 }
 
                 fun executeSet(cmd: String, idParam: String): Result<Boolean> {
-                    val sentences = executeSentence(listOf(cmd, idParam, "=disabled=$newVal"))
+                    val sentences = executeCommandSentence(listOf(cmd, idParam, "=disabled=$newVal"))
                     val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                     if (trap != null) {
                         val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل تغيير حالة الكرت"
@@ -1091,20 +1184,49 @@ class RouterOsApiClient {
                     return Result.failure(Exception("لم يؤكد الراوتر تغيير حالة الكرت"))
                 }
 
-                when (resolved.system) {
-                    CardTargetSystem.HOTSPOT -> {
-                        val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=$targetName"
-                        return@withContext executeSet("/ip/hotspot/user/set", idParam)
-                    }
-                    CardTargetSystem.USER_MANAGER_V7 -> {
-                        val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=$targetName"
-                        return@withContext executeSet("/user-manager/user/set", idParam)
-                    }
-                    CardTargetSystem.USER_MANAGER_V6 -> {
-                        val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=$targetName"
-                        return@withContext executeSet("/tool/user-manager/user/set", idParam)
+                fun commandFor(sys: CardTargetSystem): String = when (sys) {
+                    CardTargetSystem.HOTSPOT -> "/ip/hotspot/user/set"
+                    CardTargetSystem.USER_MANAGER_V7 -> "/user-manager/user/set"
+                    CardTargetSystem.USER_MANAGER_V6 -> "/tool/user-manager/user/set"
+                }
+
+                if (resolved != null) {
+                    val cmd = commandFor(resolved.system)
+                    val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=$targetName"
+                    val primary = executeSet(cmd, idParam)
+                    if (primary.isSuccess) return@withContext primary
+                    val errMsg = primary.exceptionOrNull()?.message.orEmpty()
+                    if (!isMissingItemTrap(errMsg)) {
+                        return@withContext primary
                     }
                 }
+
+                val candidateSystems = listOf(
+                    CardTargetSystem.HOTSPOT,
+                    CardTargetSystem.USER_MANAGER_V7,
+                    CardTargetSystem.USER_MANAGER_V6
+                ).filter { it != resolved?.system }
+
+                var lastFailure: Result<Boolean>? = null
+                for (sys in candidateSystems) {
+                    val cmd = commandFor(sys)
+                    if (sys == CardTargetSystem.HOTSPOT && cardId.startsWith("*")) {
+                        val byId = executeSet(cmd, "=.id=$cardId")
+                        if (byId.isSuccess) return@withContext byId
+                        val byIdErr = byId.exceptionOrNull()?.message.orEmpty()
+                        if (!isMissingItemTrap(byIdErr)) return@withContext byId
+                        lastFailure = byId
+                    }
+                    if (targetName.isNotBlank()) {
+                        val byName = executeSet(cmd, "=numbers=$targetName")
+                        if (byName.isSuccess) return@withContext byName
+                        val byNameErr = byName.exceptionOrNull()?.message.orEmpty()
+                        if (!isMissingItemTrap(byNameErr)) return@withContext byName
+                        lastFailure = byName
+                    }
+                }
+
+                lastFailure ?: Result.failure(Exception("لم يتم العثور على الكرت ($targetName) في الراوتر"))
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -1223,7 +1345,7 @@ class RouterOsApiClient {
 
     private fun ensureHotspotProfileExists(profileName: String, targetProfile: HotspotProfile?) {
         try {
-            val sentences = executeSentence(listOf("/ip/hotspot/user/profile/print", "?name=$profileName"))
+            val sentences = executeCommandSentence(listOf("/ip/hotspot/user/profile/print", "?name=$profileName"))
             val exists = sentences.any { it.firstOrNull() == "!re" }
             if (!exists) {
                 val words = mutableListOf(
@@ -1236,14 +1358,14 @@ class RouterOsApiClient {
                 val timeout = targetProfile?.sessionTimeout?.let { formatRouterOsTime(it) }
                 if (timeout != null) words.add("=session-timeout=$timeout")
                 if (!targetProfile?.price.isNullOrBlank()) words.add("=comment=price=${targetProfile.price}")
-                executeSentence(words)
+                executeCommandSentence(words)
             }
         } catch (_: Exception) {}
     }
 
     private fun createHotspotProfileSimple(profileName: String) {
         try {
-            executeSentence(listOf("/ip/hotspot/user/profile/add", "=name=$profileName", "=shared-users=1"))
+            executeCommandSentence(listOf("/ip/hotspot/user/profile/add", "=name=$profileName", "=shared-users=1"))
         } catch (_: Exception) {}
     }
 
@@ -1251,25 +1373,25 @@ class RouterOsApiClient {
         if (isV6) {
             try {
                 // Check v6 only
-                val v6Sentences = executeSentence(listOf("/tool/user-manager/profile/print", "?name=$profileName"))
+                val v6Sentences = executeCommandSentence(listOf("/tool/user-manager/profile/print", "?name=$profileName"))
                 if (v6Sentences.none { it.firstOrNull() == "!re" }) {
                     val v6Words = mutableListOf("/tool/user-manager/profile/add", "=name=$profileName", "=customer=admin")
                     val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
                     v6Words.add("=validity=$valTime")
-                    executeSentence(v6Words)
+                    executeCommandSentence(v6Words)
                 }
             } catch (_: Exception) {}
         } else {
             try {
                 // Check v7 only
-                val v7Sentences = executeSentence(listOf("/user-manager/profile/print", "?name=$profileName"))
+                val v7Sentences = executeCommandSentence(listOf("/user-manager/profile/print", "?name=$profileName"))
                 if (v7Sentences.none { it.firstOrNull() == "!re" }) {
                     val v7Words = mutableListOf("/user-manager/profile/add", "=name=$profileName")
                     val valTime = targetProfile?.validity?.let { formatRouterOsTime(it) } ?: "1d"
                     v7Words.add("=validity=$valTime")
                     val priceNum = targetProfile?.priceNumber?.takeIf { it > 0 } ?: 0.0
                     if (priceNum > 0) v7Words.add("=price=${priceNum.toInt()}")
-                    executeSentence(v7Words)
+                    executeCommandSentence(v7Words)
                 }
             } catch (_: Exception) {}
         }
@@ -1287,7 +1409,8 @@ class RouterOsApiClient {
         if (cleanProfile.isNotBlank()) {
             words.add("=profile=$cleanProfile")
         }
-        words.add("=disabled=no")
+        val disabledFlag = if (card.disabled) "yes" else "no"
+        words.add("=disabled=$disabledFlag")
         words.add("=server=all")
 
         val validUptime = formatRouterOsTime(card.limitUptime)
@@ -1301,22 +1424,22 @@ class RouterOsApiClient {
             words.add("=comment=${card.comment}")
         }
 
-        val sentences = executeSentence(words)
+        val sentences = executeCommandSentence(words)
         val trapSentence = sentences.firstOrNull { it.firstOrNull() == "!trap" }
         if (trapSentence != null) {
             val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                 ?: "رفض راوتر ميكروتك إضافة الكرت"
-            
-            // If already exists on router, ensure it's enabled and active
+
+            // If already exists on router, sync its requested disabled flag
             if (trapMsg.contains("already exists", ignoreCase = true) || trapMsg.contains("already have", ignoreCase = true)) {
-                executeSentence(listOf("/ip/hotspot/user/set", "=numbers=${card.name.trim()}", "=disabled=no"))
+                executeCommandSentence(listOf("/ip/hotspot/user/set", "=numbers=${card.name.trim()}", "=disabled=$disabledFlag"))
                 return Result.success(true)
             }
 
-            // If server parameter was rejected (some v6 firmware)
+            // If server parameter was rejected (some v6 firmware / setups)
             if (trapMsg.contains("server", ignoreCase = true) || trapMsg.contains("unknown parameter", ignoreCase = true)) {
                 val simpleWords = words.filter { !it.startsWith("=server=") }
-                val retrySentences = executeSentence(simpleWords)
+                val retrySentences = executeCommandSentence(simpleWords)
                 if (retrySentences.any { it.firstOrNull() == "!done" } && retrySentences.none { it.firstOrNull() == "!trap" }) {
                     return Result.success(true)
                 }
@@ -1335,7 +1458,7 @@ class RouterOsApiClient {
                 val simpleWords = mutableListOf(
                     "/ip/hotspot/user/add",
                     "=name=${card.name.trim()}",
-                    "=disabled=no"
+                    "=disabled=$disabledFlag"
                 )
                 if (card.password.isNotBlank()) {
                     simpleWords.add("=password=${card.password.trim()}")
@@ -1346,7 +1469,7 @@ class RouterOsApiClient {
                 if (card.comment.isNotBlank()) {
                     simpleWords.add("=comment=${card.comment}")
                 }
-                val retrySentences = executeSentence(simpleWords)
+                val retrySentences = executeCommandSentence(simpleWords)
                 val retryTrap = retrySentences.firstOrNull { it.firstOrNull() == "!trap" }
                 if (retryTrap == null && retrySentences.any { it.firstOrNull() == "!done" }) {
                     return Result.success(true)
@@ -1371,7 +1494,7 @@ class RouterOsApiClient {
             var internalId: String? = null
             var userExists = false
             try {
-                val printExisting = executeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
+                val printExisting = executeCommandSentence(listOf("/user-manager/user/print", "?name=$cardName"))
                 for (s in printExisting) {
                     if (s.firstOrNull() == "!re") {
                         userExists = true
@@ -1384,12 +1507,13 @@ class RouterOsApiClient {
                 }
             } catch (_: Exception) {}
 
+            val disabledFlag = if (card.disabled) "yes" else "no"
             // Stage 2: Create user if not already present
             if (!userExists) {
                 val words = mutableListOf(
                     "/user-manager/user/add",
                     "=name=$cardName",
-                    "=disabled=no"
+                    "=disabled=$disabledFlag"
                 )
                 if (card.password.isNotBlank()) {
                     words.add("=password=${card.password.trim()}")
@@ -1397,7 +1521,7 @@ class RouterOsApiClient {
                 if (card.comment.isNotBlank()) {
                     words.add("=comment=${card.comment}")
                 }
-                val addSentences = executeSentence(words)
+                val addSentences = executeCommandSentence(words)
                 val trap = addSentences.firstOrNull { it.firstOrNull() == "!trap" }
                 if (trap != null) {
                     val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إضافة مستخدم يوزرمانجر"
@@ -1419,7 +1543,7 @@ class RouterOsApiClient {
             if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
                 var profileAlreadyBound = false
                 try {
-                    val existingProfSentences = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
+                    val existingProfSentences = executeCommandSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
                     profileAlreadyBound = existingProfSentences.any { s ->
                         s.firstOrNull() == "!re" && s.any { it.startsWith("=profile=") && it.removePrefix("=profile=").trim().equals(cleanProfile, ignoreCase = true) }
                     }
@@ -1431,14 +1555,14 @@ class RouterOsApiClient {
                         "=user=$cardName",
                         "=profile=$cleanProfile"
                     )
-                    val profSentences = executeSentence(profWords)
+                    val profSentences = executeCommandSentence(profWords)
                     val profTrap = profSentences.firstOrNull { it.firstOrNull() == "!trap" }
                     if (profTrap != null) {
                         val profMsg = profTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                             ?: "فشل ربط المستخدم بالباقة في يوزرمانجر"
-                        
+
                         if (!profMsg.contains("already", ignoreCase = true)) {
-                            val recheck = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
+                            val recheck = executeCommandSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
                             val verified = recheck.any { it.firstOrNull() == "!re" }
                             if (!verified) {
                                 return Result.failure(Exception("تم إنشاء المستخدم $cardName ولكن تعذر ربط الباقة ($cleanProfile): $profMsg"))
@@ -1448,10 +1572,10 @@ class RouterOsApiClient {
                 }
             }
 
-            // Stage 4: Ensure User is active & enabled (only if user existed and had internalId)
+            // Stage 4: Ensure requested disabled state (only if user existed and had internalId)
             if (userExists && !internalId.isNullOrBlank()) {
                 try {
-                    executeSentence(listOf("/user-manager/user/set", "=numbers=$internalId", "=disabled=no"))
+                    executeCommandSentence(listOf("/user-manager/user/set", "=numbers=$internalId", "=disabled=$disabledFlag"))
                 } catch (_: Exception) {}
             }
 
@@ -1459,17 +1583,17 @@ class RouterOsApiClient {
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
             val rawMsg = e.message ?: e.localizedMessage ?: "Timeout"
-            
+
             // Reconciliation check
             try {
-                if (ensureConnectedInternal()) {
-                    val checkUser = executeSentence(listOf("/user-manager/user/print", "?name=$cardName"))
+                if (!isExplicitlyClosed && lastHost.isNotBlank()) {
+                    val checkUser = executeCommandSentence(listOf("/user-manager/user/print", "?name=$cardName"))
                     if (checkUser.any { it.firstOrNull() == "!re" }) {
                         if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
                             try {
-                                val checkProf = executeSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
+                                val checkProf = executeCommandSentence(listOf("/user-manager/user-profile/print", "?user=$cardName"))
                                 if (checkProf.none { it.firstOrNull() == "!re" }) {
-                                    executeSentence(listOf("/user-manager/user-profile/add", "=user=$cardName", "=profile=$cleanProfile"))
+                                    executeCommandSentence(listOf("/user-manager/user-profile/add", "=user=$cardName", "=profile=$cleanProfile"))
                                 }
                             } catch (_: Exception) {}
                         }
@@ -1493,7 +1617,7 @@ class RouterOsApiClient {
             var internalId: String? = null
             var userAlreadyExists = false
             try {
-                val checkV6 = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
+                val checkV6 = executeCommandSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
                 for (s in checkV6) {
                     if (s.firstOrNull() == "!re") {
                         userAlreadyExists = true
@@ -1506,13 +1630,14 @@ class RouterOsApiClient {
                 }
             } catch (_: Exception) {}
 
+            val disabledFlag = if (card.disabled) "yes" else "no"
             // Stage 2: Add user in User Manager v6 if not present
             if (!userAlreadyExists) {
                 val words = mutableListOf(
                     "/tool/user-manager/user/add",
                     "=username=$cardName",
                     "=customer=$cust",
-                    "=disabled=no"
+                    "=disabled=$disabledFlag"
                 )
                 if (card.password.isNotBlank()) {
                     words.add("=password=${card.password.trim()}")
@@ -1520,7 +1645,7 @@ class RouterOsApiClient {
                 if (card.comment.isNotBlank()) {
                     words.add("=comment=${card.comment}")
                 }
-                val addSentences = executeSentence(words)
+                val addSentences = executeCommandSentence(words)
                 val trap = addSentences.firstOrNull { it.firstOrNull() == "!trap" }
                 if (trap != null) {
                     val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إضافة كرت يوزرمانجر v6"
@@ -1538,7 +1663,7 @@ class RouterOsApiClient {
             // Ensure we have the internalId if missing
             if (internalId.isNullOrBlank()) {
                 try {
-                    val reCheck = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
+                    val reCheck = executeCommandSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
                     for (s in reCheck) {
                         if (s.firstOrNull() == "!re") {
                             val idVal = s.firstOrNull { it.startsWith("=.id=") }?.removePrefix("=.id=")
@@ -1555,14 +1680,14 @@ class RouterOsApiClient {
             if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
                 var profileAssigned = false
 
-                // Method A: Direct user-profile/add (Fastest and safest in RouterOS v6, binds by username without numbers ambiguity)
+                // Method A: Direct user-profile/add
                 try {
                     val userProfWords = listOf(
                         "/tool/user-manager/user-profile/add",
                         "=user=$cardName",
                         "=profile=$cleanProfile"
                     )
-                    val profSentences = executeSentence(userProfWords)
+                    val profSentences = executeCommandSentence(userProfWords)
                     val profTrap = profSentences.firstOrNull { it.firstOrNull() == "!trap" }
                     val profDone = profSentences.any { it.firstOrNull() == "!done" }
                     if (profDone && profTrap == null) {
@@ -1581,7 +1706,7 @@ class RouterOsApiClient {
                         if (cust.isNotBlank()) {
                             actWords.add("=customer=$cust")
                         }
-                        val actSentences = executeSentence(actWords)
+                        val actSentences = executeCommandSentence(actWords)
                         val actTrap = actSentences.firstOrNull { it.firstOrNull() == "!trap" }
                         val actDone = actSentences.any { it.firstOrNull() == "!done" }
                         if (actDone && actTrap == null) {
@@ -1598,7 +1723,7 @@ class RouterOsApiClient {
                             "=numbers=$internalId",
                             "=profile=$cleanProfile"
                         )
-                        val actSentences = executeSentence(actWords)
+                        val actSentences = executeCommandSentence(actWords)
                         val actTrap = actSentences.firstOrNull { it.firstOrNull() == "!trap" }
                         val actDone = actSentences.any { it.firstOrNull() == "!done" }
                         if (actDone && actTrap == null) {
@@ -1610,7 +1735,7 @@ class RouterOsApiClient {
                 // Method D: Verify if profile is bound or active
                 if (!profileAssigned) {
                     try {
-                        val checkProf = executeSentence(listOf("/tool/user-manager/user-profile/print", "?user=$cardName"))
+                        val checkProf = executeCommandSentence(listOf("/tool/user-manager/user-profile/print", "?user=$cardName"))
                         if (checkProf.any { it.firstOrNull() == "!re" }) {
                             profileAssigned = true
                         }
@@ -1622,10 +1747,10 @@ class RouterOsApiClient {
                 }
             }
 
-            // Stage 4: Ensure active and enabled (only if previously existed or using internalId)
+            // Stage 4: Ensure requested disabled state (only if previously existed or using internalId)
             if (userAlreadyExists && !internalId.isNullOrBlank()) {
                 try {
-                    executeSentence(listOf("/tool/user-manager/user/set", "=numbers=$internalId", "=disabled=no"))
+                    executeCommandSentence(listOf("/tool/user-manager/user/set", "=numbers=$internalId", "=disabled=$disabledFlag"))
                 } catch (_: Exception) {}
             }
 
@@ -1636,14 +1761,13 @@ class RouterOsApiClient {
 
             // Non-blocking Reconciliation
             try {
-                if (ensureConnectedInternal()) {
-                    val checkV6 = executeSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
+                if (!isExplicitlyClosed && lastHost.isNotBlank()) {
+                    val checkV6 = executeCommandSentence(listOf("/tool/user-manager/user/print", "?username=$cardName"))
                     val userRec = checkV6.firstOrNull { it.firstOrNull() == "!re" }
                     if (userRec != null) {
-                        // User exists on the router! Fast profile assignment
                         if (cleanProfile.isNotBlank() && !cleanProfile.equals("default", ignoreCase = true)) {
                             try {
-                                executeSentence(listOf(
+                                executeCommandSentence(listOf(
                                     "/tool/user-manager/user-profile/add",
                                     "=user=$cardName",
                                     "=profile=$cleanProfile"
@@ -1662,10 +1786,12 @@ class RouterOsApiClient {
     suspend fun syncProfileToUserManager(profile: HotspotProfile): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                ensureConnected()
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
+                }
                 val cleanName = profile.name.trim()
                 if (cleanName.isBlank()) return@withContext Result.failure(Exception("اسم الباقة فارغ"))
-                
+
                 // Try v7 user-manager profile add
                 val v7Words = mutableListOf(
                     "/user-manager/profile/add",
@@ -1679,9 +1805,13 @@ class RouterOsApiClient {
                 if (priceNum != null && priceNum > 0) {
                     v7Words.add("=price=${priceNum.toInt()}")
                 }
-                val v7Sentences = executeSentence(v7Words)
+                val v7Sentences = executeCommandSentence(v7Words)
                 val v7Trap = v7Sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                val v7TrapMsg = v7Trap?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                 if (v7Trap == null && v7Sentences.any { it.firstOrNull() == "!done" }) {
+                    return@withContext Result.success(true)
+                }
+                if (v7TrapMsg != null && v7TrapMsg.contains("already", ignoreCase = true)) {
                     return@withContext Result.success(true)
                 }
 
@@ -1698,12 +1828,20 @@ class RouterOsApiClient {
                     val validTime = formatRouterOsTime(profile.validity)
                     if (validTime != null) v6Words.add("=validity=$validTime")
                 }
-                val v6Sentences = executeSentence(v6Words)
-                if (v6Sentences.any { it.firstOrNull() == "!done" }) {
+                val v6Sentences = executeCommandSentence(v6Words)
+                val v6Trap = v6Sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                val v6TrapMsg = v6Trap?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                if (v6Trap == null && v6Sentences.any { it.firstOrNull() == "!done" }) {
+                    return@withContext Result.success(true)
+                }
+                if (v6TrapMsg != null && v6TrapMsg.contains("already", ignoreCase = true)) {
                     return@withContext Result.success(true)
                 }
 
-                Result.success(true)
+                val realErr = listOfNotNull(v7TrapMsg, v6TrapMsg)
+                    .firstOrNull { !it.contains("no such command", ignoreCase = true) && !it.contains("unknown command", ignoreCase = true) }
+                    ?: "تعذر مزامنة الباقة مع User Manager"
+                Result.failure(Exception(realErr))
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -1739,21 +1877,33 @@ class RouterOsApiClient {
                     when (resolved.system) {
                         CardTargetSystem.HOTSPOT -> {
                             val targetParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=${resolved.internalId}"
-                            val sentences = executeSentence(listOf(
+                            var sentences = executeCommandSentence(listOf(
                                 "/ip/hotspot/user/set",
                                 targetParam,
                                 "=disabled=no",
                                 "=profile=$cleanProfile",
                                 "=server=all"
                             ))
-                            val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                            var trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                            if (trap != null) {
+                                val trapMsg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=").orEmpty()
+                                if (trapMsg.contains("server", ignoreCase = true) || trapMsg.contains("unknown parameter", ignoreCase = true)) {
+                                    sentences = executeCommandSentence(listOf(
+                                        "/ip/hotspot/user/set",
+                                        targetParam,
+                                        "=disabled=no",
+                                        "=profile=$cleanProfile"
+                                    ))
+                                    trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                                }
+                            }
                             if (trap == null && sentences.any { it.firstOrNull() == "!done" }) {
                                 activated = true
                             }
                         }
                         CardTargetSystem.USER_MANAGER_V7 -> {
                             val targetParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=${resolved.internalId}"
-                            val sentences = executeSentence(listOf(
+                            val sentences = executeCommandSentence(listOf(
                                 "/user-manager/user/set",
                                 targetParam,
                                 "=disabled=no"
@@ -1764,7 +1914,7 @@ class RouterOsApiClient {
                             }
                         }
                         CardTargetSystem.USER_MANAGER_V6 -> {
-                            val sentences = executeSentence(listOf(
+                            val sentences = executeCommandSentence(listOf(
                                 "/tool/user-manager/user/set",
                                 "=numbers=$targetName",
                                 "=disabled=no"
@@ -1779,20 +1929,32 @@ class RouterOsApiClient {
 
                 // 3. Fallback: Query Hotspot print by name
                 if (!activated) {
-                    val hsPrint = executeSentence(listOf("/ip/hotspot/user/print", "?name=$targetName"))
+                    val hsPrint = executeCommandSentence(listOf("/ip/hotspot/user/print", "?name=$targetName"))
                     val hsRe = hsPrint.firstOrNull { it.firstOrNull() == "!re" }
                     if (hsRe != null) {
                         val map = parseSentenceToMap(hsRe)
                         val internalId = map[".id"] ?: card.id
                         val targetParam = if (internalId.startsWith("*")) "=.id=$internalId" else "=numbers=$internalId"
-                        val setRes = executeSentence(listOf(
+                        var setRes = executeCommandSentence(listOf(
                             "/ip/hotspot/user/set",
                             targetParam,
                             "=disabled=no",
                             "=profile=$cleanProfile",
                             "=server=all"
                         ))
-                        val trap = setRes.firstOrNull { it.firstOrNull() == "!trap" }
+                        var trap = setRes.firstOrNull { it.firstOrNull() == "!trap" }
+                        if (trap != null) {
+                            val tMsg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=").orEmpty()
+                            if (tMsg.contains("server", ignoreCase = true) || tMsg.contains("unknown parameter", ignoreCase = true)) {
+                                setRes = executeCommandSentence(listOf(
+                                    "/ip/hotspot/user/set",
+                                    targetParam,
+                                    "=disabled=no",
+                                    "=profile=$cleanProfile"
+                                ))
+                                trap = setRes.firstOrNull { it.firstOrNull() == "!trap" }
+                            }
+                        }
                         if (trap != null) {
                             val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "رفض الراوتر تفعيل الكرت"
                             return@withContext Result.failure(Exception(msg))
@@ -1836,6 +1998,7 @@ class RouterOsApiClient {
                 when (resolved.system) {
                     CardTargetSystem.HOTSPOT -> {
                         val targetParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=${card.name}"
+                        val validUptime = formatRouterOsTime(card.limitUptime)
                         val words = mutableListOf(
                             "/ip/hotspot/user/set",
                             targetParam
@@ -1844,23 +2007,20 @@ class RouterOsApiClient {
                         if (cleanProfile.isNotEmpty()) words.add("=profile=$cleanProfile")
                         words.add("=disabled=${if (card.disabled) "yes" else "no"}")
                         words.add("=comment=$cleanComment")
-
-                        val validUptime = formatRouterOsTime(card.limitUptime)
                         if (!validUptime.isNullOrBlank() && validUptime != "0s") {
                             words.add("=limit-uptime=$validUptime")
                         }
-
                         if (card.limitBytesTotal > 0L) {
                             words.add("=limit-bytes-total=${card.limitBytesTotal}")
                         }
 
-                        val sentences = executeSentence(words)
-                        val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
-                        if (trap != null) {
-                            val trapMsg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                        var finalSentences = executeCommandSentence(words)
+                        var finalTrap = finalSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                        if (finalTrap != null) {
+                            val trapMsg = finalTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
                                 ?: "رفض راوتر ميكروتك تعديل كرت الهوتسبوت"
 
-                            // Retry 1: with name parameter
+                            // Retry 1: with name parameter, preserving limits & profile
                             val nameWords = mutableListOf(
                                 "/ip/hotspot/user/set",
                                 "=numbers=${card.name}",
@@ -1869,11 +2029,17 @@ class RouterOsApiClient {
                             if (cleanPassword.isNotEmpty()) nameWords.add("=password=$cleanPassword")
                             if (cleanProfile.isNotEmpty()) nameWords.add("=profile=$cleanProfile")
                             if (cleanComment.isNotEmpty()) nameWords.add("=comment=$cleanComment")
+                            if (!validUptime.isNullOrBlank() && validUptime != "0s") {
+                                nameWords.add("=limit-uptime=$validUptime")
+                            }
+                            if (card.limitBytesTotal > 0L) {
+                                nameWords.add("=limit-bytes-total=${card.limitBytesTotal}")
+                            }
 
-                            val nameSentences = executeSentence(nameWords)
-                            val nameTrap = nameSentences.firstOrNull { it.firstOrNull() == "!trap" }
-                            if (nameTrap != null) {
-                                // Retry 2: core targetParam without limits
+                            finalSentences = executeCommandSentence(nameWords)
+                            finalTrap = finalSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                            if (finalTrap != null) {
+                                // Retry 2: core targetParam without limits if router rejected limit syntax
                                 val coreWords = mutableListOf(
                                     "/ip/hotspot/user/set",
                                     targetParam,
@@ -1881,16 +2047,16 @@ class RouterOsApiClient {
                                 )
                                 if (cleanPassword.isNotEmpty()) coreWords.add("=password=$cleanPassword")
                                 if (cleanProfile.isNotEmpty()) coreWords.add("=profile=$cleanProfile")
-                                val coreSentences = executeSentence(coreWords)
-                                val coreTrap = coreSentences.firstOrNull { it.firstOrNull() == "!trap" }
-                                if (coreTrap != null) {
-                                    val retryMsg = coreTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: trapMsg
+                                finalSentences = executeCommandSentence(coreWords)
+                                finalTrap = finalSentences.firstOrNull { it.firstOrNull() == "!trap" }
+                                if (finalTrap != null) {
+                                    val retryMsg = finalTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: trapMsg
                                     return@withContext Result.failure(Exception("رفض الراوتر تعديل الكرت: $retryMsg"))
                                 }
                             }
                         }
-                        val isDone = sentences.any { it.firstOrNull() == "!done" }
-                        if (!isDone && trap != null) {
+                        val isDone = finalSentences.any { it.firstOrNull() == "!done" }
+                        if (!isDone || finalTrap != null) {
                             return@withContext Result.failure(Exception("لم يؤكد الراوتر تعديل الكرت"))
                         }
                         return@withContext Result.success(true)
@@ -1905,10 +2071,10 @@ class RouterOsApiClient {
                             "=comment=$cleanComment",
                             "=disabled=${if (card.disabled) "yes" else "no"}"
                         )
-                        var sentences = executeSentence(words)
+                        var sentences = executeCommandSentence(words)
                         var trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                         if (trap != null && targetParam != "=numbers=${card.name}") {
-                            sentences = executeSentence(listOf(
+                            sentences = executeCommandSentence(listOf(
                                 "/user-manager/user/set",
                                 "=numbers=${card.name}",
                                 "=password=$cleanPassword",
@@ -1923,13 +2089,41 @@ class RouterOsApiClient {
                         }
 
                         if (cleanProfile.isNotEmpty()) {
+                            var targetAlreadyBound = false
                             try {
-                                executeSentence(listOf(
+                                val existingProfSentences = executeCommandSentence(
+                                    listOf("/user-manager/user-profile/print", "?user=${card.name}")
+                                )
+                                for (ps in existingProfSentences) {
+                                    if (ps.firstOrNull() == "!re") {
+                                        val pMap = parseSentenceToMap(ps)
+                                        val boundProf = pMap["profile"].orEmpty().trim()
+                                        val boundId = pMap[".id"].orEmpty()
+                                        if (boundProf.equals(cleanProfile, ignoreCase = true)) {
+                                            targetAlreadyBound = true
+                                        } else if (boundId.isNotBlank()) {
+                                            executeCommandSentence(
+                                                listOf("/user-manager/user-profile/remove", "=.id=$boundId")
+                                            )
+                                        }
+                                    }
+                                }
+                            } catch (_: Exception) {}
+
+                            if (!targetAlreadyBound) {
+                                val addProfRes = executeCommandSentence(listOf(
                                     "/user-manager/user-profile/add",
                                     "=user=${card.name}",
                                     "=profile=$cleanProfile"
                                 ))
-                            } catch (_: Exception) {}
+                                val addTrap = addProfRes.firstOrNull { it.firstOrNull() == "!trap" }
+                                if (addTrap != null) {
+                                    val msg = addTrap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=").orEmpty()
+                                    if (!msg.contains("already", ignoreCase = true)) {
+                                        return@withContext Result.failure(Exception("تم تعديل الكرت لكن فشل ربط الباقة الجديدة ($cleanProfile): $msg"))
+                                    }
+                                }
+                            }
                         }
                         return@withContext Result.success(true)
                     }
@@ -1944,7 +2138,7 @@ class RouterOsApiClient {
                             "=comment=$cleanComment",
                             "=disabled=${if (card.disabled) "yes" else "no"}"
                         )
-                        val sentences = executeSentence(words)
+                        val sentences = executeCommandSentence(words)
                         val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                         if (trap != null) {
                             val trapMsg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
@@ -1975,8 +2169,8 @@ class RouterOsApiClient {
                 when (resolved.system) {
                     CardTargetSystem.HOTSPOT -> {
                         val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=${card.name}"
-                        executeSentence(listOf("/ip/hotspot/user/reset-counters", idParam))
-                        val sentences = executeSentence(listOf("/ip/hotspot/user/set", idParam, "=disabled=no"))
+                        executeCommandSentence(listOf("/ip/hotspot/user/reset-counters", idParam))
+                        val sentences = executeCommandSentence(listOf("/ip/hotspot/user/set", idParam, "=disabled=no"))
                         val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                         if (trap != null) {
                             val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إعادة تفعيل الكرت"
@@ -1986,8 +2180,8 @@ class RouterOsApiClient {
                     }
                     CardTargetSystem.USER_MANAGER_V7 -> {
                         val idParam = if (resolved.internalId.startsWith("*")) "=.id=${resolved.internalId}" else "=numbers=${card.name}"
-                        executeSentence(listOf("/user-manager/user/reset-counters", idParam))
-                        val sentences = executeSentence(listOf("/user-manager/user/set", idParam, "=disabled=no"))
+                        executeCommandSentence(listOf("/user-manager/user/reset-counters", idParam))
+                        val sentences = executeCommandSentence(listOf("/user-manager/user/set", idParam, "=disabled=no"))
                         val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                         if (trap != null) {
                             val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إعادة تفعيل كرت يوزرمانجر"
@@ -1997,8 +2191,8 @@ class RouterOsApiClient {
                     }
                     CardTargetSystem.USER_MANAGER_V6 -> {
                         val targetParam = "=numbers=${card.name}"
-                        executeSentence(listOf("/tool/user-manager/user/reset-counters", targetParam))
-                        val sentences = executeSentence(listOf("/tool/user-manager/user/set", targetParam, "=disabled=no"))
+                        executeCommandSentence(listOf("/tool/user-manager/user/reset-counters", targetParam))
+                        val sentences = executeCommandSentence(listOf("/tool/user-manager/user/set", targetParam, "=disabled=no"))
                         val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                         if (trap != null) {
                             val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل إعادة تفعيل الكرت"
@@ -2047,7 +2241,9 @@ class RouterOsApiClient {
     suspend fun addProfile(profile: HotspotProfile): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                ensureConnected()
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
+                }
                 val cleanName = profile.name.trim()
                 if (cleanName.isBlank()) return@withContext Result.failure(Exception("اسم الباقة فارغ"))
 
@@ -2070,7 +2266,7 @@ class RouterOsApiClient {
                     words.add("=comment=${profile.comment}")
                 }
 
-                val sentences = executeSentence(words)
+                val sentences = executeCommandSentence(words)
                 val trapSentence = sentences.firstOrNull { it.firstOrNull() == "!trap" }
                 if (trapSentence != null) {
                     val trapMsg = trapSentence.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
@@ -2096,35 +2292,53 @@ class RouterOsApiClient {
     suspend fun deleteProfile(profileId: String, profileName: String = ""): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                ensureConnected()
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
+                }
                 val targetName = profileName.ifBlank { profileId }
+                var nonMissingError: String? = null
+
+                fun tryRemove(words: List<String>): Boolean {
+                    val s = executeCommandSentence(words)
+                    val trap = s.firstOrNull { it.firstOrNull() == "!trap" }
+                    if (trap == null && s.any { it.firstOrNull() == "!done" }) return true
+                    val msg = trap?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=").orEmpty()
+                    if (msg.isNotBlank() &&
+                        !msg.contains("no such item", true) &&
+                        !msg.contains("not found", true) &&
+                        !msg.contains("no such command", true) &&
+                        !msg.contains("unknown command", true) &&
+                        !msg.contains("nothing to do", true)
+                    ) {
+                        nonMissingError = msg
+                    }
+                    return false
+                }
 
                 // 1. Try Hotspot profile removal
-                if (profileId.startsWith("*")) {
-                    val s1 = executeSentence(listOf("/ip/hotspot/user/profile/remove", "=.id=$profileId"))
-                    if (s1.any { it.firstOrNull() == "!done" } && s1.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                if (profileId.startsWith("*") && tryRemove(listOf("/ip/hotspot/user/profile/remove", "=.id=$profileId"))) {
+                    return@withContext Result.success(true)
                 }
-                if (targetName.isNotBlank()) {
-                    val s1b = executeSentence(listOf("/ip/hotspot/user/profile/remove", "=numbers=$targetName"))
-                    if (s1b.any { it.firstOrNull() == "!done" } && s1b.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                if (targetName.isNotBlank() && tryRemove(listOf("/ip/hotspot/user/profile/remove", "=numbers=$targetName"))) {
+                    return@withContext Result.success(true)
                 }
 
                 // 2. Try User Manager v7 profile removal
-                if (profileId.startsWith("*")) {
-                    val s2 = executeSentence(listOf("/user-manager/profile/remove", "=.id=$profileId"))
-                    if (s2.any { it.firstOrNull() == "!done" } && s2.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                if (profileId.startsWith("*") && tryRemove(listOf("/user-manager/profile/remove", "=.id=$profileId"))) {
+                    return@withContext Result.success(true)
                 }
-                if (targetName.isNotBlank()) {
-                    val s2b = executeSentence(listOf("/user-manager/profile/remove", "=numbers=$targetName"))
-                    if (s2b.any { it.firstOrNull() == "!done" } && s2b.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                if (targetName.isNotBlank() && tryRemove(listOf("/user-manager/profile/remove", "=numbers=$targetName"))) {
+                    return@withContext Result.success(true)
                 }
 
                 // 3. Try User Manager v6 profile removal
-                if (targetName.isNotBlank()) {
-                    val s3 = executeSentence(listOf("/tool/user-manager/profile/remove", "=numbers=$targetName"))
-                    if (s3.any { it.firstOrNull() == "!done" } && s3.none { it.firstOrNull() == "!trap" }) return@withContext Result.success(true)
+                if (targetName.isNotBlank() && tryRemove(listOf("/tool/user-manager/profile/remove", "=numbers=$targetName"))) {
+                    return@withContext Result.success(true)
                 }
 
+                if (nonMissingError != null) {
+                    return@withContext Result.failure(Exception(nonMissingError!!))
+                }
                 Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -2135,7 +2349,7 @@ class RouterOsApiClient {
     suspend fun rebootRouter(): Result<Boolean> {
         return withContext(Dispatchers.IO) {
             try {
-                executeSentence(listOf("/system/reboot"))
+                executeCommandSentence(listOf("/system/reboot"))
                 Result.success(true)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -2309,7 +2523,10 @@ class RouterOsApiClient {
     suspend fun getSystemLogs(limit: Int = 30): Result<List<SystemLogEntry>> {
         return withContext(Dispatchers.IO) {
             try {
-                val sentences = executeSentence(listOf("/log/print"))
+                val sentences = executeQueryWithProplist(
+                    command = "/log/print",
+                    proplist = ".id,time,topics,message"
+                )
                 val list = mutableListOf<SystemLogEntry>()
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
@@ -2386,19 +2603,21 @@ class RouterOsApiClient {
     suspend fun getUserManagerUsers(): Result<List<HotspotCard>> {
         return withContext(Dispatchers.IO) {
             try {
+                val umProplist = ".id,name,username,password,actual-profile,profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,creation-time,start-time,started,last-seen,last-logged-in,till-time,end-time,comment,disabled"
                 // Try v7 user-manager first
-                var sentences = executeSentence(listOf("/user-manager/user/print"))
+                var sentences = executeQueryWithProplist("/user-manager/user/print", umProplist)
                 val isV7Um = sentences.any { it.firstOrNull() == "!re" }
                 if (!isV7Um) {
                     // Try v6 /tool/user-manager/user
-                    sentences = executeSentence(listOf("/tool/user-manager/user/print"))
+                    sentences = executeQueryWithProplist("/tool/user-manager/user/print", umProplist)
                 }
 
                 // In RouterOS v7, active/assigned profiles & subscription timestamps often live in /user-manager/user-profile
                 val userProfileMap = mutableMapOf<String, Pair<String, String>>()
                 try {
-                    val upSentences = executeSentence(
-                        listOf(if (isV7Um) "/user-manager/user-profile/print" else "/tool/user-manager/user-profile/print")
+                    val upSentences = executeQueryWithProplist(
+                        command = if (isV7Um) "/user-manager/user-profile/print" else "/tool/user-manager/user-profile/print",
+                        proplist = "user,username,profile,end-time,till-time,state"
                     )
                     for (ups in upSentences) {
                         if (ups.firstOrNull() == "!re") {
@@ -2490,9 +2709,10 @@ class RouterOsApiClient {
                 if (!ensureConnected()) {
                     return@withContext Result.failure(Exception("غير متصل بالراوتر"))
                 }
-                var sentences = executeSentence(listOf("/user-manager/session/print"))
+                val sessProplist = ".id,user,username,from-time,started,start-time,till-time,ended,end-time,active,download,download-used,bytes-out,upload,upload-used,bytes-in,uptime,terminate-cause,status,profile,actual-profile,nas-ip-address,user-ip,ip-address,calling-station-id,mac-address"
+                var sentences = executeQueryWithProplist("/user-manager/session/print", sessProplist)
                 if (sentences.none { it.firstOrNull() == "!re" }) {
-                    sentences = executeSentence(listOf("/tool/user-manager/session/print"))
+                    sentences = executeQueryWithProplist("/tool/user-manager/session/print", sessProplist)
                 }
                 val list = mutableListOf<com.example.data.local.SessionArchiveEntity>()
                 for (s in sentences) {
@@ -2628,6 +2848,41 @@ class RouterOsApiClient {
         return map
     }
 
+    private fun authenticateSocket(
+        sock: Socket,
+        inS: InputStream,
+        outS: OutputStream,
+        cleanUser: String,
+        password: String
+    ): Boolean {
+        writeSentenceToStream(outS, listOf("/login", "=name=$cleanUser", "=password=$password"))
+        val response = readSingleSentenceFromStream(inS)
+        val replyType = response.firstOrNull() ?: ""
+        if (replyType == "!done" && response.none { it.startsWith("=ret=") }) {
+            runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
+            return true
+        }
+        val challengeParam = response.firstOrNull { it.startsWith("=ret=") }
+        if (replyType == "!done" && challengeParam != null) {
+            val challengeHex = challengeParam.removePrefix("=ret=")
+            val challengeBytes = hexStringToByteArray(challengeHex)
+            val md5 = MessageDigest.getInstance("MD5")
+            md5.update(0.toByte())
+            md5.update(password.toByteArray(Charsets.UTF_8))
+            md5.update(challengeBytes)
+            val digestHex = byteArrayToHexString(md5.digest())
+            val responseHash = "00$digestHex"
+
+            writeSentenceToStream(outS, listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
+            val resp2 = readSingleSentenceFromStream(inS)
+            if (resp2.firstOrNull() == "!done") {
+                runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
+                return true
+            }
+        }
+        return false
+    }
+
     private fun reconnectInternalLocked(): Boolean {
         if (isExplicitlyClosed) return false
         closeSocketOnlyLocked()
@@ -2635,42 +2890,140 @@ class RouterOsApiClient {
         val cleanUser = lastUsername.trim()
         if (cleanHost.isBlank() || cleanUser.isBlank()) return false
 
+        val isLocal = RouterConnectionParser.isPrivateOrLocalIpv4(cleanHost)
+        val reconnectConnectMs = lastConnectTimeoutMs.coerceIn(800, if (isLocal) 2200 else 3200)
+        val reconnectHandshakeMs = (reconnectConnectMs + 900).coerceIn(1500, 4500)
+
         return try {
-            val sock = createRouterSocket(cleanHost, lastPort, 8000, lastUseTls)
+            val sock = createRouterSocket(
+                host = cleanHost,
+                port = lastPort,
+                connectTimeoutMs = reconnectConnectMs,
+                handshakeTimeoutMs = reconnectHandshakeMs,
+                useTls = lastUseTls
+            )
+            val inS = sock.getInputStream()
+            val outS = sock.getOutputStream()
             socket = sock
-            inStream = sock.getInputStream()
-            outStream = sock.getOutputStream()
-
-            writeSentenceLocked(listOf("/login", "=name=$cleanUser", "=password=$lastPassword"))
-            val response = readSingleSentenceLocked()
-            val replyType = response.firstOrNull() ?: ""
-
-            if (replyType == "!done" && response.none { it.startsWith("=ret=") }) {
+            inStream = inS
+            outStream = outS
+            if (authenticateSocket(sock, inS, outS, cleanUser, lastPassword)) {
                 true
             } else {
-                val challengeParam = response.firstOrNull { it.startsWith("=ret=") }
-                if (replyType == "!done" && challengeParam != null) {
-                    val challengeHex = challengeParam.removePrefix("=ret=")
-                    val challengeBytes = hexStringToByteArray(challengeHex)
-                    val md5 = MessageDigest.getInstance("MD5")
-                    md5.update(0.toByte())
-                    md5.update(lastPassword.toByteArray(Charsets.UTF_8))
-                    md5.update(challengeBytes)
-                    val digestHex = byteArrayToHexString(md5.digest())
-                    val responseHash = "00$digestHex"
-
-                    writeSentenceLocked(listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
-                    val resp2 = readSingleSentenceLocked()
-                    resp2.firstOrNull() == "!done"
-                } else {
-                    closeSocketOnlyLocked()
-                    false
-                }
+                closeSocketOnlyLocked()
+                false
             }
         } catch (_: Exception) {
             closeSocketOnlyLocked()
             false
         }
+    }
+
+    private fun reconnectCmdInternalLocked(): Boolean {
+        if (isExplicitlyClosed) return false
+        closeCmdSocketOnlyLocked()
+        val cleanHost = lastHost.trim()
+        val cleanUser = lastUsername.trim()
+        if (cleanHost.isBlank() || cleanUser.isBlank()) return false
+
+        val isLocal = RouterConnectionParser.isPrivateOrLocalIpv4(cleanHost)
+        val reconnectConnectMs = lastConnectTimeoutMs.coerceIn(800, if (isLocal) 2200 else 3200)
+        val reconnectHandshakeMs = (reconnectConnectMs + 900).coerceIn(1500, 4500)
+
+        return try {
+            val sock = createRouterSocket(
+                host = cleanHost,
+                port = lastPort,
+                connectTimeoutMs = reconnectConnectMs,
+                handshakeTimeoutMs = reconnectHandshakeMs,
+                useTls = lastUseTls
+            )
+            val inS = sock.getInputStream()
+            val outS = sock.getOutputStream()
+            cmdSocket = sock
+            cmdInStream = inS
+            cmdOutStream = outS
+            if (authenticateSocket(sock, inS, outS, cleanUser, lastPassword)) {
+                true
+            } else {
+                closeCmdSocketOnlyLocked()
+                false
+            }
+        } catch (_: Exception) {
+            closeCmdSocketOnlyLocked()
+            false
+        }
+    }
+
+    private fun executeQueryWithProplist(
+        command: String,
+        proplist: String,
+        extraArgs: List<String> = emptyList()
+    ): List<List<String>> {
+        val withProps = mutableListOf(command, "=.proplist=$proplist")
+        withProps.addAll(extraArgs)
+        val sentences = executeSentence(withProps)
+        val hasTrap = sentences.any { it.firstOrNull() == "!trap" }
+        val hasRe = sentences.any { it.firstOrNull() == "!re" }
+        if (hasRe && !hasTrap) return sentences
+        if (!hasTrap && sentences.any { it.firstOrNull() == "!done" }) return sentences
+        val fallback = mutableListOf(command)
+        fallback.addAll(extraArgs)
+        return executeSentence(fallback)
+    }
+
+    fun executeCommandSentence(words: List<String>): List<List<String>> = synchronized(cmdSocketLock) {
+        if (isExplicitlyClosed) {
+            throw IllegalStateException("تم إغلاق الاتصال بالراوتر")
+        }
+        var attempts = 0
+        while (attempts < 2) {
+            attempts++
+            try {
+                val s = cmdSocket
+                if (s == null || s.isClosed || !s.isConnected || s.isInputShutdown || s.isOutputShutdown) {
+                    if (lastHost.isNotBlank() && lastUsername.isNotBlank()) {
+                        val reconnected = reconnectCmdInternalLocked()
+                        if (!reconnected) {
+                            throw IllegalStateException("تعذر فتح قناة الأوامر مع راوتر ميكروتك عبر منفذ API ($lastPort)")
+                        }
+                    } else {
+                        throw IllegalStateException("لا توجد جلسة اتصال نشطة بالراوتر")
+                    }
+                }
+                val out = cmdOutStream ?: throw IllegalStateException("Command socket output stream is null")
+                val inS = cmdInStream ?: throw IllegalStateException("Command socket input stream is null")
+                val sentences = performSentenceExchange(out, inS, words)
+                val hasFatal = sentences.any { it.firstOrNull() == "!fatal" }
+                if (hasFatal) {
+                    closeCmdSocketOnlyLocked()
+                    if (attempts < 2 && !isExplicitlyClosed && lastHost.isNotBlank()) continue
+                    throw java.io.IOException("أغلق راوتر ميكروتك جلسة API (!fatal)")
+                }
+                val hasDone = sentences.any { it.firstOrNull() == "!done" }
+                if (sentences.isEmpty() || !hasDone) {
+                    closeCmdSocketOnlyLocked()
+                    if (attempts < 2 && !isExplicitlyClosed && lastHost.isNotBlank()) continue
+                    throw java.io.EOFException("انقطعت استجابة راوتر ميكروتك قبل اكتمالها")
+                }
+                return@synchronized sentences
+            } catch (e: Exception) {
+                closeCmdSocketOnlyLocked()
+                val shouldRetry = attempts < 2 &&
+                    !isExplicitlyClosed &&
+                    lastHost.isNotBlank() &&
+                    (e is java.io.EOFException ||
+                        (e is java.net.SocketException && e !is java.net.ConnectException) ||
+                        (e is java.io.IOException &&
+                            e !is java.net.SocketTimeoutException &&
+                            e !is java.net.ConnectException &&
+                            e !is java.net.UnknownHostException &&
+                            e !is java.net.NoRouteToHostException &&
+                            e !is javax.net.ssl.SSLException))
+                if (!shouldRetry) throw e
+            }
+        }
+        return@synchronized emptyList()
     }
 
     fun executeSentence(words: List<String>): List<List<String>> = synchronized(socketLock) {
@@ -2695,25 +3048,7 @@ class RouterOsApiClient {
                 val out = outStream ?: throw IllegalStateException("Socket output stream is null")
                 val inS = inStream ?: throw IllegalStateException("Socket input stream is null")
 
-                for (word in words) {
-                    writeWord(out, word)
-                }
-                out.write(0x00) // End of sentence
-                out.flush()
-
-                val sentences = mutableListOf<List<String>>()
-                while (true) {
-                    val sentence = mutableListOf<String>()
-                    while (true) {
-                        val word = readWord(inS)
-                        if (word.isEmpty()) break
-                        sentence.add(word)
-                    }
-                    if (sentence.isEmpty()) break
-                    sentences.add(sentence)
-                    val first = sentence.firstOrNull() ?: ""
-                    if (first == "!done" || first == "!fatal") break
-                }
+                val sentences = performSentenceExchange(out, inS, words)
                 val hasFatal = sentences.any { it.firstOrNull() == "!fatal" }
                 if (hasFatal) {
                     closeSocketOnlyLocked()
@@ -2733,7 +3068,18 @@ class RouterOsApiClient {
                 return@synchronized sentences
             } catch (e: Exception) {
                 closeSocketOnlyLocked()
-                if (attempts >= 2 || isExplicitlyClosed || lastHost.isBlank()) {
+                val shouldRetry = attempts < 2 &&
+                    !isExplicitlyClosed &&
+                    lastHost.isNotBlank() &&
+                    (e is java.io.EOFException ||
+                        (e is java.net.SocketException && e !is java.net.ConnectException) ||
+                        (e is java.io.IOException &&
+                            e !is java.net.SocketTimeoutException &&
+                            e !is java.net.ConnectException &&
+                            e !is java.net.UnknownHostException &&
+                            e !is java.net.NoRouteToHostException &&
+                            e !is javax.net.ssl.SSLException))
+                if (!shouldRetry) {
                     throw e
                 }
             }
@@ -2741,19 +3087,38 @@ class RouterOsApiClient {
         return@synchronized emptyList()
     }
 
-    // Must ONLY be called while holding socketLock
-    private fun writeSentenceLocked(words: List<String>) {
-        val out = outStream ?: throw IllegalStateException("Socket is not connected")
+    private fun performSentenceExchange(out: OutputStream, inS: InputStream, words: List<String>): List<List<String>> {
         for (word in words) {
             writeWord(out, word)
         }
         out.write(0x00) // End of sentence
         out.flush()
+
+        val sentences = mutableListOf<List<String>>()
+        while (true) {
+            val sentence = mutableListOf<String>()
+            while (true) {
+                val word = readWord(inS)
+                if (word.isEmpty()) break
+                sentence.add(word)
+            }
+            if (sentence.isEmpty()) break
+            sentences.add(sentence)
+            val first = sentence.firstOrNull() ?: ""
+            if (first == "!done" || first == "!fatal") break
+        }
+        return sentences
     }
 
-    // Must ONLY be called while holding socketLock
-    private fun readSingleSentenceLocked(): List<String> {
-        val inS = inStream ?: throw IllegalStateException("Socket is not connected")
+    private fun writeSentenceToStream(out: OutputStream, words: List<String>) {
+        for (word in words) {
+            writeWord(out, word)
+        }
+        out.write(0x00)
+        out.flush()
+    }
+
+    private fun readSingleSentenceFromStream(inS: InputStream): List<String> {
         val words = mutableListOf<String>()
         while (true) {
             val word = readWord(inS)
@@ -2761,6 +3126,18 @@ class RouterOsApiClient {
             words.add(word)
         }
         return words
+    }
+
+    // Must ONLY be called while holding socketLock
+    private fun writeSentenceLocked(words: List<String>) {
+        val out = outStream ?: throw IllegalStateException("Socket is not connected")
+        writeSentenceToStream(out, words)
+    }
+
+    // Must ONLY be called while holding socketLock
+    private fun readSingleSentenceLocked(): List<String> {
+        val inS = inStream ?: throw IllegalStateException("Socket is not connected")
+        return readSingleSentenceFromStream(inS)
     }
 
     private fun writeWord(out: OutputStream, word: String) {
@@ -2851,7 +3228,7 @@ class RouterOsApiClient {
                                 role = roleName,
                                 permissions = permissions,
                                 lastActiveTime = map["last-logged-in"] ?: "نشط",
-                                ipAddress = map["address"] ?: "192.168.88.1",
+                                ipAddress = map["address"].orEmpty(),
                                 isActive = true,
                                 password = ""
                             )
@@ -2877,7 +3254,7 @@ class RouterOsApiClient {
                 if (comment.isNotBlank()) {
                     words.add("=comment=$comment")
                 }
-                val sentences = executeSentence(words)
+                val sentences = executeCommandSentence(words)
                 val hasTrap = sentences.any { it.firstOrNull() == "!trap" }
                 if (hasTrap) {
                     val trapMap = parseSentenceToMap(sentences.first { it.firstOrNull() == "!trap" })
@@ -2891,6 +3268,67 @@ class RouterOsApiClient {
         }
     }
 
+    suspend fun pingFromRouter(targetIp: String, count: Int = 2): Result<Pair<Boolean, Long>> {
+        return withContext(Dispatchers.IO) {
+            val cleanIp = targetIp.trim()
+            if (cleanIp.isBlank()) {
+                return@withContext Result.failure(IllegalArgumentException("عنوان IP فارغ"))
+            }
+            try {
+                if (!ensureConnected()) {
+                    return@withContext Result.failure(Exception("غير متصل بالراوتر عبر منفذ API ($lastPort)"))
+                }
+                val safeCount = count.coerceIn(1, 5)
+                val sentences = executeCommandSentence(
+                    listOf("/ping", "=address=$cleanIp", "=count=$safeCount")
+                )
+                val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                if (trap != null) {
+                    val msg = trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "فشل فحص ping من الراوتر"
+                    return@withContext Result.failure(Exception(msg))
+                }
+                var receivedReplies = 0
+                val rtts = mutableListOf<Long>()
+                for (s in sentences) {
+                    if (s.firstOrNull() == "!re") {
+                        val map = parseSentenceToMap(s)
+                        val recCount = map["received"]?.toIntOrNull() ?: 0
+                        val timeRaw = map["time"].orEmpty().trim()
+                        val avgRaw = map["avg-rtt"].orEmpty().trim()
+                        val statusRaw = map["status"].orEmpty().lowercase()
+                        if (recCount > 0 || (timeRaw.isNotBlank() && !statusRaw.contains("timeout"))) {
+                            receivedReplies += maxOf(1, recCount)
+                            parseRouterPingMs(timeRaw.ifBlank { avgRaw })?.let { rtts.add(it) }
+                        } else if (avgRaw.isNotBlank() && recCount > 0) {
+                            parseRouterPingMs(avgRaw)?.let { rtts.add(it) }
+                        }
+                    }
+                }
+                val avgRtt = if (rtts.isNotEmpty()) rtts.average().toLong().coerceAtLeast(1L) else 0L
+                Result.success((receivedReplies > 0) to avgRtt)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
+    private fun parseRouterPingMs(raw: String): Long? {
+        val clean = raw.trim().lowercase()
+        if (clean.isBlank()) return null
+        Regex("""^(\d+)(?:\.\d+)?ms$""").find(clean)?.let {
+            return it.groupValues[1].toLongOrNull()?.coerceAtLeast(1L)
+        }
+        Regex("""^(\d+)us$""").find(clean)?.let {
+            val us = it.groupValues[1].toLongOrNull() ?: return null
+            return maxOf(1L, us / 1000L)
+        }
+        Regex("""^(\d+)s$""").find(clean)?.let {
+            val sec = it.groupValues[1].toLongOrNull() ?: return null
+            return sec * 1000L
+        }
+        return clean.filter { it.isDigit() }.toLongOrNull()
+    }
+
     private fun closeSocketOnlyLocked() {
         try {
             socket?.close()
@@ -2900,9 +3338,21 @@ class RouterOsApiClient {
         outStream = null
     }
 
+    private fun closeCmdSocketOnlyLocked() {
+        try {
+            cmdSocket?.close()
+        } catch (_: Exception) {}
+        cmdSocket = null
+        cmdInStream = null
+        cmdOutStream = null
+    }
+
     fun close() {
         synchronized(socketLock) {
             closeSocketOnlyLocked()
+        }
+        synchronized(cmdSocketLock) {
+            closeCmdSocketOnlyLocked()
         }
     }
 
@@ -2915,12 +3365,18 @@ class RouterOsApiClient {
             synchronized(cachedProfiles) { cachedProfiles.clear() }
             closeSocketOnlyLocked()
         }
+        synchronized(cmdSocketLock) {
+            closeCmdSocketOnlyLocked()
+        }
     }
 
     suspend fun getDnsCache(): Result<List<Map<String, String>>> {
         return withContext(Dispatchers.IO) {
             try {
-                val sentences = executeSentence(listOf("/ip/dns/cache/print"))
+                val sentences = executeQueryWithProplist(
+                    command = "/ip/dns/cache/print",
+                    proplist = "name,address,data,type,ttl"
+                )
                 val list = mutableListOf<Map<String, String>>()
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
@@ -2934,10 +3390,15 @@ class RouterOsApiClient {
         }
     }
 
-    suspend fun getFirewallConnections(): Result<List<Map<String, String>>> {
+    suspend fun getFirewallConnections(srcAddress: String? = null): Result<List<Map<String, String>>> {
         return withContext(Dispatchers.IO) {
             try {
-                val sentences = executeSentence(listOf("/ip/firewall/connection/print"))
+                val extra = if (!srcAddress.isNullOrBlank()) listOf("?src-address=${srcAddress.trim()}") else emptyList()
+                val sentences = executeQueryWithProplist(
+                    command = "/ip/firewall/connection/print",
+                    proplist = "protocol,src-address,dst-address,dst-port,connection-type",
+                    extraArgs = extra
+                )
                 val list = mutableListOf<Map<String, String>>()
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {

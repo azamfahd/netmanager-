@@ -148,7 +148,7 @@ fun UserSessionDetailScreen(
     val lifetimeDownloadBytes = subscriberProfile?.lifetimeBytesOut ?: session.bytesOut
     val lifetimeUploadBytes = subscriberProfile?.lifetimeBytesIn ?: session.bytesIn
     val lifetimeUptimeStr = subscriberProfile?.lifetimeUptimeFormatted?.ifBlank { session.duration } ?: session.duration
-    val totalSessionsCount = subscriberProfile?.totalSessionsCount ?: maxOf(1, loginHistory.size)
+    val totalSessionsCount = subscriberProfile?.totalSessionsCount ?: maxOf(0, loginHistory.size)
     val firstSeenDate = subscriberProfile?.firstSeenDate ?: "مسجل بالراوتر"
     val lastSeenDate = subscriberProfile?.lastSeenDate ?: if (session.isOnline) "متصل الآن" else session.logoutTime
 
@@ -588,7 +588,6 @@ fun UserSessionDetailScreen(
 
                 // 3. Card Quota, Balance & Validity Status Card (الرصيد المتبقي والصلاحية)
                 val quotaLimit = subscriberProfile?.quotaLimitBytes ?: session.packageLimitBytes
-                val limitEffective = if (quotaLimit > 0L) quotaLimit else (1024L * 1024L * 1024L)
                 val isExhausted = subscriberProfile?.isQuotaExhausted ?: session.isQuotaExhausted || (quotaLimit > 0L && lifetimeTotalBytes >= quotaLimit)
                 val remainingBytes = if (quotaLimit > 0L) (quotaLimit - lifetimeTotalBytes).coerceAtLeast(0L) else 0L
                 val quotaPercentage = if (quotaLimit > 0L) (lifetimeTotalBytes.toFloat() / quotaLimit.toFloat()).coerceIn(0f, 1f) else 0f

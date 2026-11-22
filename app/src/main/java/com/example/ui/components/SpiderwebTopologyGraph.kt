@@ -155,7 +155,7 @@ fun SpiderwebTopologyGraph(
     onToggleFullScreen: (() -> Unit)? = null
 ) {
     var currentLayout by remember(nodes.size) {
-        mutableStateOf(if (nodes.size > 8) NetworkTopologyLayout.HIERARCHICAL_TREE else NetworkTopologyLayout.HIERARCHICAL_TREE)
+        mutableStateOf(NetworkTopologyLayout.HIERARCHICAL_TREE)
     }
     var isControlsExpanded by remember { mutableStateOf(false) }
     var filterMode by remember { mutableStateOf(TopologyFilterMode.ALL) }
@@ -261,16 +261,21 @@ fun SpiderwebTopologyGraph(
         label = "central_glow_alpha"
     )
 
-    // 360-degree radar sweep angle animation for Hexagonal Mesh mode
-    val radarAngle by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "radar_sweep"
-    )
+    // 360-degree radar sweep angle animation for Hexagonal Mesh mode only
+    val radarAngle = if (currentLayout == NetworkTopologyLayout.HEXAGONAL_MESH) {
+        val animatedRadar by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 4000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "radar_sweep"
+        )
+        animatedRadar
+    } else {
+        0f
+    }
 
     val localDensity = LocalDensity.current
 

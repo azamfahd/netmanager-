@@ -37,6 +37,8 @@ import com.example.data.model.MonthlyPackageSales
 import com.example.data.model.DailySalesPoint
 import com.example.data.util.AppUpdateManager
 import com.example.data.util.FinanceAnalyticsEngine
+import com.example.data.util.StockActivationResult
+import com.example.data.util.VoucherSerialEngine
 import com.example.data.network.MikrotikRepository
 import com.example.data.network.NetworkUtils
 import kotlinx.coroutines.Job
@@ -278,14 +280,20 @@ class MainViewModel(
         details: String = ""
     ) {
         viewModelScope.launch {
-            val routerIp = (_connectionState.value as? ConnectionState.Connected)?.ipAddress ?: _currentConfig.value.ipAddress.ifBlank { "192.168.88.1" }
+            val currentConn = _connectionState.value
+            val routerIp = when (currentConn) {
+                is ConnectionState.Connected -> currentConn.ipAddress
+                is ConnectionState.WebPortal -> runCatching { android.net.Uri.parse(currentConn.url).host }.getOrNull().orEmpty()
+                else -> ""
+            }.ifBlank { _currentConfig.value.ipAddress }
+            val actor = _currentConfig.value.username.ifBlank { "admin" }
             val timestamp = System.currentTimeMillis()
             val log = com.example.data.local.SystemEventLogEntity(
                 actionType = actionType,
                 targetType = targetType,
                 targetName = targetName,
                 description = description,
-                operatorUsername = "admin",
+                operatorUsername = actor,
                 routerIp = routerIp,
                 status = status,
                 details = details,
@@ -346,10 +354,15 @@ class MainViewModel(
     fun inspectSubscriberTraffic(ipAddress: String) {
         viewModelScope.launch {
             _isInspecting.value = true
+            _inspectedApps.value = emptyList()
             try {
                 val results = repository.inspectSubscriberApps(ipAddress)
                 _inspectedApps.value = results
-                _toastEvent.emit("⚡ تم إتمام فحص وتصنيف التطبيقات بنجاح للمشترك ($ipAddress)")
+                if (results.isEmpty()) {
+                    _toastEvent.emit("ℹ️ لا تتوفر سجلات DNS كافية من الراوتر لتصنيف تطبيقات ($ipAddress) حالياً")
+                } else {
+                    _toastEvent.emit("⚡ تم رصد ${results.size} منصة من سجلات الراوتر الفعلية للمشترك ($ipAddress)")
+                }
             } catch (e: Exception) {
                 _toastEvent.emit("تعذر فحص التطبيقات: ${e.localizedMessage}")
             } finally {
@@ -360,57 +373,88 @@ class MainViewModel(
 
     fun getUsageBreakdown(username: String, type: String): kotlinx.coroutines.flow.Flow<List<com.example.data.model.AppUsageItem>> {
         return getSubscriberProfileFlow(username).map { profile ->
-            val total = when(type.lowercase()) {
+            val metricLower = type.lowercase()
+            val total = when (metricLower) {
                 "download" -> profile.lifetimeBytesOut
                 "upload" -> profile.lifetimeBytesIn
-                "time" -> profile.lifetimeUptimeSeconds * 1024 * 1024L // Scale for visualization
+                "time" -> profile.lifetimeUptimeSeconds
                 else -> profile.lifetimeTotalBytes
             }
-            
+
             if (total <= 0L) {
-                return@map listOf(
-                    com.example.data.model.AppUsageItem("لا توجد بيانات استهلاك", "نظام", 0L, 0f, 0xFF9E9E9E)
-                )
+                return@map emptyList()
             }
 
-            // Smart heuristic app category distribution weights (deterministic variation per user based on hash)
-            val hash = kotlin.math.abs(username.hashCode())
-            val ytShare = 0.40f + ((hash % 10) / 100f)        // ~40-49%
-            val igShare = 0.25f + (((hash / 10) % 8) / 100f)   // ~25-32%
-            val fbShare = 0.15f                               // ~15%
-            val tkShare = 0.10f                               // ~10%
-            val waShare = 0.06f                               // ~6%
-            val otShare = maxOf(0.01f, 1.0f - (ytShare + igShare + fbShare + tkShare + waShare)) // remainder (~4%)
-
-            val apps = listOf(
-                Triple("YouTube (فيديوهات وبث)", "تدفق وسائط مرئية عالي الدقة", ytShare to 0xFFFF0000L), // Red
-                Triple("Instagram (ريلز وستوري)", "صور وفيديوهات قصيرة وتصفح", igShare to 0xFFE1306CL), // Pink/Magenta
-                Triple("Facebook (فيديوهات ومنشورات)", "شبكة اجتماعية وفيديوهات", fbShare to 0xFF1877F2L), // Blue
-                Triple("TikTok (فيديوهات قصيرة)", "مقاطع فيديو ترفيهية قصيرة", tkShare to 0xFF000000L), // Black
-                Triple("WhatsApp (مراسلة ومكالمات)", "محادثات ومكالمات صوتية ومرئية", waShare to 0xFF25D366L), // Green
-                Triple("Web Browsing & Other (تصفح عام)", "تصفح الويب وتطبيقات أخرى", otShare to 0xFFFFB300L) // Amber
+            val palette = listOf(
+                0xFF1565C0L,
+                0xFF2E7D32L,
+                0xFF6A1B9AL,
+                0xFFE65100L,
+                0xFF00838FL,
+                0xFF455A64L
             )
 
-            var allocatedBytes = 0L
-            val items = apps.mapIndexed { idx, (appName, category, pair) ->
-                val (weight, color) = pair
-                val appBytes = if (idx == apps.lastIndex) {
-                    total - allocatedBytes
-                } else {
-                    (total * weight).toLong()
+            // Real breakdown from recorded router sessions/devices/packages (no hash-based app guesses)
+            val grouped = linkedMapOf<String, MutableList<com.example.data.model.UserSessionRecord>>()
+            profile.sessionHistory.forEach { sess ->
+                val value = when (metricLower) {
+                    "download" -> sess.bytesOut
+                    "upload" -> sess.bytesIn
+                    "time" -> NetworkUtils.parseUptimeToSeconds(sess.duration)
+                    else -> sess.totalBytes
                 }
-                allocatedBytes += appBytes
-                val pct = if (total > 0) (appBytes.toFloat() / total.toFloat() * 100f).coerceIn(0f, 100f) else 0f
+                if (value > 0L) {
+                    val label = listOf(
+                        sess.nodeName.takeIf { it.isNotBlank() && !it.contains("غير محدد") },
+                        sess.deviceInfo.modelName.takeIf { it.isNotBlank() && !it.contains("جهاز مستخدم") },
+                        sess.profile.takeIf { it.isNotBlank() }
+                    ).firstOrNull() ?: "جلسة راوتر مسجلة"
+                    grouped.getOrPut(label) { mutableListOf() }.add(sess)
+                }
+            }
 
-                com.example.data.model.AppUsageItem(
-                    appName = appName,
-                    category = category,
-                    bytesUsed = if (type.lowercase() == "time") appBytes / (1024 * 1024) else appBytes,
-                    percentage = pct,
-                    color = color
+            if (grouped.isEmpty()) {
+                val metricLabel = when (metricLower) {
+                    "download" -> "إجمالي التحميل المسجل من الراوتر"
+                    "upload" -> "إجمالي الرفع المسجل من الراوتر"
+                    "time" -> "إجمالي وقت الاتصال المسجل"
+                    else -> "إجمالي الاستهلاك المسجل من الراوتر"
+                }
+                return@map listOf(
+                    com.example.data.model.AppUsageItem(
+                        appName = metricLabel,
+                        category = "إحصائية فعلية من الراوتر (لا تتوفر سجلات جلسات منفصلة أو تصنيف DNS)",
+                        bytesUsed = total,
+                        percentage = 100f,
+                        color = palette[0]
+                    )
                 )
             }
-            items.sortedByDescending { it.percentage }
+
+            val summedByGroup = grouped.entries.map { (label, sessions) ->
+                val groupValue = sessions.sumOf { sess ->
+                    when (metricLower) {
+                        "download" -> sess.bytesOut
+                        "upload" -> sess.bytesIn
+                        "time" -> NetworkUtils.parseUptimeToSeconds(sess.duration)
+                        else -> sess.totalBytes
+                    }
+                }
+                val countSuffix = if (sessions.size == 1) "جلسة واحدة" else "${sessions.size} جلسات"
+                Triple(label, "حسب السجلات الفعلية ($countSuffix)", groupValue)
+            }.sortedByDescending { it.third }
+
+            val sumTotal = summedByGroup.sumOf { it.third }.coerceAtLeast(1L)
+            summedByGroup.mapIndexed { idx, (label, category, groupValue) ->
+                val pct = (groupValue.toFloat() / sumTotal.toFloat() * 100f).coerceIn(0f, 100f)
+                com.example.data.model.AppUsageItem(
+                    appName = label,
+                    category = category,
+                    bytesUsed = groupValue,
+                    percentage = pct,
+                    color = palette[idx % palette.size]
+                )
+            }
         }
     }
 
@@ -449,9 +493,14 @@ class MainViewModel(
         val lifetimeUptimeSeconds = maxOf(cardUptimeSec, histUptimeSec, archUptimeSec)
         val lifetimeUptimeFormatted = NetworkUtils.formatSecondsToHumanReadable(lifetimeUptimeSeconds)
 
-        // Total sessions count
-        val totalSessionsCount = maxOf(1, loginHist.size, archivedList.size).let {
-            if (currentCard != null && (currentCard.bytesIn > 0L || currentCard.bytesOut > 0L)) it else loginHist.size
+        // Total sessions count (real recorded history; avoid forcing 1 for unused cards)
+        val recordedSessionsCount = maxOf(loginHist.size, archivedList.size)
+        val totalSessionsCount = if (recordedSessionsCount > 0) {
+            recordedSessionsCount
+        } else if (isOnline || (currentCard != null && (currentCard.bytesIn > 0L || currentCard.bytesOut > 0L || cardUptimeSec > 0L))) {
+            1
+        } else {
+            0
         }
 
         // First seen & Last seen
@@ -526,9 +575,9 @@ class MainViewModel(
             com.example.data.model.ActivatedPackageInfo(
                 profileName = profName,
                 price = matchingProf?.price ?: currentCard?.price.orEmpty().ifBlank { "" },
-                rateLimit = matchingProf?.rateLimit.orEmpty().ifBlank { "2M/2M (تلقائي)" },
+                rateLimit = matchingProf?.rateLimit.orEmpty().ifBlank { "غير محدد من الراوتر" },
                 quotaLimit = matchingProf?.dataLimit.orEmpty().ifBlank { if (quotaLimitBytes > 0L) NetworkUtils.formatBytes(quotaLimitBytes) else "مفتوح" },
-                validity = matchingProf?.validity.orEmpty().ifBlank { timeLimitFormatted.ifBlank { "1d" } },
+                validity = matchingProf?.validity.orEmpty().ifBlank { timeLimitFormatted.ifBlank { "غير محدد" } },
                 sharedUsers = matchingProf?.sharedUsers ?: 1,
                 source = matchingProf?.source ?: "الراوتر",
                 activationDate = if (isCurrent) "الباقة الحالية النشطة" else "باقة سابقة مسجلة",
@@ -637,6 +686,13 @@ class MainViewModel(
                     salePrice = cleanSale,
                     updatedAt = timestamp
                 )
+            )
+            recordSystemEvent(
+                actionType = "تعديل أسعار",
+                targetType = "باقة",
+                targetName = profileName,
+                description = "تم تحديث تسعيرة الباقة ($profileName): التكلفة ${cleanCost.toInt()} • البيع ${cleanSale.toInt()}",
+                status = "SUCCESS"
             )
             _toastEvent.emit("تم حفظ وتحديث سعر التكلفة والبيع لباقة ($profileName) بنجاح")
         }
@@ -765,7 +821,7 @@ class MainViewModel(
             }
             val bytes = profCards.sumOf { it.bytesIn + it.bytesOut }
             val rev = profCards.sumOf { c ->
-                c.price.filter { it.isDigit() }.toDoubleOrNull() ?: 0.0
+                FinanceAnalyticsEngine.parsePriceValue(c.price)
             }
             val percentage = (bytes.toFloat() / totalNetworkBytes.toFloat()).coerceIn(0f, 1f)
 
@@ -782,26 +838,54 @@ class MainViewModel(
     }.flowOn(kotlinx.coroutines.Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val peakHourStats: StateFlow<List<com.example.data.model.PeakHourStat>> = activeUsers.combine(userSessions) { users, _ ->
-        val currentHour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
-        val baseDistribution = intArrayOf(
-            4, 2, 1, 1, 1, 2, 5, 8, 12, 16, 20, 24, 28, 26, 22, 20, 25, 32, 45, 52, 48, 38, 22, 10
-        )
-        val activeScale = if (users.isNotEmpty()) (users.size.toFloat() / 25f).coerceIn(0.5f, 3.5f) else 1.0f
-        val hourlyCounts = baseDistribution.mapIndexed { hour, base ->
-            val count = (base * activeScale).toInt() + if (hour == currentHour) users.size / 2 else 0
-            count.coerceAtLeast(1)
+    val peakHourStats: StateFlow<List<com.example.data.model.PeakHourStat>> = combine(
+        activeUsers,
+        allLoginHistory,
+        archivedSessionsFlow
+    ) { users, loginHist, archivedHist ->
+        if (users.isEmpty() && loginHist.isEmpty() && archivedHist.isEmpty()) {
+            return@combine emptyList()
         }
-        val maxCount = hourlyCounts.maxOrNull()?.coerceAtLeast(1) ?: 1
+        val hourlyCounts = IntArray(24)
+        val cal = java.util.Calendar.getInstance()
+        val seenKeys = HashSet<String>(loginHist.size + archivedHist.size)
+
+        loginHist.forEach { entry ->
+            if (entry.timestamp > 0L) {
+                cal.timeInMillis = entry.timestamp
+                val hour = cal.get(java.util.Calendar.HOUR_OF_DAY).coerceIn(0, 23)
+                seenKeys.add("${entry.username}_${entry.timestamp / 60_000L}")
+                hourlyCounts[hour]++
+            }
+        }
+        archivedHist.forEach { entry ->
+            if (entry.timestamp > 0L && seenKeys.add("${entry.username}_${entry.timestamp / 60_000L}")) {
+                cal.timeInMillis = entry.timestamp
+                val hour = cal.get(java.util.Calendar.HOUR_OF_DAY).coerceIn(0, 23)
+                hourlyCounts[hour]++
+            }
+        }
+        if (users.isNotEmpty()) {
+            val currentHour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY).coerceIn(0, 23)
+            if (hourlyCounts[currentHour] < users.size) {
+                hourlyCounts[currentHour] = users.size
+            }
+        }
+
+        val maxCount = hourlyCounts.maxOrNull() ?: 0
+        if (maxCount <= 0) {
+            return@combine emptyList()
+        }
         hourlyCounts.mapIndexed { hour, count ->
             com.example.data.model.PeakHourStat(
                 hour = hour,
                 userCount = count,
-                isPeak = count >= (maxCount * 0.85f),
-                percentage = (count.toFloat() / maxCount.toFloat()).coerceIn(0.05f, 1.0f)
+                isPeak = count > 0 && count >= (maxCount * 0.85f),
+                percentage = if (count > 0) (count.toFloat() / maxCount.toFloat()).coerceIn(0.05f, 1.0f) else 0f
             )
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun createProfileFromTemplate(template: com.example.data.model.PackageTemplate) {
         val newProfile = HotspotProfile(
@@ -1293,6 +1377,7 @@ class MainViewModel(
 
     // Printable vouchers sheet & batch print tracking
     private val printedBatchesPrefs = appContext?.getSharedPreferences("netmanager_printed_batches", Context.MODE_PRIVATE)
+    private val serialStockPrefs = appContext?.getSharedPreferences("netmanager_serial_stock_prefs", Context.MODE_PRIVATE)
     private val _printedBatchKeys = MutableStateFlow<Set<String>>(
         printedBatchesPrefs?.getStringSet("printed_keys", emptySet())?.toSet() ?: emptySet()
     )
@@ -1301,6 +1386,54 @@ class MainViewModel(
 
     private val _printableCards = MutableStateFlow<List<HotspotCard>>(emptyList())
     val printableCards: StateFlow<List<HotspotCard>> = _printableCards.asStateFlow()
+
+    val printableSerialMap: StateFlow<Map<String, String>> = _printableCards
+        .map { list ->
+            VoucherSerialEngine.buildSerialMap(list) { repository.getCardCreationTimestamp(it) }
+        }
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    sealed class StockActivationUiState {
+        data object Idle : StockActivationUiState()
+        data class Activating(val completed: Int, val total: Int, val currentCardName: String) : StockActivationUiState()
+        data class Error(val message: String, val partialSuccessCount: Int = 0) : StockActivationUiState()
+    }
+
+    private val _stockActivationState = MutableStateFlow<StockActivationUiState>(StockActivationUiState.Idle)
+    val stockActivationState: StateFlow<StockActivationUiState> = _stockActivationState.asStateFlow()
+
+    private fun serialWatermarkPrefKey(): String {
+        val connectedIp = (_connectionState.value as? ConnectionState.Connected)?.ipAddress.orEmpty()
+        val ip = connectedIp.ifBlank { _currentConfig.value.ipAddress }.trim().ifBlank { "default" }
+        return "last_serial_$ip"
+    }
+
+    private val _lastSavedStockSerial = MutableStateFlow<Long?>(null)
+    val lastSavedStockSerial: StateFlow<Long?> = _lastSavedStockSerial.asStateFlow()
+
+    fun refreshSavedStockSerialForActiveRouter() {
+        val raw = serialStockPrefs?.getLong(serialWatermarkPrefKey(), -1L) ?: -1L
+        _lastSavedStockSerial.value = raw.takeIf { it > 0L }
+    }
+
+    private fun recordSavedStockSerial(serial: Long?) {
+        if (serial == null || serial <= 0L) return
+        val key = serialWatermarkPrefKey()
+        val prev = serialStockPrefs?.getLong(key, -1L) ?: -1L
+        if (serial > prev) {
+            try {
+                serialStockPrefs?.edit()?.putLong(key, serial)?.apply()
+            } catch (_: Exception) {}
+            _lastSavedStockSerial.value = serial
+        }
+    }
+
+    fun dismissStockActivationError() {
+        if (_stockActivationState.value is StockActivationUiState.Error) {
+            _stockActivationState.value = StockActivationUiState.Idle
+        }
+    }
 
     private val batchPartitionState: StateFlow<IndependentBatchPartitionResult> = combine(
         cards, activeUsers, batchHistory, _printedBatchKeys
@@ -1524,14 +1657,18 @@ class MainViewModel(
 
             val discovered = NetworkUtils.discoverRouter(context)
             _discoveredRouter.value = discovered
-            _currentConfig.value = _currentConfig.value.copy(
-                ipAddress = discovered.ip,
-                port = discovered.port,
-                useHttps = discovered.useHttps
-            )
+            if (discovered.ip.isNotBlank()) {
+                _currentConfig.value = _currentConfig.value.copy(
+                    ipAddress = discovered.ip,
+                    port = discovered.port,
+                    useHttps = discovered.useHttps
+                )
+            }
             _isDiscovering.value = false
-            if (showToast) {
+            if (showToast && discovered.ip.isNotBlank()) {
                 _toastEvent.emit("تم تحديث الشبكة واكتشاف الراوتر: ${discovered.ip} (المنفذ ${discovered.port})")
+            } else if (showToast) {
+                _toastEvent.emit(discovered.statusMessage)
             }
         }
     }
@@ -1572,6 +1709,22 @@ class MainViewModel(
         } ?: false
         val useOfflineArchive = deviceOffline && cachedMeta?.hasValidArchive == true
         val resolvedTitle = serverName.ifBlank { cachedMeta?.serverName ?: url }
+        val resumeUrl = cachedMeta?.lastVisitedUrl?.takeIf { last ->
+            last.startsWith("http", ignoreCase = true) &&
+                !last.contains("login", ignoreCase = true) &&
+                !last.contains("signin", ignoreCase = true)
+        }
+        recordSystemEvent(
+            actionType = if (useOfflineArchive) "تصفح أوفلاين" else "فتح لوحة ويب",
+            targetType = "سيرفر",
+            targetName = resolvedTitle,
+            description = if (useOfflineArchive) {
+                "تم فتح النسخة المحفوظة محلياً للوحة ($resolvedTitle)"
+            } else {
+                "تم فتح لوحة التحكم عبر المتصفح المدمج ($url)"
+            },
+            status = "SUCCESS"
+        )
         _connectionState.value = ConnectionState.WebPortal(
             serverName = resolvedTitle,
             url = if (useOfflineArchive) (cachedMeta?.lastVisitedUrl?.ifBlank { url } ?: url) else url,
@@ -1584,7 +1737,7 @@ class MainViewModel(
                 isAplusWifi || cachedMeta?.isAplusWifi == true -> "لوحة تحكم APlusWiFi السحابية"
                 else -> "واجهة التحكم عبر الويب"
             },
-            targetPathUrl = cachedMeta?.targetPathUrl,
+            targetPathUrl = resumeUrl ?: cachedMeta?.targetPathUrl,
             isOfflinePreview = useOfflineArchive,
             cachedArchivePath = cachedMeta?.archiveFilePath,
             lastSavedTime = cachedMeta?.lastSavedTime ?: 0L
@@ -1642,6 +1795,13 @@ class MainViewModel(
                     lastSyncTime = snapshot.timestamp,
                     offlineReason = "وضع التصفح والعمل المحلي (بدون إنترنت)"
                 )
+                recordSystemEvent(
+                    actionType = "تصفح أوفلاين",
+                    targetType = "راوتر",
+                    targetName = displayRouterName,
+                    description = "تم الدخول لوضع العمل المحلي (${snapshot.cards.size} كرت، ${snapshot.profiles.size} باقة)",
+                    status = "SUCCESS"
+                )
                 _toastEvent.emit("⚡ تم الدخول للبيانات المحلية بنجاح! الكروت (${snapshot.cards.size}) والباقات متاحة للعمل.")
                 startAutoRefresh()
                 return@launch
@@ -1657,8 +1817,16 @@ class MainViewModel(
                 val savedRouter = if (portalMeta.host.isNotBlank()) {
                     database.appDao().getSavedRouterByIp(portalMeta.host)
                 } else null
+                val resolvedPortalName = portalMeta.serverName.ifBlank { portalMeta.host }
+                recordSystemEvent(
+                    actionType = "تصفح أوفلاين",
+                    targetType = "لوحة الويب",
+                    targetName = resolvedPortalName,
+                    description = "تم فتح آخر نسخة محفوظة محلياً بدون إنترنت (${portalMeta.lastVisitedUrl.ifBlank { portalMeta.baseUrl }})",
+                    status = "SUCCESS"
+                )
                 _connectionState.value = ConnectionState.WebPortal(
-                    serverName = portalMeta.serverName.ifBlank { portalMeta.host },
+                    serverName = resolvedPortalName,
                     url = portalMeta.lastVisitedUrl.ifBlank { portalMeta.baseUrl },
                     username = portalMeta.username.ifBlank { savedRouter?.username.orEmpty() },
                     password = savedRouter?.password.orEmpty(),
@@ -1698,7 +1866,8 @@ class MainViewModel(
             password = portal.password,
             useHttps = false,
             autoDetectProtocol = true,
-            isDemoMode = false
+            isDemoMode = false,
+            directApiOnly = true
         )
         connectToRouter(config, saveToFavorites = true, context = ctx)
     }
@@ -1763,9 +1932,10 @@ class MainViewModel(
                 null
             }
 
-            // Immediate offline launch for saved remote/domain Web Portals when device has no internet
+            // Immediate offline launch for saved remote/domain Web Portals when device has no internet (never bypasses explicit directApiOnly)
             val isRemoteDomain = !com.example.data.network.RouterConnectionParser.isIpv4(normalizedConfig.ipAddress)
-            if (isRemoteDomain &&
+            if (!normalizedConfig.directApiOnly &&
+                isRemoteDomain &&
                 cachedPortalMeta != null &&
                 cachedPortalMeta.hasValidArchive &&
                 targetContext != null &&
@@ -1812,8 +1982,13 @@ class MainViewModel(
             }
 
             if (!hasLoadedFromCache) {
+                val verifyingMessage = if (normalizedConfig.directApiOnly) {
+                    "جاري الاتصال المباشر عبر RouterOS API (${normalizedConfig.ipAddress}:${normalizedConfig.port})..."
+                } else {
+                    "جاري الاتصال المباشر بالسيرفر (${normalizedConfig.ipAddress})..."
+                }
                 _connectionState.value = ConnectionState.Verifying(
-                    "جاري الاتصال المباشر بالسيرفر (${normalizedConfig.ipAddress})...",
+                    verifyingMessage,
                     0.65f
                 )
             }
@@ -1840,6 +2015,19 @@ class MainViewModel(
                         isOffline = false,
                         lastSyncTime = System.currentTimeMillis()
                     )
+                    if (!activeCfg.isDemoMode) {
+                        recordSystemEvent(
+                            actionType = if (activeCfg.directApiOnly) "اتصال مباشر API" else "تسجيل دخول",
+                            targetType = "راوتر",
+                            targetName = finalRouterName,
+                            description = if (activeCfg.directApiOnly) {
+                                "تم الاتصال المباشر عبر RouterOS API (${activeCfg.ipAddress}:${activeCfg.port}) بدون وسيط سحابي"
+                            } else {
+                                "تم الاتصال بالراوتر (${activeCfg.ipAddress}:${activeCfg.port}) بنجاح"
+                            },
+                            status = "SUCCESS"
+                        )
+                    }
 
                     if (activeCfg.isDemoMode) {
                         _toastEvent.emit("تم الدخول في وضع العرض التفاعلي")
@@ -1905,6 +2093,11 @@ class MainViewModel(
                     } else {
                         outcome.serverName.ifBlank { normalizedConfig.ipAddress }
                     }
+                    val resumeTargetPath = outcome.targetPathUrl ?: cachedPortalMeta?.lastVisitedUrl?.takeIf { last ->
+                        last.startsWith("http", ignoreCase = true) &&
+                            !last.contains("login", ignoreCase = true) &&
+                            !last.contains("signin", ignoreCase = true)
+                    } ?: cachedPortalMeta?.targetPathUrl
                     if (saveToFavorites && normalizedConfig.ipAddress.isNotBlank()) {
                         val existing = database.appDao().getSavedRouterByIp(normalizedConfig.ipAddress)
                         database.appDao().insertSavedRouter(
@@ -1927,16 +2120,24 @@ class MainViewModel(
                             baseUrl = outcome.url,
                             lastVisitedUrl = cachedPortalMeta?.lastVisitedUrl?.ifBlank { outcome.url } ?: outcome.url,
                             lastPageTitle = cachedPortalMeta?.lastPageTitle.orEmpty(),
-                            targetPathUrl = outcome.targetPathUrl ?: cachedPortalMeta?.targetPathUrl,
+                            targetPathUrl = resumeTargetPath,
                             username = normalizedConfig.username,
                             isAplusWifi = outcome.isAplusWifi,
                             isMikroTikWebFig = outcome.isMikroTikWebFig,
                             archiveFilePath = cachedPortalMeta?.archiveFilePath,
-                            lastSavedTime = cachedPortalMeta?.lastSavedTime ?: 0L
+                            lastSavedTime = cachedPortalMeta?.lastSavedTime ?: 0L,
+                            recentActions = cachedPortalMeta?.recentActions.orEmpty()
                         )
                         com.example.data.local.WebPortalCacheManager.saveMeta(targetContext, initialMeta)
                         _latestCachedPortal.value = initialMeta
                     }
+                    recordSystemEvent(
+                        actionType = "تسجيل دخول ذكي",
+                        targetType = "لوحة الويب",
+                        targetName = savedName,
+                        description = outcome.description,
+                        status = "SUCCESS"
+                    )
                     _toastEvent.emit(outcome.description)
                     _connectionState.value = ConnectionState.WebPortal(
                         serverName = savedName,
@@ -1950,7 +2151,7 @@ class MainViewModel(
                             outcome.isAplusWifi -> "لوحة تحكم APlusWiFi السحابية"
                             else -> "لوحة تحكم السيرفر عبر الويب"
                         },
-                        targetPathUrl = outcome.targetPathUrl,
+                        targetPathUrl = resumeTargetPath,
                         isOfflinePreview = false,
                         cachedArchivePath = cachedPortalMeta?.archiveFilePath,
                         lastSavedTime = cachedPortalMeta?.lastSavedTime ?: 0L
@@ -1961,6 +2162,13 @@ class MainViewModel(
                     val error = outcome.message
                     _fallbackWebPortalUrl.value = outcome.fallbackPortalUrl
                     logApplicationError("CONNECT", error, "Host: ${normalizedConfig.ipAddress}")
+                    recordSystemEvent(
+                        actionType = "محاولة اتصال",
+                        targetType = "سيرفر",
+                        targetName = normalizedConfig.ipAddress,
+                        description = "تعذر الاتصال المباشر: $error",
+                        status = "FAILED"
+                    )
                     if (hasLoadedFromCache) {
                         _toastEvent.emit("تنبيه: تعذر الاتصال المباشر ($error). أنت تتصفح البيانات المحفوظة محلياً بأمان.")
                         _connectionState.value = ConnectionState.Connected(
@@ -1974,7 +2182,7 @@ class MainViewModel(
                             offlineReason = "تعذر الاتصال المباشر: $error"
                         )
                         startAutoRefresh()
-                    } else if (cachedPortalMeta != null) {
+                    } else if (!normalizedConfig.directApiOnly && cachedPortalMeta != null) {
                         _toastEvent.emit("🟠 تعذر الاتصال المباشر — تم فتح آخر نسخة محفوظة من لوحة التحكم (وضع الأوفلاين).")
                         _connectionState.value = ConnectionState.WebPortal(
                             serverName = cachedPortalMeta.serverName.ifBlank { normalizedConfig.ipAddress },
@@ -1999,6 +2207,21 @@ class MainViewModel(
     }
 
     fun disconnect() {
+        val current = _connectionState.value
+        val activeTarget = when (current) {
+            is ConnectionState.Connected -> current.routerName.ifBlank { current.ipAddress }
+            is ConnectionState.WebPortal -> current.serverName
+            else -> ""
+        }
+        if (activeTarget.isNotBlank()) {
+            recordSystemEvent(
+                actionType = "فصل اتصال",
+                targetType = if (current is ConnectionState.WebPortal) "لوحة الويب" else "راوتر",
+                targetName = activeTarget,
+                description = "تم الخروج من الجلسة الحالية وحفظ الحالة ($activeTarget)",
+                status = "SUCCESS"
+            )
+        }
         connectJob?.cancel()
         connectJob = null
         consecutiveRefreshFailures = 0
@@ -2120,7 +2343,7 @@ class MainViewModel(
                 if (currentConn is ConnectionState.Connected) {
                     if (currentConn.isDemo) {
                         repository.refreshData(forceLiveRefresh = true)
-                        withTimeoutOrNull(1000L) { immediateSyncSignal.first() }
+                        withTimeoutOrNull(1500L) { immediateSyncSignal.first() }
                     } else {
                         val res = repository.refreshData(forceLiveRefresh = true)
                         val latestConn = _connectionState.value as? ConnectionState.Connected ?: continue
@@ -2148,8 +2371,13 @@ class MainViewModel(
                             if (!_isHeartbeatScanning.value) {
                                 runHeartbeatCheck(appContext, silent = true)
                             }
-                            // Yield cooperatively to keep UI & user mutations responsive, then stream next live cycle immediately
-                            yield()
+                            // Smart adaptive polling: fast when users/tasks active, lighter when idle, immediate wakeup on any command
+                            val adaptiveDelayMs = if (repository.activeUsers.value.isNotEmpty() || pendingTasksCount.value > 0) {
+                                3500L
+                            } else {
+                                7000L
+                            }
+                            withTimeoutOrNull(adaptiveDelayMs) { immediateSyncSignal.first() }
                         } else {
                             consecutiveRefreshFailures++
                             // Require 2 consecutive failures before marking offline to avoid single-packet flapping
@@ -2160,12 +2388,13 @@ class MainViewModel(
                                     offlineReason = err
                                 )
                             }
-                            // Brief backoff only when router is unreachable; woken immediately upon reconnect/action
-                            withTimeoutOrNull(1000L) { immediateSyncSignal.first() }
+                            // Adaptive backoff when router is unreachable; woken immediately upon reconnect/action
+                            val backoffMs = (1500L * consecutiveRefreshFailures).coerceAtMost(8000L)
+                            withTimeoutOrNull(backoffMs) { immediateSyncSignal.first() }
                         }
                     }
                 } else {
-                    withTimeoutOrNull(500L) { immediateSyncSignal.first() }
+                    withTimeoutOrNull(1000L) { immediateSyncSignal.first() }
                 }
             }
         }
@@ -2189,11 +2418,25 @@ class MainViewModel(
         }
     }
 
+    private fun isPermanentRouterRejection(errorMsg: String): Boolean {
+        val lower = errorMsg.lowercase()
+        return lower.contains("permission denied") ||
+            lower.contains("not permitted") ||
+            lower.contains("not allowed") ||
+            lower.contains("no such command") ||
+            lower.contains("syntax error") ||
+            lower.contains("bad command") ||
+            lower.contains("invalid value") ||
+            lower.contains("صلاحيات الحساب") ||
+            lower.contains("نقص الصلاحيات") ||
+            lower.contains("لا يملك صلاحية") ||
+            lower.contains("رفض راوتر ميكروتك")
+    }
+
     fun deleteCard(cardId: String, cardName: String = "") {
         viewModelScope.launch {
-            val targetName = cardName.trim().ifBlank { 
-                cards.value.find { it.id == cardId }?.name.orEmpty() 
-            }
+            val existingCard = cards.value.find { it.id == cardId || (cardName.isNotBlank() && it.name == cardName) }
+            val targetName = cardName.trim().ifBlank { existingCard?.name.orEmpty() }
             // Instant optimistic deletion from UI
             repository.deleteLocalCard(cardId, targetName)
             val result = executeRouterMutationWithImmediateSync { repository.deleteCard(cardId, targetName) }
@@ -2202,14 +2445,20 @@ class MainViewModel(
                 _toastEvent.emit("تم حذف الكرت بنجاح")
             } else {
                 val errorMsg = result.exceptionOrNull()?.message.orEmpty()
-                // Enqueue in Task Queue for offline retry with Exponential Backoff
-                taskQueueManager.enqueueDeleteCard(cardId, targetName)
-                // Optimistically remove from local database so it doesn't bounce back in the UI
-                if (targetName.isNotBlank()) {
-                    try { database.appDao().deleteLocalCardByName(targetName) } catch (_: Exception) {}
+                if (isPermanentRouterRejection(errorMsg)) {
+                    existingCard?.let { repository.restoreLocalCard(it) }
+                    recordSystemEvent("حذف", "كرت", targetName.ifBlank { cardId }, "رفض الراوتر حذف الكرت: $errorMsg", "FAILED", errorMsg)
+                    _toastEvent.emit("❌ رفض الراوتر حذف الكرت: $errorMsg")
+                } else {
+                    // Enqueue in Task Queue for offline retry with Exponential Backoff
+                    taskQueueManager.enqueueDeleteCard(cardId, targetName)
+                    // Optimistically remove from local database so it doesn't bounce back in the UI
+                    if (targetName.isNotBlank()) {
+                        try { database.appDao().deleteLocalCardByName(targetName) } catch (_: Exception) {}
+                    }
+                    recordSystemEvent("طابور العمليات", "كرت", targetName.ifBlank { cardId }, "تم حفظ أمر حذف الكرت محلياً وسيتم تنفيذه على الراوتر تلقائياً عند استعادة الاتصال.", "PENDING", errorMsg)
+                    _toastEvent.emit("تم حفظ الحذف محلياً وسيتم تنفيذه على الراوتر تلقائياً عند الاتصال (طابور العمليات)")
                 }
-                recordSystemEvent("طابور العمليات", "كرت", targetName.ifBlank { cardId }, "تم حفظ أمر حذف الكرت محلياً وسيتم تنفيذه على الراوتر تلقائياً عند استعادة الاتصال.", "PENDING", errorMsg)
-                _toastEvent.emit("تم حفظ الحذف محلياً وسيتم تنفيذه على الراوتر تلقائياً عند الاتصال (طابور العمليات)")
             }
         }
     }
@@ -2228,15 +2477,23 @@ class MainViewModel(
                 _toastEvent.emit("تمت إعادة تفعيل وتصفير عدادات الكرت (${card.name}) بنجاح!")
             } else {
                 val errorMsg = result.exceptionOrNull()?.message.orEmpty()
-                taskQueueManager.enqueueReactivateCard(card)
-                recordSystemEvent("طابور العمليات", "كرت", card.name, "تم حفظ إعادة التفعيل محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
-                _toastEvent.emit("تم حفظ إعادة التفعيل محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال (طابور العمليات)")
+                if (isPermanentRouterRejection(errorMsg)) {
+                    repository.updateLocalCard(card)
+                    repository.upsertLocalCardPreservingTimestamp(card)
+                    recordSystemEvent("تعديل", "كرت", card.name, "رفض الراوتر إعادة تفعيل الكرت: $errorMsg", "FAILED", errorMsg)
+                    _toastEvent.emit("❌ رفض الراوتر إعادة التفعيل: $errorMsg")
+                } else {
+                    taskQueueManager.enqueueReactivateCard(card)
+                    recordSystemEvent("طابور العمليات", "كرت", card.name, "تم حفظ إعادة التفعيل محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
+                    _toastEvent.emit("تم حفظ إعادة التفعيل محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال (طابور العمليات)")
+                }
             }
         }
     }
 
     fun updateCard(updatedCard: HotspotCard) {
         viewModelScope.launch {
+            val previousCard = cards.value.find { it.id == updatedCard.id || it.name == updatedCard.name }
             // 1. Instant optimistic update
             repository.updateLocalCard(updatedCard)
             repository.upsertLocalCardPreservingTimestamp(updatedCard)
@@ -2248,9 +2505,18 @@ class MainViewModel(
                 _toastEvent.emit("تم تحديث بيانات الكرت (${updatedCard.name}) بنجاح")
             } else {
                 val errorMsg = result.exceptionOrNull()?.message.orEmpty()
-                taskQueueManager.enqueueEditCard(updatedCard)
-                recordSystemEvent("طابور العمليات", "كرت", updatedCard.name, "تم حفظ تعديل الكرت محلياً وسيتم إرساله للراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
-                _toastEvent.emit("تم حفظ التعديل محلياً وسيتم إرساله للراوتر فور استعادة الاتصال (طابور العمليات)")
+                if (isPermanentRouterRejection(errorMsg)) {
+                    previousCard?.let {
+                        repository.updateLocalCard(it)
+                        repository.upsertLocalCardPreservingTimestamp(it)
+                    }
+                    recordSystemEvent("تعديل", "كرت", updatedCard.name, "رفض الراوتر تعديل الكرت: $errorMsg", "FAILED", errorMsg)
+                    _toastEvent.emit("❌ رفض الراوتر تعديل الكرت: $errorMsg")
+                } else {
+                    taskQueueManager.enqueueEditCard(updatedCard)
+                    recordSystemEvent("طابور العمليات", "كرت", updatedCard.name, "تم حفظ تعديل الكرت محلياً وسيتم إرساله للراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
+                    _toastEvent.emit("تم حفظ التعديل محلياً وسيتم إرساله للراوتر فور استعادة الاتصال (طابور العمليات)")
+                }
             }
         }
     }
@@ -2269,16 +2535,25 @@ class MainViewModel(
             }
 
             // 2. Execute on router then trigger immediate live sync
-            val result = executeRouterMutationWithImmediateSync { repository.toggleCardDisabled(cardId, currentDisabled) }
+            val result = executeRouterMutationWithImmediateSync { repository.toggleCardDisabled(cardId, currentDisabled, targetName) }
             if (result.isSuccess) {
                 val actionDesc = if (targetDisabled) "تم إيقاف وتعطيل الكرت (${targetName.ifBlank { cardId }}) عن العمل في الراوتر" else "تم تفعيل وتشغيل الكرت (${targetName.ifBlank { cardId }}) في الراوتر"
                 recordSystemEvent("تعديل", "كرت", targetName.ifBlank { cardId }, actionDesc, "SUCCESS")
                 _toastEvent.emit(if (targetDisabled) "تم إيقاف الكرت" else "تم تفعيل الكرت")
             } else {
                 val errorMsg = result.exceptionOrNull()?.message.orEmpty()
-                taskQueueManager.enqueueToggleDisabled(cardId, targetName, targetDisabled)
-                recordSystemEvent("طابور العمليات", "كرت", targetName.ifBlank { cardId }, "تم حفظ تغيير الحالة محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
-                _toastEvent.emit(if (targetDisabled) "تم حفظ إيقاف الكرت محلياً (طابور العمليات)" else "تم حفظ تفعيل الكرت محلياً (طابور العمليات)")
+                if (isPermanentRouterRejection(errorMsg)) {
+                    targetCard?.let {
+                        repository.updateLocalCard(it)
+                        repository.upsertLocalCardPreservingTimestamp(it)
+                    }
+                    recordSystemEvent("تعديل", "كرت", targetName.ifBlank { cardId }, "رفض الراوتر تغيير حالة الكرت: $errorMsg", "FAILED", errorMsg)
+                    _toastEvent.emit("❌ رفض الراوتر تغيير الحالة: $errorMsg")
+                } else {
+                    taskQueueManager.enqueueToggleDisabled(cardId, targetName, targetDisabled)
+                    recordSystemEvent("طابور العمليات", "كرت", targetName.ifBlank { cardId }, "تم حفظ تغيير الحالة محلياً وسيتم تنفيذها على الراوتر فور استعادة الاتصال.", "PENDING", errorMsg)
+                    _toastEvent.emit(if (targetDisabled) "تم حفظ إيقاف الكرت محلياً (طابور العمليات)" else "تم حفظ تفعيل الكرت محلياً (طابور العمليات)")
+                }
             }
         }
     }
@@ -2327,7 +2602,7 @@ class MainViewModel(
 
                     // If assigned to a POS Agent, save assignments
                     if (config.posAgentId > 0 && config.posAgentName.isNotBlank()) {
-                        val priceNum = parseBatchPriceValue(config.price).takeIf { it > 0.0 } ?: 200.0
+                        val priceNum = parseBatchPriceValue(config.price).takeIf { it > 0.0 } ?: 0.0
                         val assignments = cards.map { card ->
                             val assignAt = System.currentTimeMillis()
 
@@ -2380,7 +2655,7 @@ class MainViewModel(
                     "الباقة: ${card.profile}, كلمة المرور: ${card.password}, النظام: ${card.systemLabelAr}"
                 )
                 if (posAgentId > 0L && posAgentName.isNotBlank()) {
-                    val priceNum = parseBatchPriceValue(card.price).takeIf { it > 0.0 } ?: 200.0
+                    val priceNum = parseBatchPriceValue(card.price).takeIf { it > 0.0 } ?: 0.0
                     val assignment = PosCardAssignmentEntity(
                         agentId = posAgentId,
                         agentName = posAgentName,
@@ -2426,6 +2701,7 @@ class MainViewModel(
     fun addPosAgent(agent: PosAgentEntity) {
         viewModelScope.launch {
             database.appDao().insertPosAgent(agent)
+            recordSystemEvent("إضافة", "نقطة بيع", agent.name, "تمت إضافة نقطة البيع (${agent.name}) بخصم ${agent.discountPercent}%")
             _toastEvent.emit("تمت إضافة نقطة البيع (${agent.name}) بنجاح")
         }
     }
@@ -2433,14 +2709,17 @@ class MainViewModel(
     fun updatePosAgent(agent: PosAgentEntity) {
         viewModelScope.launch {
             database.appDao().insertPosAgent(agent)
+            recordSystemEvent("تعديل", "نقطة بيع", agent.name, "تم تحديث بيانات نقطة البيع (${agent.name})")
             _toastEvent.emit("تم حفظ وتحديث بيانات نقطة البيع (${agent.name})")
         }
     }
 
     fun deletePosAgent(agentId: Long) {
         viewModelScope.launch {
+            val agentName = posAgents.value.firstOrNull { it.id == agentId }?.name ?: "#$agentId"
             database.appDao().deletePosAgent(agentId)
             database.appDao().deleteAssignmentsByAgent(agentId)
+            recordSystemEvent("حذف", "نقطة بيع", agentName, "تم حذف نقطة البيع ($agentName) وسجلاتها", "WARNING")
             _toastEvent.emit("تم حذف نقطة البيع وسجلاتها")
         }
     }
@@ -2456,6 +2735,7 @@ class MainViewModel(
                 paymentNote = note.ifBlank { "دفعة نقدية / سداد" }
             )
             database.appDao().insertPosPayment(payment)
+            recordSystemEvent("سند قبض", "نقطة بيع", agentName, "تم تسجيل دفعة مالية بمبلغ ${amount.toInt()} ر.ي من ($agentName)", "SUCCESS", payment.paymentNote)
             _toastEvent.emit("تم تسجيل سند قبض بمبلغ ${amount.toInt()} ر.ي بنجاح")
         }
     }
@@ -2463,6 +2743,7 @@ class MainViewModel(
     fun deletePosPayment(paymentId: Long) {
         viewModelScope.launch {
             database.appDao().deletePosPayment(paymentId)
+            recordSystemEvent("حذف", "سند قبض", "#$paymentId", "تم حذف السند المالي رقم #$paymentId", "WARNING")
             _toastEvent.emit("تم حذف السند المالي")
         }
     }
@@ -2476,7 +2757,7 @@ class MainViewModel(
     ) {
         viewModelScope.launch {
             val assignments = cardsToAssign.map { card ->
-                val priceNum = parseBatchPriceValue(card.price).takeIf { it > 0.0 } ?: 200.0
+                val priceNum = parseBatchPriceValue(card.price).takeIf { it > 0.0 } ?: 0.0
                 PosCardAssignmentEntity(
                     agentId = agentId,
                     agentName = agentName,
@@ -2490,6 +2771,7 @@ class MainViewModel(
                 )
             }
             database.appDao().insertCardAssignments(assignments)
+            recordSystemEvent("تخصيص كروت", "نقطة بيع", agentName, "تم تسليم وتخصيص ${cardsToAssign.size} كرت لنقطة ($agentName)")
             _toastEvent.emit("تم تسليم وتخصيص ${cardsToAssign.size} كرت لنقطة ($agentName)")
         }
     }
@@ -2587,6 +2869,93 @@ class MainViewModel(
     fun setPrintableCards(cardsToPrint: List<HotspotCard>, batchKey: String? = null) {
         _printableCards.value = cardsToPrint
         _selectedPrintableBatchKey.value = batchKey
+        refreshSavedStockSerialForActiveRouter()
+    }
+
+    fun activatePrintableCardsOnRouter(
+        targetCards: List<HotspotCard> = _printableCards.value,
+        onComplete: ((StockActivationResult) -> Unit)? = null
+    ) {
+        if (targetCards.isEmpty()) return
+        viewModelScope.launch {
+            val pendingCount = targetCards.count { it.disabled }
+            if (pendingCount == 0) {
+                val maxSerial = targetCards.mapNotNull { VoucherSerialEngine.extractCardSerial(it) }.maxOrNull()
+                recordSavedStockSerial(maxSerial)
+                onComplete?.invoke(
+                    StockActivationResult(
+                        totalRequested = targetCards.size,
+                        activatedCards = emptyList(),
+                        alreadyActiveCards = targetCards,
+                        highestActivatedSerial = maxSerial
+                    )
+                )
+                return@launch
+            }
+
+            _stockActivationState.value = StockActivationUiState.Activating(0, pendingCount, targetCards.first { it.disabled }.name)
+            val result = executeRouterMutationWithImmediateSync {
+                val batchRes = repository.batchActivateCards(targetCards) { done, total, currentName ->
+                    _stockActivationState.value = StockActivationUiState.Activating(done, total, currentName)
+                }
+                if (batchRes.activatedCards.isNotEmpty() || batchRes.isCompleteSuccess) {
+                    Result.success(batchRes)
+                } else {
+                    Result.failure(Exception(batchRes.errorMessages.firstOrNull() ?: "تعذر تفعيل الكروت المحددة على الراوتر"))
+                }
+            }
+
+            val activationResult = result.getOrNull() ?: StockActivationResult(
+                totalRequested = targetCards.size,
+                activatedCards = emptyList(),
+                failedCards = targetCards.filter { it.disabled },
+                errorMessages = listOf(result.exceptionOrNull()?.message ?: "تعذر تفعيل الكروت على الراوتر")
+            )
+
+            if (activationResult.activatedCards.isNotEmpty()) {
+                val activatedByName = activationResult.activatedCards.associateBy { it.name }
+                val activatedById = activationResult.activatedCards.associateBy { it.id }
+                _printableCards.value = _printableCards.value.map { existing ->
+                    activatedById[existing.id] ?: activatedByName[existing.name] ?: existing
+                }
+            }
+            recordSavedStockSerial(activationResult.highestActivatedSerial)
+
+            if (activationResult.isCompleteSuccess) {
+                _stockActivationState.value = StockActivationUiState.Idle
+                val enabledCount = activationResult.activatedCards.size
+                recordSystemEvent(
+                    actionType = "تفعيل مخزون",
+                    targetType = "دفعة تسلسلية",
+                    targetName = "${targetCards.size} كرت",
+                    description = "تم تفعيل $enabledCount كرت من المخزون بنجاح بالتسلسل للطباعة",
+                    status = "SUCCESS"
+                )
+                repository.logAdminAction(
+                    "النظام",
+                    "تفعيل كروت المخزون",
+                    "تفعيل $enabledCount كرت بالتسلسل للطباعة"
+                )
+                _toastEvent.emit("تم تفعيل $enabledCount كرت على الراوتر بنجاح وهي جاهزة للطباعة")
+            } else {
+                val errMsg = activationResult.errorMessages.firstOrNull() ?: "تعذر تفعيل بعض الكروت على الراوتر"
+                _stockActivationState.value = StockActivationUiState.Error(
+                    message = errMsg,
+                    partialSuccessCount = activationResult.activatedCards.size
+                )
+                recordSystemEvent(
+                    actionType = "تفعيل مخزون",
+                    targetType = "دفعة تسلسلية",
+                    targetName = "${targetCards.size} كرت",
+                    description = "تم تفعيل ${activationResult.activatedCards.size} وفشل ${activationResult.failedCards.size} كرت",
+                    status = "FAILED",
+                    details = errMsg
+                )
+                _toastEvent.emit("تنبيه: تفعّل ${activationResult.activatedCards.size} كرت وتعذر تفعيل ${activationResult.failedCards.size}")
+            }
+
+            onComplete?.invoke(activationResult)
+        }
     }
 
     fun markBatchAsPrinted(batchKey: String) {
@@ -2603,11 +2972,17 @@ class MainViewModel(
         if (!currentKey.isNullOrBlank()) {
             markBatchAsPrinted(currentKey)
         }
+        val maxSerial = _printableCards.value
+            .mapNotNull { VoucherSerialEngine.extractCardSerial(it) }
+            .maxOrNull()
+        recordSavedStockSerial(maxSerial)
     }
 
     fun deleteSavedRouter(id: Long) {
         viewModelScope.launch {
+            val targetName = savedRouters.value.firstOrNull { it.id == id }?.name ?: "#$id"
             database.appDao().deleteSavedRouter(id)
+            recordSystemEvent("حذف", "سيرفر محفوظ", targetName, "تم حذف السيرفر ($targetName) من قائمة المحفوظات", "WARNING")
             _toastEvent.emit("تم حذف الراوتر من المحفوظات")
         }
     }
@@ -2619,6 +2994,7 @@ class MainViewModel(
     fun addNetworkNode(node: com.example.data.model.NetworkNode) {
         viewModelScope.launch {
             repository.addNetworkNode(node)
+            recordSystemEvent("إضافة", "نقطة شبكة", node.name, "تمت إضافة نقطة/برج (${node.name} - ${node.ipAddress})")
             _toastEvent.emit("تمت إضافة نقطة الشبكة (${node.name}) بنجاح!")
         }
     }
@@ -2626,13 +3002,16 @@ class MainViewModel(
     fun updateNetworkNode(node: com.example.data.model.NetworkNode) {
         viewModelScope.launch {
             repository.updateNetworkNode(node)
+            recordSystemEvent("تعديل", "نقطة شبكة", node.name, "تم تعديل بيانات نقطة الشبكة (${node.name})")
             _toastEvent.emit("تم حفظ تعديلات النقطة (${node.name}) بنجاح")
         }
     }
 
     fun deleteNetworkNode(nodeId: String) {
         viewModelScope.launch {
+            val nodeName = networkNodes.value.firstOrNull { it.id == nodeId }?.name ?: nodeId
             repository.deleteNetworkNode(nodeId)
+            recordSystemEvent("حذف", "نقطة شبكة", nodeName, "تم حذف نقطة الشبكة ($nodeName)", "WARNING")
             _toastEvent.emit("تم حذف النقطة بنجاح")
         }
     }
@@ -2872,7 +3251,7 @@ class MainViewModel(
                     dao.insertOrUpdateMaterializedSummary(
                         com.example.data.local.MaterializedSummaryEntity(
                             id = "global_summary",
-                            routerIp = (_connectionState.value as? ConnectionState.Connected)?.ipAddress ?: "192.168.88.1",
+                            routerIp = (_connectionState.value as? ConnectionState.Connected)?.ipAddress ?: _currentConfig.value.ipAddress,
                             totalEstimatedRevenue = summary.totalEstimatedRevenue,
                             totalNetProfit = summary.totalNetProfit,
                             activeCardsCount = summary.activeCardsCount,
@@ -3070,6 +3449,8 @@ class MainViewModel(
         }
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             userSessions.collectLatest { sessionList ->
+                // Debounce rapid emissions so Room writes aren't triggered excessively during bursts
+                delay(750L)
                 // Only archive real sessions (never overwrite history with synthetic sess_card_* inventory rows)
                 val realSessions = sessionList.filter { !it.id.startsWith("sess_card_") }
                 if (realSessions.isNotEmpty()) {

@@ -36,10 +36,11 @@ class RouterTaskQueueManager(
      */
     suspend fun enqueueEditCard(card: HotspotCard): Long {
         return withContext(Dispatchers.IO) {
-            // Remove any older pending edit tasks for this same card to avoid redundant overwrites
-            try {
-                appDao.deleteTasksByCardName(card.name)
-            } catch (_: Exception) {}
+            if (card.name.isNotBlank()) {
+                try {
+                    appDao.deletePendingTasksByCardAndType(card.name, RouterTaskEntity.TYPE_EDIT_CARD)
+                } catch (_: Exception) {}
+            }
 
             val task = RouterTaskEntity.createEditTask(card)
             val insertedId = appDao.insertTask(task)
@@ -53,7 +54,7 @@ class RouterTaskQueueManager(
      */
     suspend fun enqueueDeleteCard(cardId: String, cardName: String): Long {
         return withContext(Dispatchers.IO) {
-            // If there are pending edits for this card, clean them up since the card is being deleted
+            // Deleting a card supersedes all pending edits/toggles/reactivations for this card
             if (cardName.isNotBlank()) {
                 try {
                     appDao.deleteTasksByCardName(cardName)
@@ -67,10 +68,15 @@ class RouterTaskQueueManager(
     }
 
     /**
-     * Enqueue a toggle disabled operation.
+     * Enqueue a toggle disabled operation (coalesces previous pending toggle for same card).
      */
     suspend fun enqueueToggleDisabled(cardId: String, cardName: String, targetDisabled: Boolean): Long {
         return withContext(Dispatchers.IO) {
+            if (cardName.isNotBlank()) {
+                try {
+                    appDao.deletePendingTasksByCardAndType(cardName, RouterTaskEntity.TYPE_TOGGLE_CARD)
+                } catch (_: Exception) {}
+            }
             val task = RouterTaskEntity.createToggleTask(cardId, cardName, targetDisabled)
             val insertedId = appDao.insertTask(task)
             Log.d(TAG, "Enqueued TOGGLE_CARD task #$insertedId for card $cardName")
@@ -79,10 +85,15 @@ class RouterTaskQueueManager(
     }
 
     /**
-     * Enqueue a card reactivation operation.
+     * Enqueue a card reactivation operation (coalesces duplicates).
      */
     suspend fun enqueueReactivateCard(card: HotspotCard): Long {
         return withContext(Dispatchers.IO) {
+            if (card.name.isNotBlank()) {
+                try {
+                    appDao.deletePendingTasksByCardAndType(card.name, RouterTaskEntity.TYPE_REACTIVATE_CARD)
+                } catch (_: Exception) {}
+            }
             val task = RouterTaskEntity.createReactivateTask(card)
             val insertedId = appDao.insertTask(task)
             Log.d(TAG, "Enqueued REACTIVATE_CARD task #$insertedId for card ${card.name}")
@@ -91,10 +102,15 @@ class RouterTaskQueueManager(
     }
 
     /**
-     * Enqueue a card verification and activation operation.
+     * Enqueue a card verification and activation operation (coalesces duplicates).
      */
     suspend fun enqueueVerifyAndActivateCard(card: HotspotCard): Long {
         return withContext(Dispatchers.IO) {
+            if (card.name.isNotBlank()) {
+                try {
+                    appDao.deletePendingTasksByCardAndType(card.name, RouterTaskEntity.TYPE_VERIFY_ACTIVATE_CARD)
+                } catch (_: Exception) {}
+            }
             val task = RouterTaskEntity.createVerifyActivateTask(card)
             val insertedId = appDao.insertTask(task)
             Log.d(TAG, "Enqueued VERIFY_ACTIVATE_CARD task #$insertedId for card ${card.name}")
@@ -108,107 +124,103 @@ class RouterTaskQueueManager(
      */
     suspend fun processPendingTasks(repository: MikrotikRepository): QueueProcessingResult {
         return withContext(Dispatchers.IO) {
-            if (_isProcessing.value) {
+            if (!queueMutex.tryLock()) {
                 Log.d(TAG, "Queue processing already in progress, skipping concurrent run.")
                 return@withContext QueueProcessingResult(message = "المعالجة قيد التشغيل بالفعل")
             }
 
-            queueMutex.withLock {
-                _isProcessing.value = true
-                var successCount = 0
-                var failedCount = 0
-                var processedCount = 0
+            _isProcessing.value = true
+            var successCount = 0
+            var failedCount = 0
+            var processedCount = 0
 
-                try {
-                    val now = System.currentTimeMillis()
-                    val tasks = appDao.getPendingTasksReady(now)
+            try {
+                val now = System.currentTimeMillis()
+                val tasks = appDao.getPendingTasksReady(now)
 
-                    if (tasks.isEmpty()) {
-                        val totalPending = appDao.getPendingTaskCount()
-                        val result = QueueProcessingResult(
-                            processedCount = 0,
-                            remainingPendingCount = totalPending,
-                            message = if (totalPending > 0) "المهام المعلقة قيد انتظار موعد إعادة المحاولة التالي" else "طابور المهام فارغ"
-                        )
-                        _lastProcessResult.value = result
-                        return@withContext result
-                    }
-
-                    Log.d(TAG, "Found ${tasks.size} ready pending tasks to process.")
-
-                    for (task in tasks) {
-                        processedCount++
-                        // Mark task as PROCESSING
-                        appDao.updateTaskStatus(task.id, RouterTaskEntity.STATUS_PROCESSING)
-
-                        val execResult = executeTaskOnRouter(task, repository)
-                        if (execResult.isSuccess) {
-                            successCount++
-                            // Task succeeded - remove from queue
-                            appDao.deleteTaskById(task.id)
-                            Log.d(TAG, "Task #${task.id} (${task.taskType}) completed successfully and removed from queue.")
-                        } else {
-                            failedCount++
-                            val errorMsg = execResult.exceptionOrNull()?.message ?: "خطأ غير محدد في الراوتر"
-                            val nextRetry = task.retryCount + 1
-                            
-                            if (nextRetry >= task.maxRetries) {
-                                Log.w(TAG, "Task #${task.id} exceeded max retries ($nextRetry/${task.maxRetries}). Marking as FAILED.")
-                                appDao.updateTask(
-                                    task.copy(
-                                        status = RouterTaskEntity.STATUS_FAILED,
-                                        retryCount = nextRetry,
-                                        lastError = errorMsg
-                                    )
-                                )
-                            } else {
-                                val nextAttemptTime = RouterTaskEntity.calculateNextAttempt(nextRetry)
-                                val delaySeconds = (nextAttemptTime - System.currentTimeMillis()) / 1000
-                                Log.d(TAG, "Task #${task.id} failed: $errorMsg. Scheduled retry #$nextRetry after ${delaySeconds}s (Exponential Backoff).")
-                                appDao.updateTask(
-                                    task.copy(
-                                        status = RouterTaskEntity.STATUS_PENDING,
-                                        retryCount = nextRetry,
-                                        nextAttemptTimestamp = nextAttemptTime,
-                                        lastError = errorMsg
-                                    )
-                                )
-                            }
-                        }
-                    }
-
-                    val remainingPending = appDao.getPendingTaskCount()
-                    val summaryMessage = when {
-                        processedCount == 0 -> "لا توجد عمليات مؤجلة جاهزة"
-                        failedCount == 0 -> "تم تنفيذ $successCount عملية على الراوتر بنجاح!"
-                        successCount == 0 -> "تعذر تنفيذ $failedCount عملية، سيتم إعادة المحاولة تلقائياً"
-                        else -> "تم تنفيذ $successCount عملية بنجاح، وتأجيل $failedCount للمحاولة لاحقاً"
-                    }
-
-                    val finalResult = QueueProcessingResult(
-                        processedCount = processedCount,
-                        successCount = successCount,
-                        failedCount = failedCount,
-                        remainingPendingCount = remainingPending,
-                        message = summaryMessage
-                    )
-                    _lastProcessResult.value = finalResult
-                    return@withContext finalResult
-
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error while processing router task queue: ${e.message}", e)
+                if (tasks.isEmpty()) {
+                    val totalPending = appDao.getPendingTaskCount()
                     val result = QueueProcessingResult(
-                        processedCount = processedCount,
-                        successCount = successCount,
-                        failedCount = failedCount,
-                        remainingPendingCount = appDao.getPendingTaskCount(),
-                        message = "خطأ أثناء معالجة الطابور: ${e.message}"
+                        processedCount = 0,
+                        remainingPendingCount = totalPending,
+                        message = if (totalPending > 0) "المهام المعلقة قيد انتظار موعد إعادة المحاولة التالي" else "طابور المهام فارغ"
                     )
                     _lastProcessResult.value = result
                     return@withContext result
-                } finally {
-                    _isProcessing.value = false
                 }
+
+                Log.d(TAG, "Found ${tasks.size} ready pending tasks to process.")
+
+                for (task in tasks) {
+                    processedCount++
+                    appDao.updateTaskStatus(task.id, RouterTaskEntity.STATUS_PROCESSING)
+
+                    val execResult = executeTaskOnRouter(task, repository)
+                    if (execResult.isSuccess) {
+                        successCount++
+                        appDao.deleteTaskById(task.id)
+                        Log.d(TAG, "Task #${task.id} (${task.taskType}) completed successfully and removed from queue.")
+                    } else {
+                        failedCount++
+                        val errorMsg = execResult.exceptionOrNull()?.message ?: "خطأ غير محدد في الراوتر"
+                        val nextRetry = task.retryCount + 1
+
+                        if (nextRetry >= task.maxRetries) {
+                            Log.w(TAG, "Task #${task.id} exceeded max retries ($nextRetry/${task.maxRetries}). Marking as FAILED.")
+                            appDao.updateTask(
+                                task.copy(
+                                    status = RouterTaskEntity.STATUS_FAILED,
+                                    retryCount = nextRetry,
+                                    lastError = errorMsg
+                                )
+                            )
+                        } else {
+                            val nextAttemptTime = RouterTaskEntity.calculateNextAttempt(nextRetry)
+                            val delaySeconds = (nextAttemptTime - System.currentTimeMillis()) / 1000
+                            Log.d(TAG, "Task #${task.id} failed: $errorMsg. Scheduled retry #$nextRetry after ${delaySeconds}s (Exponential Backoff).")
+                            appDao.updateTask(
+                                task.copy(
+                                    status = RouterTaskEntity.STATUS_PENDING,
+                                    retryCount = nextRetry,
+                                    nextAttemptTimestamp = nextAttemptTime,
+                                    lastError = errorMsg
+                                )
+                            )
+                        }
+                    }
+                }
+
+                val remainingPending = appDao.getPendingTaskCount()
+                val summaryMessage = when {
+                    processedCount == 0 -> "لا توجد عمليات مؤجلة جاهزة"
+                    failedCount == 0 -> "تم تنفيذ $successCount عملية على الراوتر بنجاح!"
+                    successCount == 0 -> "تعذر تنفيذ $failedCount عملية، سيتم إعادة المحاولة تلقائياً"
+                    else -> "تم تنفيذ $successCount عملية بنجاح، وتأجيل $failedCount للمحاولة لاحقاً"
+                }
+
+                val finalResult = QueueProcessingResult(
+                    processedCount = processedCount,
+                    successCount = successCount,
+                    failedCount = failedCount,
+                    remainingPendingCount = remainingPending,
+                    message = summaryMessage
+                )
+                _lastProcessResult.value = finalResult
+                finalResult
+            } catch (e: Exception) {
+                Log.e(TAG, "Error while processing router task queue: ${e.message}", e)
+                val result = QueueProcessingResult(
+                    processedCount = processedCount,
+                    successCount = successCount,
+                    failedCount = failedCount,
+                    remainingPendingCount = appDao.getPendingTaskCount(),
+                    message = "خطأ أثناء معالجة الطابور: ${e.message}"
+                )
+                _lastProcessResult.value = result
+                result
+            } finally {
+                _isProcessing.value = false
+                queueMutex.unlock()
             }
         }
     }
@@ -232,10 +244,8 @@ class RouterTaskQueueManager(
                 RouterTaskEntity.TYPE_TOGGLE_CARD -> {
                     val json = JSONObject(task.payloadJson)
                     val targetDisabled = json.optBoolean("disabled", false)
-                    // In MikrotikRepository.toggleCardDisabled(cardId, currentDisabled), 
-                    // currentDisabled should be !targetDisabled so it flips to targetDisabled
                     val currentDisabled = !targetDisabled
-                    repository.toggleCardDisabled(task.cardId, currentDisabled)
+                    repository.toggleCardDisabled(task.cardId, currentDisabled, task.cardName)
                 }
                 RouterTaskEntity.TYPE_REACTIVATE_CARD -> {
                     val card = RouterTaskEntity.parseCardFromPayload(task.payloadJson)
@@ -257,18 +267,22 @@ class RouterTaskQueueManager(
     }
 
     /**
-     * Force retry all tasks immediately (resets nextAttemptTimestamp to now for all pending tasks).
+     * Force retry all tasks immediately (includes previously FAILED tasks and resets retry counters).
      */
     suspend fun forceRetryAllPending(repository: MikrotikRepository): QueueProcessingResult {
         return withContext(Dispatchers.IO) {
             try {
-                // Update all pending tasks to be ready right now
-                val allTasks = appDao.getPendingTasksReady(Long.MAX_VALUE)
+                val allTasks = appDao.getAllRetryableTasks()
                 val now = System.currentTimeMillis()
                 for (t in allTasks) {
-                    if (t.status == RouterTaskEntity.STATUS_PENDING || t.status == RouterTaskEntity.STATUS_FAILED) {
-                        appDao.updateTask(t.copy(status = RouterTaskEntity.STATUS_PENDING, nextAttemptTimestamp = now))
-                    }
+                    appDao.updateTask(
+                        t.copy(
+                            status = RouterTaskEntity.STATUS_PENDING,
+                            retryCount = 0,
+                            nextAttemptTimestamp = now,
+                            lastError = null
+                        )
+                    )
                 }
             } catch (_: Exception) {}
             processPendingTasks(repository)

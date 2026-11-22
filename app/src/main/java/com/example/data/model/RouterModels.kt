@@ -37,14 +37,15 @@ data class PrintableBatchOption(
 data class RouterConnectionConfig(
     val id: Long = 0,
     val name: String = "راوتر الشبكة",
-    val ipAddress: String = "192.168.88.1",
+    val ipAddress: String = "",
     val port: Int = 80,
     val username: String = "admin",
     val password: String = "",
     val useHttps: Boolean = false,
     val isDemoMode: Boolean = false,
     val autoDetectProtocol: Boolean = true,
-    val preferredPath: String? = null
+    val preferredPath: String? = null,
+    val directApiOnly: Boolean = false
 )
 
 sealed class ConnectionState {
@@ -206,18 +207,19 @@ data class HotspotCard(
     val isExpired: Boolean
         get() {
             if (isExpiredQuota || isExpiredValidity) return true
-            if (disabled && (uptime != "0s" || bytesIn > 0L || bytesOut > 0L)) return true
             if (comment.contains("expired", ignoreCase = true) || comment.contains("منتهي", ignoreCase = true)) return true
-            if (disabled) return true
             return false
         }
+
+    val isManuallyDisabled: Boolean
+        get() = disabled && !isExpired
 
     val expiryReason: String
         get() = when {
             isExpiredQuota -> "انتهى الرصيد (استنفاد حجم البيانات المحدد)"
             isExpiredValidity -> "انتهت الصلاحية (انقضاء وقت الكرت: ${limitUptime.ifBlank { uptime }})"
-            disabled -> "كرت متوقف أو معطل من الإدارة"
             comment.contains("expired", ignoreCase = true) || comment.contains("منتهي", ignoreCase = true) -> "كرت منتهي الصلاحية"
+            disabled -> "معطل يدوياً من الإدارة"
             else -> "صالح ونشط"
         }
 
@@ -244,11 +246,11 @@ private fun parseCardUptimeSeconds(uptime: String): Long {
 data class HotspotProfile(
     val id: String,
     val name: String,
-    val rateLimit: String = "2M/2M",
+    val rateLimit: String = "",
     val sharedUsers: Int = 1,
-    val sessionTimeout: String = "1d",
-    val keepaliveTimeout: String = "5m",
-    val price: String = "500 ر.ي",
+    val sessionTimeout: String = "",
+    val keepaliveTimeout: String = "",
+    val price: String = "",
     val uploadLimit: String = "",
     val downloadLimit: String = "",
     val validity: String = "",
@@ -296,7 +298,10 @@ data class BatchGenerationConfig(
     val posAgentName: String = "",
     val discountPercent: Double = 0.0,
     val targetSystem: String = "usermanager", // "usermanager" or "hotspot"
-    val profileSource: String = "usermanager_v7" // "usermanager_v7", "usermanager_v6", "hotspot"
+    val profileSource: String = "usermanager_v7", // "usermanager_v7", "usermanager_v6", "hotspot"
+    val startDisabled: Boolean = false,
+    val includeSerialInComment: Boolean = false,
+    val serialStartNumber: Long = 1L
 )
 
 data class BatchCardGenerationResult(
@@ -320,14 +325,14 @@ data class IpBinding(
 )
 
 data class DiscoveredRouter(
-    val ip: String = "192.168.88.1",
+    val ip: String = "",
     val port: Int = 8728,
-    val isReachable: Boolean = true,
+    val isReachable: Boolean = false,
     val useHttps: Boolean = false,
-    val networkSsid: String = "شبكة Wi-Fi نشطة",
-    val statusMessage: String = "تم اكتشاف راوتر ميكروتك تلقائياً",
+    val networkSsid: String = "",
+    val statusMessage: String = "",
     val openPorts: List<Int> = emptyList(),
-    val serviceType: String = "MikroTik API (8728)",
+    val serviceType: String = "",
     val isCloudWebPortal: Boolean = false,
     val detectedServerKind: String = ""
 )
@@ -337,12 +342,12 @@ data class NodeConnectedClient(
     val cardName: String,
     val ipAddress: String,
     val macAddress: String,
-    val signalDbm: String = "-55 dBm",
-    val ccqRate: String = "98%",
-    val rxRateMbps: Double = 72.0,
-    val txRateMbps: Double = 54.0,
-    val uptime: String = "45m",
-    val bytesUsed: Long = 320 * 1024 * 1024L,
+    val signalDbm: String = "",
+    val ccqRate: String = "",
+    val rxRateMbps: Double = 0.0,
+    val txRateMbps: Double = 0.0,
+    val uptime: String = "",
+    val bytesUsed: Long = 0L,
     val deviceInfo: DeviceIdentification = DeviceIdentification()
 )
 
@@ -367,35 +372,35 @@ data class NetworkNode(
     val id: String,
     val name: String,
     val ipAddress: String,
-    val macAddress: String = "64:D1:54:3B:88:12",
-    val interfaceName: String = "ether2",
-    val model: String = "MikroTik cAP ac",
-    val role: String = "أكسس بوينت (بث)", // أكسس بوينت, برج رئيسي, موجه فرعي, سيرفر Starlink, نقطة منزلية
+    val macAddress: String = "",
+    val interfaceName: String = "",
+    val model: String = "",
+    val role: String = "", // أكسس بوينت, برج رئيسي, موجه فرعي, سيرفر Starlink, نقطة منزلية
     val nodeType: NetworkNodeType = NetworkNodeType.DISTRIBUTION,
-    val status: NodeStatus = NodeStatus.ACTIVE,
+    val status: NodeStatus = NodeStatus.OFFLINE,
     val parentTowerId: String? = null,
     val parentTowerName: String? = null,
     val isOnline: Boolean = (status == NodeStatus.ACTIVE || status == NodeStatus.NO_INTERNET),
-    val pingMs: Long = 4L,
-    val connectedUsers: Int = 12,
-    val uptime: String = "4d 12h",
-    val rxSpeedKbps: Double = 4200.0,
-    val txSpeedKbps: Double = 1650.0,
-    val totalBytesConsumed: Long = 28_500_000_000L,
-    val signalDbm: String = "-58 dBm",
-    val location: String = "البرج الرئيسي",
-    val cpuLoadPercent: Int = 22,
-    val memoryUsagePercent: Int = 35,
-    val temperature: String = "43°C",
-    val voltage: String = "24.2 V",
-    val frequency: String = "5 GHz (5200 MHz)",
-    val channelWidth: String = "20/40/80 MHz",
-    val ssid: String = "YemenNet_Tower_1",
+    val pingMs: Long = 0L,
+    val connectedUsers: Int = 0,
+    val uptime: String = "",
+    val rxSpeedKbps: Double = 0.0,
+    val txSpeedKbps: Double = 0.0,
+    val totalBytesConsumed: Long = 0L,
+    val signalDbm: String = "",
+    val location: String = "",
+    val cpuLoadPercent: Int = 0,
+    val memoryUsagePercent: Int = 0,
+    val temperature: String = "",
+    val voltage: String = "",
+    val frequency: String = "",
+    val channelWidth: String = "",
+    val ssid: String = "",
     val firmwareVersion: String = "",
     val vlanId: Int? = null,
     val parentInterface: String? = null,
-    val lastSeenTime: Long = System.currentTimeMillis(),
-    val lastCheckTime: Long = System.currentTimeMillis(),
+    val lastSeenTime: Long = 0L,
+    val lastCheckTime: Long = 0L,
     val connectedClients: List<NodeConnectedClient> = emptyList()
 ) {
     val effectiveStatus: NodeStatus
@@ -466,11 +471,11 @@ enum class DeviceCategory(val title: String) {
 }
 
 data class DeviceIdentification(
-    val brand: String = "Samsung",
-    val modelName: String = "Galaxy A54",
-    val osName: String = "Android 14",
+    val brand: String = "غير معروف",
+    val modelName: String = "جهاز شبكة",
+    val osName: String = "",
     val category: DeviceCategory = DeviceCategory.ANDROID_PHONE,
-    val macVendor: String = "Samsung Electronics"
+    val macVendor: String = ""
 )
 
 data class HourlyUsageItem(
@@ -488,19 +493,19 @@ data class UserSessionRecord(
     val ipAddress: String,
     val macAddress: String,
     val isOnline: Boolean = false,
-    val loginTime: String = "اليوم 14:30",
-    val logoutTime: String = "اليوم 16:15",
-    val duration: String = "1h 45m",
-    val bytesIn: Long = 250 * 1024 * 1024L,
-    val bytesOut: Long = 680 * 1024 * 1024L,
-    val totalBytes: Long = (250 + 680) * 1024 * 1024L,
-    val terminateReason: String = "تسجيل خروج المستخدم", // جلسة نشطة, انتهاء الوقت, انتهاء الرصيد, فقدان الإشارة
-    val profile: String = "500 ر.ي (24 ساعة)",
-    val price: String = "500 ر.ي",
+    val loginTime: String = "",
+    val logoutTime: String = "",
+    val duration: String = "0s",
+    val bytesIn: Long = 0L,
+    val bytesOut: Long = 0L,
+    val totalBytes: Long = 0L,
+    val terminateReason: String = "",
+    val profile: String = "",
+    val price: String = "",
     val deviceInfo: DeviceIdentification = DeviceIdentification(),
     val comment: String = "",
     val nodeName: String = "",
-    val packageLimitBytes: Long = 1024L * 1024L * 1024L, // Default 1GB package limit
+    val packageLimitBytes: Long = 0L,
     val isQuotaExhausted: Boolean = false,
     val hourlyUsageList: List<HourlyUsageItem> = emptyList()
 )

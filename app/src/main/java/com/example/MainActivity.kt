@@ -63,7 +63,10 @@ fun AppNavigation(viewModel: MainViewModel) {
                 } else {
                     null
                 },
-                onArchiveSaved = { meta -> viewModel.notifyPortalSnapshotSaved(meta) }
+                onArchiveSaved = { meta -> viewModel.notifyPortalSnapshotSaved(meta) },
+                onActivityRecorded = { actionType, target, desc ->
+                    viewModel.recordSystemEvent(actionType, "لوحة الويب", target, desc, "SUCCESS")
+                }
             )
         }
         else -> {

@@ -168,15 +168,20 @@ fun FullScreenTopologyDialog(
         label = "central_glow_alpha"
     )
 
-    val radarAngle by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "radar_sweep_fullscreen"
-    )
+    val radarAngle = if (currentLayout == NetworkTopologyLayout.HEXAGONAL_MESH) {
+        val animatedRadar by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 4000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "radar_sweep_fullscreen"
+        )
+        animatedRadar
+    } else {
+        0f
+    }
 
     val localDensity = LocalDensity.current
 

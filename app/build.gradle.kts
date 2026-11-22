@@ -17,13 +17,9 @@ android {
     minSdk = 24
     targetSdk = 36
     
-    // Dynamic Versioning: Ensures every build has a higher VersionCode than the last.
-    // Uses minutes since epoch (~29.8M) which is always > previous hardcoded values (5).
     val githubRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
-    val timeVersion = (System.currentTimeMillis() / 60000).toInt() 
-    versionCode = if (githubRunNumber > 0) 100000000 + githubRunNumber else timeVersion
-    
-    versionName = "1.4.${githubRunNumber.takeIf { it > 0 } ?: "dev-" + (System.currentTimeMillis() / 100000 % 10000)}"
+    versionCode = if (githubRunNumber > 0) 100000000 + githubRunNumber else 30000000
+    versionName = if (githubRunNumber > 0) "1.4.$githubRunNumber" else "1.4.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

@@ -6,6 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -358,9 +360,11 @@ fun AdminAuditScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
 
-                                Row(
+                                @OptIn(ExperimentalLayoutApi::class)
+                                FlowRow(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     admin.permissions.forEach { perm ->
                                         Surface(
@@ -428,9 +432,9 @@ fun AddAdminDialog(
     var isPasswordVisible by remember { mutableStateOf(false) }
     var fullName by remember { mutableStateOf("") }
     var role by remember { mutableStateOf("مشرف كروت") }
-    var ipAddress by remember { mutableStateOf("192.168.88.50") }
+    var ipAddress by remember { mutableStateOf("") }
 
-    val allPossiblePermissions = listOf("إدارة كاملة", "توليد كروت", "تعديل الأسعار", "إدارة السيرفرات", "طرد مستخدم", "تعديل الصلاحيات")
+    val allPossiblePermissions = listOf("إدارة كاملة", "توليد كروت", "عرض الجلسات", "تعديل الأسعار", "إدارة السيرفرات", "طرد مستخدم", "تعديل الصلاحيات")
     val selectedPermissions = remember { mutableStateOf(setOf("توليد كروت", "عرض الجلسات")) }
 
     AlertDialog(
@@ -526,7 +530,7 @@ fun AddAdminDialog(
                             role = role.trim(),
                             permissions = selectedPermissions.value.toList(),
                             lastActiveTime = "الآن",
-                            ipAddress = ipAddress.trim().ifBlank { "192.168.88.1" },
+                            ipAddress = ipAddress.trim().ifBlank { "غير محدد" },
                             isActive = true
                         )
                         onConfirm(newAdmin)

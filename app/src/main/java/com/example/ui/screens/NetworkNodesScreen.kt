@@ -1096,7 +1096,14 @@ fun NetworkNodesScreen(
                                             }
                                         }
                                         Text("${node.name} (${node.ipAddress})", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                                        Text("قوة الإشارة: ${node.signalDbm} • وقت التشغيل: ${node.uptime}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(
+                                            text = listOfNotNull(
+                                                node.signalDbm.takeIf { it.isNotBlank() }?.let { "قوة الإشارة: $it" },
+                                                node.uptime.takeIf { it.isNotBlank() }?.let { "وقت التشغيل: $it" }
+                                            ).ifEmpty { listOf("بيانات الإشارة ووقت التشغيل غير متوفرة") }.joinToString(" • "),
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
                                 }
                             }
@@ -1357,7 +1364,11 @@ fun NetworkNodeItem(
                                     .background(statusColor)
                             )
                             Text(
-                                text = if (node.effectiveStatus == NodeStatus.ACTIVE) "${node.statusTitleAr} (${node.pingMs}ms)" else node.statusTitleAr,
+                                text = if (node.effectiveStatus == NodeStatus.ACTIVE && node.pingMs > 0L) {
+                                    "${node.statusTitleAr} (${node.pingMs}ms)"
+                                } else {
+                                    node.statusTitleAr
+                                },
                                 color = statusColor,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
@@ -1435,7 +1446,12 @@ fun NetworkNodeItem(
                         }
 
                         Text(
-                            text = if (node.lastCheckTime > 0L) "🕒 نبض: ${NetworkUtils.formatCardCreationDate(node.lastCheckTime)}" else if (node.isOnline) "⚡ استجابة ${node.pingMs}ms" else "⚠️ غير مستجيب",
+                            text = when {
+                                node.lastCheckTime > 0L -> "🕒 نبض: ${NetworkUtils.formatCardCreationDate(node.lastCheckTime)}"
+                                node.isOnline && node.pingMs > 0L -> "⚡ استجابة ${node.pingMs}ms"
+                                node.isOnline -> "✅ متصل"
+                                else -> "⚠️ غير مستجيب / بانتظار الفحص"
+                            },
                             fontSize = 10.sp,
                             color = statusColor,
                             fontWeight = FontWeight.Medium
@@ -1580,7 +1596,7 @@ fun NetworkNodeItem(
                 ) {
                     Icon(Icons.Default.SignalCellularAlt, contentDescription = null, modifier = Modifier.size(14.dp), tint = StatusActiveGreen)
                     Text(
-                        text = node.signalDbm,
+                        text = node.signalDbm.ifBlank { "--" },
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1594,7 +1610,7 @@ fun NetworkNodeItem(
                 ) {
                     Icon(Icons.Default.Timer, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
                     Text(
-                        text = node.uptime,
+                        text = node.uptime.ifBlank { "--" },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1716,13 +1732,13 @@ fun AddNodeDialog(
     onConfirm: (NetworkNode) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
-    var ipAddress by remember { mutableStateOf("192.168.88.") }
-    var model by remember { mutableStateOf("MikroTik cAP ac") }
+    var ipAddress by remember { mutableStateOf("") }
+    var model by remember { mutableStateOf("") }
     var role by remember { mutableStateOf("أكسس بوينت (بث)") }
-    var location by remember { mutableStateOf("البرج الرئيسي") }
-    var interfaceName by remember { mutableStateOf("ether2") }
+    var location by remember { mutableStateOf("") }
+    var interfaceName by remember { mutableStateOf("") }
     var selectedNodeType by remember { mutableStateOf(NetworkNodeType.DISTRIBUTION) }
-    var parentTowerName by remember { mutableStateOf("البرج الرئيسي") }
+    var parentTowerName by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1855,21 +1871,23 @@ fun AddNodeDialog(
                             id = "node_${System.currentTimeMillis()}",
                             name = name.trim(),
                             ipAddress = ipAddress.trim(),
-                            interfaceName = interfaceName.ifBlank { "ether2" },
-                            model = model.ifBlank { "MikroTik AP" },
+                            interfaceName = interfaceName.trim(),
+                            model = model.trim(),
                             role = role.ifBlank { "أكسس بوينت" },
-                            location = location.ifBlank { "الموقع الرئيسي" },
+                            location = location.trim(),
                             nodeType = selectedNodeType,
-                            parentTowerId = if (selectedNodeType == NetworkNodeType.HOME_NODE) "node_ap_main" else null,
-                            parentTowerName = if (selectedNodeType == NetworkNodeType.HOME_NODE) parentTowerName.ifBlank { "البرج الرئيسي" } else null,
-                            status = NodeStatus.ACTIVE,
-                            isOnline = true,
-                            pingMs = 3L,
+                            parentTowerId = null,
+                            parentTowerName = if (selectedNodeType == NetworkNodeType.HOME_NODE) parentTowerName.trim().ifBlank { null } else null,
+                            status = NodeStatus.OFFLINE,
+                            isOnline = false,
+                            pingMs = 0L,
                             connectedUsers = 0,
-                            uptime = "1h",
-                            rxSpeedKbps = 1200.0,
-                            txSpeedKbps = 400.0,
-                            signalDbm = "-60 dBm"
+                            uptime = "",
+                            rxSpeedKbps = 0.0,
+                            txSpeedKbps = 0.0,
+                            signalDbm = "",
+                            lastCheckTime = 0L,
+                            lastSeenTime = 0L
                         )
                         onConfirm(node)
                     }

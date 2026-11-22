@@ -296,6 +296,8 @@ fun MainScreen(
                     val printableCards by viewModel.printableCards.collectAsStateWithLifecycle()
                     val batchOptions by viewModel.printableBatchOptions.collectAsStateWithLifecycle()
                     val activeBatchKey by viewModel.selectedPrintableBatchKey.collectAsStateWithLifecycle()
+                    val printableSerialMap by viewModel.printableSerialMap.collectAsStateWithLifecycle()
+                    val stockActivationState by viewModel.stockActivationState.collectAsStateWithLifecycle()
                     VoucherPrintScreen(
                         cards = printableCards,
                         onBackClick = { navController.popBackStack() },
@@ -306,6 +308,15 @@ fun MainScreen(
                         },
                         onMarkPrinted = {
                             viewModel.markCurrentBatchAsPrinted()
+                        },
+                        serialMap = printableSerialMap,
+                        stockActivationState = stockActivationState,
+                        onActivatePendingCards = { onReady ->
+                            viewModel.activatePrintableCardsOnRouter { activationResult ->
+                                if (activationResult.failedCards.isEmpty()) {
+                                    onReady()
+                                }
+                            }
                         }
                     )
                 }
@@ -384,10 +395,14 @@ fun MainScreen(
     }
 
     if (showBatchGeneratorDialog) {
+        val suggestedSerialStart = remember(allCards) {
+            com.example.data.util.VoucherSerialEngine.suggestNextStartSerial(allCards)
+        }
         VoucherBatchDialog(
             profiles = profiles,
             posAgents = posAgents,
             preselectedAgentId = preselectedAgentIdForBatch,
+            suggestedSerialStart = suggestedSerialStart,
             onDismiss = {
                 showBatchGeneratorDialog = false
                 preselectedAgentIdForBatch = 0L

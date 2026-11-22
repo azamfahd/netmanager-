@@ -13,6 +13,8 @@ import com.example.data.local.SystemEventLogEntity
 import com.example.data.model.IpBinding
 import com.example.data.model.RouterConnectionConfig
 import com.example.data.model.RouterResource
+import com.example.data.util.StockActivationResult
+import com.example.data.util.VoucherSerialEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -357,15 +359,96 @@ class MikrotikRepository(
 
     private val lastKnownUserTelemetry = java.util.concurrent.ConcurrentHashMap<String, UserKnownTelemetry>()
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
-        .build()
+    private fun buildRouterOkHttpClient(): OkHttpClient {
+        val builder = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(20, TimeUnit.SECONDS)
+        try {
+            val tmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
+            )
+            tmf.init(null as java.security.KeyStore?)
+            val defaultTm = tmf.trustManagers
+                .filterIsInstance<javax.net.ssl.X509TrustManager>()
+                .firstOrNull()
+            if (defaultTm != null) {
+                val localAwareTm = object : javax.net.ssl.X509ExtendedTrustManager() {
+                    private fun isPrivatePeer(socket: java.net.Socket?): Boolean {
+                        val addr = socket?.inetAddress?.hostAddress.orEmpty()
+                        return RouterConnectionParser.isPrivateOrLocalIpv4(addr)
+                    }
+
+                    override fun checkClientTrusted(
+                        chain: Array<java.security.cert.X509Certificate>?,
+                        authType: String?
+                    ) = defaultTm.checkClientTrusted(chain, authType)
+
+                    override fun checkClientTrusted(
+                        chain: Array<java.security.cert.X509Certificate>?,
+                        authType: String?,
+                        socket: java.net.Socket?
+                    ) = defaultTm.checkClientTrusted(chain, authType)
+
+                    override fun checkClientTrusted(
+                        chain: Array<java.security.cert.X509Certificate>?,
+                        authType: String?,
+                        engine: javax.net.ssl.SSLEngine?
+                    ) = defaultTm.checkClientTrusted(chain, authType)
+
+                    override fun checkServerTrusted(
+                        chain: Array<java.security.cert.X509Certificate>?,
+                        authType: String?
+                    ) = defaultTm.checkServerTrusted(chain, authType)
+
+                    override fun checkServerTrusted(
+                        chain: Array<java.security.cert.X509Certificate>?,
+                        authType: String?,
+                        socket: java.net.Socket?
+                    ) {
+                        if (isPrivatePeer(socket)) return
+                        defaultTm.checkServerTrusted(chain, authType)
+                    }
+
+                    override fun checkServerTrusted(
+                        chain: Array<java.security.cert.X509Certificate>?,
+                        authType: String?,
+                        engine: javax.net.ssl.SSLEngine?
+                    ) {
+                        val host = engine?.peerHost.orEmpty()
+                        if (RouterConnectionParser.isPrivateOrLocalIpv4(host)) return
+                        defaultTm.checkServerTrusted(chain, authType)
+                    }
+
+                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> =
+                        defaultTm.acceptedIssuers
+                }
+                val sslCtx = javax.net.ssl.SSLContext.getInstance("TLS")
+                sslCtx.init(null, arrayOf<javax.net.ssl.TrustManager>(localAwareTm), java.security.SecureRandom())
+                builder.sslSocketFactory(sslCtx.socketFactory, localAwareTm)
+                builder.hostnameVerifier { hostname, session ->
+                    RouterConnectionParser.isPrivateOrLocalIpv4(hostname) ||
+                        javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(hostname, session)
+                }
+            }
+        } catch (_: Exception) {}
+        return builder.build()
+    }
+
+    private fun encSeg(value: String): String {
+        return try {
+            java.net.URLEncoder.encode(value.trim(), "UTF-8").replace("+", "%20")
+        } catch (_: Exception) {
+            value.trim()
+        }
+    }
+
+    private val httpClient = buildRouterOkHttpClient()
 
     private val probeHttpClient = httpClient.newBuilder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .callTimeout(6, TimeUnit.SECONDS)
         .build()
 
     private val routerOsApiClient = RouterOsApiClient()
@@ -384,7 +467,7 @@ class MikrotikRepository(
     private var lastFullSyncTimeMs: Long = 0L
     @Volatile
     private var lastHeartbeatSnapshotDiskSaveMs: Long = 0L
-    private val customAddedNodes = mutableListOf<com.example.data.model.NetworkNode>()
+    private val customAddedNodes = java.util.concurrent.CopyOnWriteArrayList<com.example.data.model.NetworkNode>()
     private val deletedNodeIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val deletedNodeKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -482,6 +565,15 @@ class MikrotikRepository(
         }
     }
 
+    fun restoreLocalCard(card: HotspotCard) {
+        val exists = _cards.value.any { it.id == card.id || (card.name.isNotBlank() && it.name == card.name) }
+        _cards.value = if (exists) {
+            _cards.value.map { if (it.id == card.id || (card.name.isNotBlank() && it.name == card.name)) card else it }
+        } else {
+            sortCardsByNewestFirst(listOf(card) + _cards.value)
+        }
+    }
+
     private val _profiles = MutableStateFlow<List<HotspotProfile>>(emptyList())
     val profiles: StateFlow<List<HotspotProfile>> = _profiles.asStateFlow()
 
@@ -539,7 +631,7 @@ class MikrotikRepository(
             actionType = actionType,
             description = description,
             timestamp = "الآن ${java.text.SimpleDateFormat("hh:mm a", java.util.Locale("ar")).format(java.util.Date())}",
-            ipAddress = "192.168.88.1",
+            ipAddress = activeConfig?.ipAddress?.trim()?.ifBlank { "محلي" } ?: "محلي",
             severity = severity
         )
         val updated = mutableListOf(entry)
@@ -1237,7 +1329,7 @@ class MikrotikRepository(
                     probeHttpClient.newCall(req).execute().use { resp ->
                         val code = resp.code
                         val contentType = resp.header("Content-Type").orEmpty()
-                        val bodySnippet = resp.body?.string().orEmpty().take(8192)
+                        val bodySnippet = runCatching { resp.peekBody(8192L).string() }.getOrDefault("")
                         val finalUrl = resp.request.url.toString()
                         val isHtmlOrWeb = contentType.contains("html", ignoreCase = true) ||
                             bodySnippet.contains("<html", ignoreCase = true) ||
@@ -1280,6 +1372,44 @@ class MikrotikRepository(
             )
         }
         return WebEndpointInspection.None
+    }
+
+    private fun buildWebPortalOutcome(
+        inspection: WebEndpointInspection,
+        cleanConfig: RouterConnectionConfig
+    ): VerifyConnectOutcome? {
+        return when (inspection) {
+            is WebEndpointInspection.CloudWebPortal -> {
+                val label = if (inspection.isAplusWifi) {
+                    "لوحة تحكم APlusWiFi السحابية"
+                } else {
+                    inspection.title.ifBlank { "لوحة تحكم السيرفر عبر الويب" }
+                }
+                VerifyConnectOutcome.WebPortalDetected(
+                    url = inspection.url,
+                    serverName = cleanConfig.name.ifBlank { cleanConfig.ipAddress },
+                    isAplusWifi = inspection.isAplusWifi,
+                    description = "تم التعرف على السيرفر (${cleanConfig.ipAddress}) كـ $label.",
+                    port = inspection.port,
+                    useHttps = inspection.useHttps,
+                    targetPathUrl = inspection.targetPathUrl,
+                    isMikroTikWebFig = false
+                )
+            }
+            is WebEndpointInspection.MikroTikWebFig -> {
+                VerifyConnectOutcome.WebPortalDetected(
+                    url = inspection.url,
+                    serverName = cleanConfig.name.ifBlank { "راوتر ${cleanConfig.ipAddress}" },
+                    isAplusWifi = false,
+                    description = "تم الوصول إلى واجهة WebFig لراوتر ميكروتك (${cleanConfig.ipAddress}) وفتحها مباشرة.",
+                    port = inspection.port,
+                    useHttps = inspection.useHttps,
+                    targetPathUrl = inspection.url,
+                    isMikroTikWebFig = true
+                )
+            }
+            WebEndpointInspection.None -> null
+        }
     }
 
     suspend fun verifyAndConnect(config: RouterConnectionConfig): Result<Boolean> {
@@ -1369,6 +1499,49 @@ class MikrotikRepository(
                     appDao?.deleteUnscopedLegacyNodes()
                 } catch (_: Exception) {}
 
+                // Explicit Direct RouterOS API Mode: bypasses all cloud/web portal inspection and REST fallbacks
+                if (cleanConfig.directApiOnly) {
+                    return@withContext connectDirectViaRouterOsApiInternal(cleanConfig, sessionId)
+                }
+
+                val isAplusDomain = cleanConfig.ipAddress.contains("apluswifi.com", ignoreCase = true)
+                val isExplicitCloudWebUrl = (isAplusDomain ||
+                    ((parsedHost.rawScheme == "https" || parsedHost.rawScheme == "http") &&
+                        !effectivePath.isNullOrBlank() &&
+                        !effectivePath.startsWith("/rest", ignoreCase = true))) &&
+                    cleanConfig.port !in listOf(8728, 8729)
+
+                // Fast instant path for known cloud SaaS portals (e.g., APlusWiFi or explicit HTTPS web URLs with paths)
+                if (isExplicitCloudWebUrl) {
+                    routerOsApiClient.disconnect()
+                    isApiSocketMode = false
+                    val directInspection = inspectWebEndpoint(
+                        host = cleanConfig.ipAddress,
+                        openPorts = emptyList(),
+                        preferredPort = if (cleanConfig.port in listOf(8728, 8729)) 443 else cleanConfig.port,
+                        preferredHttps = parsedHost.inferredHttps ?: (cleanConfig.port != 80),
+                        preferredPath = cleanConfig.preferredPath
+                    )
+                    buildWebPortalOutcome(directInspection, cleanConfig)?.let {
+                        return@withContext it
+                    }
+                    if (isAplusDomain) {
+                        val cleanPath = effectivePath?.trim()?.takeIf { it.isNotBlank() && it != "/" }?.let {
+                            if (it.startsWith("/")) it else "/$it"
+                        }.orEmpty()
+                        return@withContext VerifyConnectOutcome.WebPortalDetected(
+                            url = "https://${cleanConfig.ipAddress}$cleanPath",
+                            serverName = cleanConfig.name.ifBlank { cleanConfig.ipAddress },
+                            isAplusWifi = true,
+                            description = "تم التعرف على السيرفر (${cleanConfig.ipAddress}) كـ لوحة تحكم APlusWiFi السحابية.",
+                            port = 443,
+                            useHttps = true,
+                            targetPathUrl = cleanPath.takeIf { it.isNotBlank() }?.let { "https://${cleanConfig.ipAddress}$it" },
+                            isMikroTikWebFig = false
+                        )
+                    }
+                }
+
                 // Direct, single-stage protocol candidates (no sequential DNS/port-scan pre-stage so MikroTik PSD never triggers)
                 val socketCandidates = mutableListOf<EndpointCandidate>()
                 val restCandidates = mutableListOf<EndpointCandidate>()
@@ -1405,25 +1578,27 @@ class MikrotikRepository(
                     addSocketCandidate(8729, true)
                     addRestCandidate(443, true)
                     addRestCandidate(80, false)
-                    addRestCandidate(8080, false)
                 }
 
                 val isLocalTarget = RouterConnectionParser.isPrivateOrLocalIpv4(cleanConfig.ipAddress)
-                val socketTimeoutMs = if (isLocalTarget) 3500 else 6500
+                val socketTimeoutMs = if (isLocalTarget) 1600 else 2800
 
                 val authRejectedRef = java.util.concurrent.atomic.AtomicReference<String?>(null)
                 val lastSslRef = java.util.concurrent.atomic.AtomicReference<String?>(null)
                 val dnsFailedRef = java.util.concurrent.atomic.AtomicBoolean(false)
                 val winnerClaimed = java.util.concurrent.atomic.AtomicBoolean(false)
                 val winnerRef = java.util.concurrent.atomic.AtomicReference<RaceProtocolWinner?>(null)
+                val webInspectionRef = java.util.concurrent.atomic.AtomicReference<WebEndpointInspection?>(null)
+                val raceStartMs = System.currentTimeMillis()
 
-                // Race Socket API worker and OkHttp REST worker in parallel
+                // Race Socket API worker, OkHttp REST worker, and Web Endpoint inspector in parallel
                 coroutineScope {
                     var socketJob: Job? = null
                     var restJob: Job? = null
+                    var webJob: Job? = null
 
                     socketJob = launch(Dispatchers.IO) {
-                        for (candidate in socketCandidates) {
+                        for ((idx, candidate) in socketCandidates.withIndex()) {
                             if (winnerClaimed.get() || authRejectedRef.get() != null) break
                             val socketResult = routerOsApiClient.connectAndLogin(
                                 host = cleanConfig.ipAddress,
@@ -1441,6 +1616,7 @@ class MikrotikRepository(
                                 if (winnerClaimed.compareAndSet(false, true)) {
                                     winnerRef.set(RaceProtocolWinner.SocketSuccess(workingConfig))
                                     restJob?.cancel()
+                                    webJob?.cancel()
                                 } else {
                                     routerOsApiClient.disconnect()
                                 }
@@ -1449,15 +1625,24 @@ class MikrotikRepository(
                                 val throwable = socketResult.exceptionOrNull()
                                 if (throwable is java.net.UnknownHostException) {
                                     dnsFailedRef.set(true)
+                                    break
                                 }
                                 val err = throwable?.message.orEmpty()
                                 if (err.contains("بيانات الدخول") || err.contains("المصادقة") || err.contains("كلمة المرور")) {
                                     authRejectedRef.compareAndSet(null, err)
                                     restJob?.cancel()
+                                    webJob?.cancel()
                                     break
                                 }
                                 if (err.contains("SSL", ignoreCase = true)) {
                                     lastSslRef.compareAndSet(null, err)
+                                }
+                                // If 8728 timed out (dropped by firewall), skip waiting another full timeout for 8729 unless TLS was specifically requested
+                                val timedOut = throwable is java.net.SocketTimeoutException ||
+                                    err.contains("timed out", ignoreCase = true) ||
+                                    err.contains("انتهى وقت", ignoreCase = true)
+                                if (timedOut && idx == 0 && !cleanConfig.useHttps && cleanConfig.port != 8729) {
+                                    break
                                 }
                             }
                         }
@@ -1465,62 +1650,99 @@ class MikrotikRepository(
 
                     restJob = launch(Dispatchers.IO) {
                         val credential = Credentials.basic(cleanConfig.username, cleanConfig.password)
-                        for (candidate in restCandidates) {
-                            if (winnerClaimed.get() || authRejectedRef.get() != null) break
-                            val protocol = if (candidate.useHttps) "https" else "http"
-                            val baseUrl = "$protocol://${cleanConfig.ipAddress}:${candidate.port}"
-                            try {
-                                val request = Request.Builder()
-                                    .url("$baseUrl/rest/system/resource")
-                                    .header("Authorization", credential)
-                                    .build()
+                        coroutineScope {
+                            restCandidates.forEach { candidate ->
+                                launch {
+                                    if (winnerClaimed.get() || authRejectedRef.get() != null) return@launch
+                                    val protocol = if (candidate.useHttps) "https" else "http"
+                                    val baseUrl = "$protocol://${cleanConfig.ipAddress}:${candidate.port}"
+                                    try {
+                                        val request = Request.Builder()
+                                            .url("$baseUrl/rest/system/resource")
+                                            .header("Authorization", credential)
+                                            .build()
 
-                                probeHttpClient.newCall(request).execute().use { response ->
-                                    if (response.isSuccessful) {
-                                        val body = response.body?.string().orEmpty()
-                                        if (body.trimStart().startsWith("{")) {
-                                            val workingConfig = cleanConfig.copy(
-                                                port = candidate.port,
-                                                useHttps = candidate.useHttps
-                                            )
-                                            if (winnerClaimed.compareAndSet(false, true)) {
-                                                winnerRef.set(
-                                                    RaceProtocolWinner.RestSuccess(
-                                                        config = workingConfig,
-                                                        baseUrl = baseUrl,
-                                                        credential = credential,
-                                                        resourceBody = body
+                                        probeHttpClient.newCall(request).execute().use { response ->
+                                            if (response.isSuccessful) {
+                                                val body = response.body?.string().orEmpty()
+                                                if (body.trimStart().startsWith("{")) {
+                                                    val workingConfig = cleanConfig.copy(
+                                                        port = candidate.port,
+                                                        useHttps = candidate.useHttps
                                                     )
-                                                )
-                                                socketJob?.cancel()
+                                                    if (winnerClaimed.compareAndSet(false, true)) {
+                                                        winnerRef.set(
+                                                            RaceProtocolWinner.RestSuccess(
+                                                                config = workingConfig,
+                                                                baseUrl = baseUrl,
+                                                                credential = credential,
+                                                                resourceBody = body
+                                                            )
+                                                        )
+                                                        socketJob?.cancel()
+                                                        webJob?.cancel()
+                                                    }
+                                                    return@launch
+                                                }
+                                            } else if (response.code == 401 || response.code == 403) {
+                                                val errBody = runCatching { response.peekBody(2048L).string().trimStart() }.getOrDefault("")
+                                                if (errBody.startsWith("{") || response.header("WWW-Authenticate").orEmpty().contains("Basic", ignoreCase = true)) {
+                                                    authRejectedRef.compareAndSet(
+                                                        null,
+                                                        "خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة للاتصال بـ REST API في الراوتر."
+                                                    )
+                                                    socketJob?.cancel()
+                                                    webJob?.cancel()
+                                                    return@launch
+                                                }
                                             }
-                                            return@launch
                                         }
-                                    } else if (response.code == 401 || response.code == 403) {
-                                        val errBody = response.body?.string().orEmpty().trimStart()
-                                        if (errBody.startsWith("{") || response.header("WWW-Authenticate").orEmpty().contains("Basic", ignoreCase = true)) {
-                                            authRejectedRef.compareAndSet(
-                                                null,
-                                                "خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة للاتصال بـ REST API في الراوتر."
-                                            )
-                                            socketJob?.cancel()
-                                            return@launch
-                                        }
+                                    } catch (e: javax.net.ssl.SSLException) {
+                                        lastSslRef.compareAndSet(
+                                            null,
+                                            "فشل التفاوض الأمني HTTPS على المنفذ (${candidate.port}): شهادة غير موثوقة أو غير صالحة."
+                                        )
+                                    } catch (e: java.net.UnknownHostException) {
+                                        dnsFailedRef.set(true)
+                                    } catch (_: Exception) {}
+                                }
+                            }
+                        }
+                    }
+
+                    webJob = launch(Dispatchers.IO) {
+                        val inspected = inspectWebEndpoint(
+                            host = cleanConfig.ipAddress,
+                            openPorts = emptyList(),
+                            preferredPort = cleanConfig.port,
+                            preferredHttps = cleanConfig.useHttps,
+                            preferredPath = cleanConfig.preferredPath
+                        )
+                        if (inspected !is WebEndpointInspection.None) {
+                            webInspectionRef.compareAndSet(null, inspected)
+                            // If a Cloud Web Portal (non-WebFig) responded fast while socketJob is hanging on dropped 8728/8729,
+                            // give socketJob at most 1100ms total from start before short-circuiting straight to the portal.
+                            if (inspected is WebEndpointInspection.CloudWebPortal && !winnerClaimed.get()) {
+                                val elapsed = System.currentTimeMillis() - raceStartMs
+                                val remainingGrace = (1100L - elapsed).coerceAtLeast(0L)
+                                if (remainingGrace > 0L) delay(remainingGrace)
+                                if (!winnerClaimed.get() && authRejectedRef.get() == null) {
+                                    restJob?.join()
+                                    if (!winnerClaimed.get() && authRejectedRef.get() == null) {
+                                        socketJob?.cancel()
                                     }
                                 }
-                            } catch (e: javax.net.ssl.SSLException) {
-                                lastSslRef.compareAndSet(
-                                    null,
-                                    "فشل التفاوض الأمني HTTPS على المنفذ (${candidate.port}): شهادة غير موثوقة أو غير صالحة."
-                                )
-                            } catch (e: java.net.UnknownHostException) {
-                                dnsFailedRef.set(true)
-                            } catch (_: Exception) {}
+                            }
                         }
                     }
 
                     socketJob.join()
                     restJob.join()
+                    if (winnerRef.get() == null && authRejectedRef.get() == null) {
+                        webJob.join()
+                    } else {
+                        webJob.cancel()
+                    }
                 }
 
                 when (val winner = winnerRef.get()) {
@@ -1574,59 +1796,219 @@ class MikrotikRepository(
                     return@withContext VerifyConnectOutcome.Failure(rejectedAuth)
                 }
 
-                // Neither RouterOS Socket API nor RouterOS REST succeeded — inspect Web endpoint directly
-                val webInspection = inspectWebEndpoint(
+                // Use the WebEndpointInspection already collected in parallel (zero redundant second HTTP roundtrip)
+                val webInspection = webInspectionRef.get() ?: inspectWebEndpoint(
                     host = cleanConfig.ipAddress,
                     openPorts = emptyList(),
                     preferredPort = cleanConfig.port,
                     preferredHttps = cleanConfig.useHttps,
                     preferredPath = cleanConfig.preferredPath
                 )
-                when (webInspection) {
-                    is WebEndpointInspection.CloudWebPortal -> {
-                        val label = if (webInspection.isAplusWifi) {
-                            "لوحة تحكم APlusWiFi السحابية"
-                        } else {
-                            webInspection.title.ifBlank { "لوحة تحكم السيرفر عبر الويب" }
-                        }
-                        return@withContext VerifyConnectOutcome.WebPortalDetected(
-                            url = webInspection.url,
-                            serverName = cleanConfig.name.ifBlank { cleanConfig.ipAddress },
-                            isAplusWifi = webInspection.isAplusWifi,
-                            description = "تم التعرف على السيرفر (${cleanConfig.ipAddress}) كـ $label.",
-                            port = webInspection.port,
-                            useHttps = webInspection.useHttps,
-                            targetPathUrl = webInspection.targetPathUrl,
-                            isMikroTikWebFig = false
-                        )
-                    }
-                    is WebEndpointInspection.MikroTikWebFig -> {
-                        return@withContext VerifyConnectOutcome.WebPortalDetected(
-                            url = webInspection.url,
-                            serverName = cleanConfig.name.ifBlank { "راوتر ${cleanConfig.ipAddress}" },
-                            isAplusWifi = false,
-                            description = "تم الوصول إلى واجهة WebFig لراوتر ميكروتك (${cleanConfig.ipAddress}) وفتحها مباشرة.",
-                            port = webInspection.port,
-                            useHttps = webInspection.useHttps,
-                            targetPathUrl = webInspection.url,
-                            isMikroTikWebFig = true
-                        )
-                    }
-                    WebEndpointInspection.None -> {
-                        val lastSslMsg = lastSslRef.get()
-                        val extraSslNote = if (lastSslMsg != null) "\n($lastSslMsg)" else ""
-                        val errorMsg = if (dnsFailedRef.get() && !RouterConnectionParser.isIpv4(cleanConfig.ipAddress)) {
-                            "تعذر الوصول إلى النطاق (${cleanConfig.ipAddress}). تأكد من صحة اسم الدومين ومن توفر اتصال بالإنترنت أو الشبكة المحلية."
-                        } else {
-                            "تعذر الاتصال بالسيرفر أو الراوتر (${cleanConfig.ipAddress}).$extraSslNote\nتأكد من اتصال جهازك بنفس شبكة الراوتر أو بالإنترنت، ومن صحة العنوان وبيانات الدخول."
-                        }
-                        return@withContext VerifyConnectOutcome.Failure(errorMsg)
-                    }
+                buildWebPortalOutcome(webInspection, cleanConfig)?.let { portalOutcome ->
+                    return@withContext portalOutcome
                 }
+
+                val lastSslMsg = lastSslRef.get()
+                val extraSslNote = if (lastSslMsg != null) "\n($lastSslMsg)" else ""
+                val errorMsg = if (dnsFailedRef.get() && !RouterConnectionParser.isIpv4(cleanConfig.ipAddress)) {
+                    "تعذر الوصول إلى النطاق (${cleanConfig.ipAddress}). تأكد من صحة اسم الدومين ومن توفر اتصال بالإنترنت أو الشبكة المحلية."
+                } else {
+                    "تعذر الاتصال بالسيرفر أو الراوتر (${cleanConfig.ipAddress}).$extraSslNote\nتأكد من اتصال جهازك بنفس شبكة الراوتر أو بالإنترنت، ومن صحة العنوان وبيانات الدخول."
+                }
+                return@withContext VerifyConnectOutcome.Failure(errorMsg)
             } catch (e: Exception) {
                 VerifyConnectOutcome.Failure("فشل الاتصال: ${e.localizedMessage ?: e.message}")
             }
         }
+    }
+
+    /**
+     * Direct RouterOS Binary API Connection (Port 8728 / 8729 or custom API port).
+     * Strictly guarantees zero cloud/web portal fallback and fast IP timeouts.
+     */
+    suspend fun connectDirectViaRouterOsApi(config: RouterConnectionConfig): VerifyConnectOutcome {
+        return withContext(Dispatchers.IO) {
+            try {
+                initialSyncJob?.cancel()
+                val sessionId = ++connectionSessionId
+                lastUmHistoryFetchMs = 0L
+                lastSyncedUmSessionsSignature = 0
+                cardTimestampCache.clear()
+                umEarliestSessionTimestamps.clear()
+                resetTrafficCalculationState()
+                _lastSyncError.value = null
+                lastFullSyncTimeMs = 0L
+
+                val parsedHost = RouterConnectionParser.normalizeHostInput(config.ipAddress)
+                val resolvedHost = parsedHost.host.ifBlank { config.ipAddress.trim() }
+                val rawPort = parsedHost.explicitPort ?: config.port
+                val effectivePort = if (rawPort in listOf(80, 443, 8080) || rawPort <= 0) {
+                    if (config.useHttps) 8729 else 8728
+                } else {
+                    rawPort
+                }
+                val cleanConfig = config.copy(
+                    ipAddress = resolvedHost,
+                    port = effectivePort,
+                    useHttps = effectivePort == 8729 || (config.useHttps && effectivePort != 8728),
+                    username = RouterConnectionParser.stripInvisibleAndChatPrefix(config.username),
+                    password = config.password.trim(),
+                    directApiOnly = true
+                )
+                activeConfig = cleanConfig
+                activeRouterIp = cleanConfig.ipAddress
+
+                connectDirectViaRouterOsApiInternal(cleanConfig, sessionId)
+            } catch (e: Exception) {
+                VerifyConnectOutcome.Failure("فشل الاتصال المباشر عبر API: ${e.localizedMessage ?: e.message}")
+            }
+        }
+    }
+
+    private suspend fun connectDirectViaRouterOsApiInternal(
+        cleanConfig: RouterConnectionConfig,
+        sessionId: Long
+    ): VerifyConnectOutcome {
+        if (cleanConfig.ipAddress.isBlank()) {
+            return VerifyConnectOutcome.Failure("يرجى إدخال عنوان IP أو اسم المضيف للراوتر للاتصال المباشر.")
+        }
+
+        // Disconnect any previous session cleanly before establishing a direct native API socket
+        routerOsApiClient.disconnect()
+        isApiSocketMode = false
+
+        val primaryPort = when {
+            cleanConfig.port in listOf(80, 443, 8080) || cleanConfig.port <= 0 ->
+                if (cleanConfig.useHttps) 8729 else 8728
+            else -> cleanConfig.port
+        }
+        val primaryTls = primaryPort == 8729 || (cleanConfig.useHttps && primaryPort != 8728)
+
+        val apiCandidates = mutableListOf<EndpointCandidate>()
+        apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, primaryPort, primaryTls))
+        if (cleanConfig.autoDetectProtocol && primaryPort in listOf(8728, 8729)) {
+            if (primaryPort == 8728) {
+                apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, 8729, true))
+            } else {
+                apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, 8728, false))
+            }
+        }
+
+        val isLocalTarget = RouterConnectionParser.isPrivateOrLocalIpv4(cleanConfig.ipAddress)
+        val connectTimeoutMs = if (isLocalTarget) 1600 else 2800
+
+        var authErrorMsg: String? = null
+        var dnsFailed = false
+        var noRouteMsg: String? = null
+        var sslErrorMsg: String? = null
+        var timedOut = false
+        var refused = false
+        var lastErrorMsg: String? = null
+
+        for ((idx, candidate) in apiCandidates.withIndex()) {
+            val socketResult = routerOsApiClient.connectAndLogin(
+                host = cleanConfig.ipAddress,
+                port = candidate.port,
+                username = cleanConfig.username,
+                password = cleanConfig.password,
+                timeoutMs = connectTimeoutMs,
+                useTls = candidate.useHttps || candidate.port == 8729
+            )
+
+            if (socketResult.isSuccess) {
+                val workingConfig = cleanConfig.copy(
+                    port = candidate.port,
+                    useHttps = candidate.useHttps || candidate.port == 8729,
+                    directApiOnly = true
+                )
+                activeConfig = workingConfig
+                isApiSocketMode = true
+
+                var initialSyncError: Exception? = null
+                syncMutex.withLock {
+                    if (connectionSessionId == sessionId && activeConfig != null) {
+                        try {
+                            fetchLiveRouterDataFromSocket()
+                        } catch (e: Exception) {
+                            _lastSyncError.value = e.message
+                            initialSyncError = e
+                        }
+                    }
+                }
+                return if (initialSyncError != null) {
+                    VerifyConnectOutcome.Failure(
+                        message = initialSyncError?.message ?: "اتصل التطبيق بمنفذ API (${candidate.port}) لكن تعذر جلب بيانات الراوتر."
+                    )
+                } else {
+                    VerifyConnectOutcome.MikroTikSuccess(workingConfig)
+                }
+            }
+
+            val throwable = socketResult.exceptionOrNull()
+            val errMsg = throwable?.message.orEmpty()
+            lastErrorMsg = errMsg.ifBlank { lastErrorMsg }
+
+            if (errMsg.contains("بيانات الدخول") ||
+                errMsg.contains("المصادقة") ||
+                errMsg.contains("كلمة المرور") ||
+                errMsg.contains("invalid user", ignoreCase = true)
+            ) {
+                authErrorMsg = errMsg
+                break
+            }
+            if (throwable is java.net.UnknownHostException) {
+                dnsFailed = true
+                break
+            }
+            if (throwable is java.net.NoRouteToHostException) {
+                noRouteMsg = "تعذر الوصول لشبكة الراوتر (${cleanConfig.ipAddress}:${candidate.port}) — تأكد أن الهاتف على نفس شبكة الراوتر أو وجود مسار (Route) صحيح."
+                break
+            }
+            if (throwable is javax.net.ssl.SSLException || errMsg.contains("SSL", ignoreCase = true)) {
+                sslErrorMsg = errMsg
+            }
+            if (throwable is java.net.ConnectException || errMsg.contains("رفض الراوتر")) {
+                refused = true
+            }
+            val isTimeout = throwable is java.net.SocketTimeoutException ||
+                errMsg.contains("timed out", ignoreCase = true) ||
+                errMsg.contains("انتهى وقت", ignoreCase = true)
+            if (isTimeout) {
+                timedOut = true
+                // If primary plain API port timed out cleanly (firewall drop), avoid waiting a full second timeout on 8729 unless TLS was requested
+                if (idx == 0 && !cleanConfig.useHttps && candidate.port != 8729) {
+                    break
+                }
+            }
+        }
+
+        if (authErrorMsg != null) {
+            return VerifyConnectOutcome.Failure(message = authErrorMsg, fallbackPortalUrl = null)
+        }
+        if (dnsFailed && !RouterConnectionParser.isIpv4(cleanConfig.ipAddress)) {
+            return VerifyConnectOutcome.Failure(
+                message = "تعذر حل اسم النطاق (${cleanConfig.ipAddress}). في الاتصال المباشر API يُنصح بإدخال عنوان IP الخاص بالراوتر مباشرة.",
+                fallbackPortalUrl = null
+            )
+        }
+        if (noRouteMsg != null) {
+            return VerifyConnectOutcome.Failure(message = noRouteMsg, fallbackPortalUrl = null)
+        }
+
+        val triedPorts = apiCandidates.joinToString("/") { it.port.toString() }
+        val detailedFailure = when {
+            timedOut ->
+                "انتهى وقت الاتصال المباشر (${connectTimeoutMs}ms) عبر RouterOS API (${cleanConfig.ipAddress}:$triedPorts).\n" +
+                    "تأكد أن المنفذ $primaryPort مفتوح في جدار الحماية (IP -> Firewall) وأن خدمة api مفعّلة في (IP -> Services)، أو أن جهازك متصل بنفس الشبكة."
+            refused ->
+                "رفض الراوتر (${cleanConfig.ipAddress}) الاتصال المباشر على منفذ API ($triedPorts).\n" +
+                    "يرجى تفعيل خدمة api (8728) أو api-ssl (8729) من Winbox عبر: IP -> Services."
+            sslErrorMsg != null -> sslErrorMsg
+            !lastErrorMsg.isNullOrBlank() -> lastErrorMsg
+            else ->
+                "تعذر الاتصال المباشر بالراوتر (${cleanConfig.ipAddress}:$triedPorts) عبر RouterOS API."
+        }
+        return VerifyConnectOutcome.Failure(message = detailedFailure, fallbackPortalUrl = null)
     }
 
     private suspend fun performFastInitialHandshake() {
@@ -1961,7 +2343,7 @@ class MikrotikRepository(
                                         role = roleName,
                                         permissions = permissions,
                                         lastActiveTime = o.optString("last-logged-in", "نشط"),
-                                        ipAddress = o.optString("address", "192.168.88.1"),
+                                        ipAddress = o.optString("address", ""),
                                         isActive = !o.optBoolean("disabled", false),
                                         password = ""
                                     )
@@ -2713,8 +3095,9 @@ class MikrotikRepository(
     }
 
     private fun adaptDataToConfig(config: RouterConnectionConfig) {
-        val routerIpBase = config.ipAddress.takeIf { it.isNotBlank() } ?: "192.168.88.1"
-        val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else "192.168.88"
+        val routerIpBase = config.ipAddress.trim()
+        if (routerIpBase.isBlank()) return
+        val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else routerIpBase
         val routerName = config.name.ifBlank { "راوتر $routerIpBase" }
 
         _resourceState.value = _resourceState.value.copy(
@@ -2724,7 +3107,7 @@ class MikrotikRepository(
 
         _activeUsers.value = _activeUsers.value.mapIndexed { idx, active ->
             active.copy(
-                address = "$subnetPrefix.${100 + idx}",
+                address = if (subnetPrefix.contains(".")) "$subnetPrefix.${100 + idx}" else active.address,
                 comment = "مستخدم متصل - $routerName"
             )
         }
@@ -2747,9 +3130,10 @@ class MikrotikRepository(
         val activeList = _activeUsers.value
         val cardList = _cards.value
 
-        val routerIpBase = config.ipAddress.takeIf { it.isNotBlank() } ?: "192.168.88.1"
-        val routerIpKey = routerIpBase.trim()
-        val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else "172.16.1"
+        val routerIpBase = config.ipAddress.trim()
+        if (routerIpBase.isBlank()) return
+        val subnetPrefix = if (routerIpBase.contains(".")) routerIpBase.substringBeforeLast(".") else routerIpBase
+        val routerIpKey = routerIpBase
         val serverName = realIdentity.ifBlank { config.name.ifBlank { "السيرفر الرئيسي ($routerIpBase)" } }
 
         // 1. Build IP map: interface -> IP address
@@ -2819,9 +3203,7 @@ class MikrotikRepository(
 
                 val parentIf = vlanObj?.get("interface")?.takeIf { it.isNotBlank() } ?: defaultBridgeName
 
-                val assignedIp = interfaceIpMap[ifName]
-                    ?: if (vlanId != null && vlanId > 0) "172.16.1.$vlanId"
-                    else "$subnetPrefix.254"
+                val assignedIp = interfaceIpMap[ifName].orEmpty()
 
                 if (isNodeBlacklisted("node_vlan_$ifName", assignedIp, ifName, iface.macAddress, vlanId)) {
                     return@forEach
@@ -2835,7 +3217,7 @@ class MikrotikRepository(
                     val nMac = n["mac-address"] ?: ""
 
                     nIf.equals(ifName, true) ||
-                    (nAddr.isNotBlank() && nAddr == assignedIp) ||
+                    (assignedIp.isNotBlank() && nAddr.isNotBlank() && nAddr == assignedIp) ||
                     (vlanId != null && (nId == "$vlanId" || nId.contains("($vlanId)", true) || nId.contains("(${vlanId.toString().padStart(2, '0')})", true) || nAddr.endsWith(".$vlanId")))
                 }
 
@@ -2875,7 +3257,7 @@ class MikrotikRepository(
                             rxSpeedKbps = iface.rxSpeedKbps,
                             txSpeedKbps = iface.txSpeedKbps,
                             totalBytesConsumed = iface.rxBytes + iface.txBytes,
-                            pingMs = 2L,
+                            pingMs = 0L,
                             ssid = nIdentity
                         )
                     )
@@ -2910,7 +3292,7 @@ class MikrotikRepository(
                             rxSpeedKbps = iface.rxSpeedKbps,
                             txSpeedKbps = iface.txSpeedKbps,
                             totalBytesConsumed = iface.rxBytes + iface.txBytes,
-                            pingMs = if (isRunning) 4L else 0L,
+                            pingMs = 0L,
                             ssid = ifName
                         )
                     )
@@ -2940,13 +3322,13 @@ class MikrotikRepository(
             } else if (isEther) {
                 // Physical port: do NOT create duplicate node if neighbor AP is connected, or if port is empty/slave
                 val hasNeighborOnPort = neighbors.any { (it["interface"] ?: "").equals(ifName, true) }
-                val assignedIp = interfaceIpMap[ifName] ?: routerIpBase
+                val assignedIp = interfaceIpMap[ifName].orEmpty()
                 val hasComment = iface.comment.isNotBlank()
                 val isPortActive = isRunning && !isDisabled
 
                 // Include physical port if it has a neighbor, has a descriptive comment, has distinct IP, or is active/running
                 if (!hasNeighborOnPort && (isPortActive || hasComment)) {
-                    val portIp = if (assignedIp != routerIpBase) assignedIp else "$subnetPrefix.254"
+                    val portIp = assignedIp
                     if (!isNodeBlacklisted("node_if_$ifName", portIp, ifName, iface.macAddress, null)) {
                         val displayName = when {
                             hasComment -> "${iface.comment} ($ifName)"
@@ -2969,7 +3351,7 @@ class MikrotikRepository(
                                 rxSpeedKbps = iface.rxSpeedKbps,
                                 txSpeedKbps = iface.txSpeedKbps,
                                 totalBytesConsumed = iface.rxBytes + iface.txBytes,
-                                pingMs = if (isRunning) 2L else 0L,
+                                pingMs = 0L,
                                 ssid = if (hasComment) iface.comment else ifName
                             )
                         )
@@ -2978,7 +3360,7 @@ class MikrotikRepository(
             } else if (isWireless) {
                 val wObj = wirelessInterfaces.firstOrNull { it["name"].equals(ifName, true) }
                 val ssid = wObj?.get("ssid") ?: ifName
-                val band = wObj?.get("band") ?: "5GHz"
+                val band = wObj?.get("band")?.takeIf { it.isNotBlank() }.orEmpty()
                 val assignedIp = interfaceIpMap[ifName] ?: routerIpBase
 
                 if (!isNodeBlacklisted("node_wlan_$ifName", assignedIp, ifName, iface.macAddress, null)) {
@@ -2989,7 +3371,7 @@ class MikrotikRepository(
                             ipAddress = assignedIp,
                             macAddress = iface.macAddress,
                             interfaceName = ifName,
-                            model = "MikroTik Wireless ($band)",
+                            model = if (band.isNotBlank()) "MikroTik Wireless ($band)" else "MikroTik Wireless",
                             role = "أكسس بوينت لاسلكي",
                             isOnline = isRunning && !isDisabled,
                             status = if (isDisabled) com.example.data.model.NodeStatus.DISABLED else if (isRunning) com.example.data.model.NodeStatus.ACTIVE else com.example.data.model.NodeStatus.OFFLINE,
@@ -3269,7 +3651,7 @@ class MikrotikRepository(
                 com.example.data.model.UserSessionRecord(
                     id = "sess_active_${active.user}",
                     username = active.user,
-                    ipAddress = active.address.ifBlank { "$subnetPrefix.${100 + index}" },
+                    ipAddress = active.address.ifBlank { "غير مسجل" },
                     macAddress = cleanMac.ifBlank { "غير مسجل" },
                     isOnline = true,
                     loginTime = loginDisplay,
@@ -3889,18 +4271,88 @@ class MikrotikRepository(
                     val protocol = if (config.useHttps) "https" else "http"
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                     val credential = Credentials.basic(config.username, config.password)
+                    var lastCode = 0
                     val delRequest = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/active/${user.id}")
+                        .url("$baseUrl/rest/ip/hotspot/active/${encSeg(user.id)}")
                         .delete()
                         .header("Authorization", credential)
                         .build()
-                    httpClient.newCall(delRequest).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
-                            notifyDataRefreshed()
-                            return@withContext Result.success(true)
+                    val hsKicked = httpClient.newCall(delRequest).execute().use { resp ->
+                        lastCode = resp.code
+                        resp.isSuccessful
+                    }
+                    if (hsKicked) {
+                        _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
+                        notifyDataRefreshed()
+                        return@withContext Result.success(true)
+                    }
+
+                    // Fallback: query active hotspot session by username or UserManager active session
+                    var fallbackKicked = false
+                    if (user.user.isNotBlank()) {
+                        try {
+                            val hsFind = Request.Builder()
+                                .url("$baseUrl/rest/ip/hotspot/active?user=${encSeg(user.user)}")
+                                .get()
+                                .header("Authorization", credential)
+                                .build()
+                            httpClient.newCall(hsFind).execute().use { findResp ->
+                                if (findResp.isSuccessful) {
+                                    val arr = JSONArray(findResp.body?.string().orEmpty())
+                                    for (i in 0 until arr.length()) {
+                                        val actId = arr.getJSONObject(i).optString(".id")
+                                        if (actId.isNotBlank()) {
+                                            val rmReq = Request.Builder()
+                                                .url("$baseUrl/rest/ip/hotspot/active/${encSeg(actId)}")
+                                                .delete()
+                                                .header("Authorization", credential)
+                                                .build()
+                                            if (httpClient.newCall(rmReq).execute().use { it.isSuccessful }) {
+                                                fallbackKicked = true
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (_: Exception) {}
+
+                        if (!fallbackKicked) {
+                            try {
+                                val umReq = Request.Builder()
+                                    .url("$baseUrl/rest/user-manager/session?user=${encSeg(user.user)}")
+                                    .get()
+                                    .header("Authorization", credential)
+                                    .build()
+                                httpClient.newCall(umReq).execute().use { umResp ->
+                                    if (umResp.isSuccessful) {
+                                        val arr = JSONArray(umResp.body?.string().orEmpty())
+                                        for (i in 0 until arr.length()) {
+                                            val item = arr.getJSONObject(i)
+                                            val actId = item.optString(".id")
+                                            val isUmActive = item.optString("active").equals("true", true) || item.optString("ended-at").isBlank()
+                                            if (actId.isNotBlank() && isUmActive) {
+                                                val rmReq = Request.Builder()
+                                                    .url("$baseUrl/rest/user-manager/session/${encSeg(actId)}")
+                                                    .delete()
+                                                    .header("Authorization", credential)
+                                                    .build()
+                                                if (httpClient.newCall(rmReq).execute().use { it.isSuccessful }) {
+                                                    fallbackKicked = true
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (_: Exception) {}
                         }
                     }
+
+                    if (fallbackKicked) {
+                        _activeUsers.value = _activeUsers.value.filter { it.id != user.id }
+                        notifyDataRefreshed()
+                        return@withContext Result.success(true)
+                    }
+                    return@withContext Result.failure(Exception("رفض الراوتر فصل المستخدم عبر REST (رمز الاستجابة: $lastCode)"))
                 } catch (e: Exception) {
                     return@withContext Result.failure(e)
                 }
@@ -3937,16 +4389,32 @@ class MikrotikRepository(
                     // 0. Disconnect active session if any via REST
                     if (targetName.isNotBlank()) {
                         try {
-                            val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=$targetName").get().header("Authorization", credential).build()
-                            val actResp = httpClient.newCall(actReq).execute()
-                            if (actResp.isSuccessful) {
-                                val body = actResp.body?.string().orEmpty()
-                                val arr = org.json.JSONArray(body)
-                                for (i in 0 until arr.length()) {
-                                    val actId = arr.getJSONObject(i).optString(".id")
-                                    if (actId.isNotBlank()) {
-                                        val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/$actId").delete().header("Authorization", credential).build()
-                                        httpClient.newCall(delReq).execute()
+                            val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${encSeg(targetName)}").get().header("Authorization", credential).build()
+                            httpClient.newCall(actReq).execute().use { actResp ->
+                                if (actResp.isSuccessful) {
+                                    val body = actResp.body?.string().orEmpty()
+                                    val arr = org.json.JSONArray(body)
+                                    for (i in 0 until arr.length()) {
+                                        val actId = arr.getJSONObject(i).optString(".id")
+                                        if (actId.isNotBlank()) {
+                                            val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/${encSeg(actId)}").delete().header("Authorization", credential).build()
+                                            httpClient.newCall(delReq).execute().close()
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (_: Exception) {}
+                        try {
+                            val umSessReq = Request.Builder().url("$baseUrl/rest/user-manager/session?user=${encSeg(targetName)}").get().header("Authorization", credential).build()
+                            httpClient.newCall(umSessReq).execute().use { sResp ->
+                                if (sResp.isSuccessful) {
+                                    val arr = org.json.JSONArray(sResp.body?.string().orEmpty())
+                                    for (i in 0 until arr.length()) {
+                                        val actId = arr.getJSONObject(i).optString(".id")
+                                        if (actId.isNotBlank()) {
+                                            val delReq = Request.Builder().url("$baseUrl/rest/user-manager/session/${encSeg(actId)}").delete().header("Authorization", credential).build()
+                                            httpClient.newCall(delReq).execute().close()
+                                        }
                                     }
                                 }
                             }
@@ -3954,9 +4422,13 @@ class MikrotikRepository(
                     }
 
                     // 1. Try Hotspot removal
-                    val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/$cardId").delete().header("Authorization", credential).build()
-                    val hsResp = httpClient.newCall(hsReq).execute()
-                    if (hsResp.isSuccessful) {
+                    var hsCode = 0
+                    val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/${encSeg(cardId)}").delete().header("Authorization", credential).build()
+                    val hsDeleted = httpClient.newCall(hsReq).execute().use { hsResp ->
+                        hsCode = hsResp.code
+                        hsResp.isSuccessful
+                    }
+                    if (hsDeleted) {
                         _cards.value = _cards.value.filter { it.id != cardId && (targetName.isBlank() || it.name != targetName) }
                         if (targetName.isNotBlank()) {
                             cardTimestampCache.remove(targetName)
@@ -3969,10 +4441,12 @@ class MikrotikRepository(
                     // 2. Try User Manager v7 removal
                     var um7Code = 0
                     if (targetName.isNotBlank()) {
-                        val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/$targetName").delete().header("Authorization", credential).build()
-                        val um7Resp = httpClient.newCall(um7Req).execute()
-                        um7Code = um7Resp.code
-                        if (um7Resp.isSuccessful) {
+                        val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${encSeg(targetName)}").delete().header("Authorization", credential).build()
+                        val um7Deleted = httpClient.newCall(um7Req).execute().use { um7Resp ->
+                            um7Code = um7Resp.code
+                            um7Resp.isSuccessful
+                        }
+                        if (um7Deleted) {
                             _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
@@ -3984,10 +4458,12 @@ class MikrotikRepository(
                     // 3. Try User Manager v6 removal
                     var um6Code = 0
                     if (targetName.isNotBlank()) {
-                        val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/$targetName").delete().header("Authorization", credential).build()
-                        val um6Resp = httpClient.newCall(um6Req).execute()
-                        um6Code = um6Resp.code
-                        if (um6Resp.isSuccessful) {
+                        val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${encSeg(targetName)}").delete().header("Authorization", credential).build()
+                        val um6Deleted = httpClient.newCall(um6Req).execute().use { um6Resp ->
+                            um6Code = um6Resp.code
+                            um6Resp.isSuccessful
+                        }
+                        if (um6Deleted) {
                             _cards.value = _cards.value.filter { it.id != cardId && it.name != targetName }
                             cardTimestampCache.remove(targetName)
                             try { appDao?.deleteLocalCardByName(targetName) } catch (_: Exception) {}
@@ -3997,7 +4473,7 @@ class MikrotikRepository(
                     }
 
                     // If all systems returned 404 (Not Found), the card is already deleted on the router
-                    if (hsResp.code == 404 && (um7Code == 404 || um7Code == 0) && (um6Code == 404 || um6Code == 0)) {
+                    if (hsCode == 404 && (um7Code == 404 || um7Code == 0) && (um6Code == 404 || um6Code == 0)) {
                         _cards.value = _cards.value.filter { it.id != cardId && (targetName.isBlank() || it.name != targetName) }
                         if (targetName.isNotBlank()) {
                             cardTimestampCache.remove(targetName)
@@ -4007,7 +4483,7 @@ class MikrotikRepository(
                         return@withContext Result.success(true)
                     }
 
-                    return@withContext Result.failure(Exception("تعذر حذف الكرت من الراوتر عبر واجهة REST (رمز الخطأ: ${hsResp.code}). تأكد من وجود الكرت وصلاحيات المستخدم."))
+                    return@withContext Result.failure(Exception("تعذر حذف الكرت من الراوتر عبر واجهة REST (رمز الخطأ: $hsCode). تأكد من وجود الكرت وصلاحيات المستخدم."))
                 } catch (e: Exception) {
                     return@withContext Result.failure(e)
                 }
@@ -4040,15 +4516,16 @@ class MikrotikRepository(
                         // 0. Disconnect active session first
                         if (card.name.isNotBlank()) {
                             try {
-                                val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${card.name}").get().header("Authorization", credential).build()
-                                val actResp = httpClient.newCall(actReq).execute()
-                                if (actResp.isSuccessful) {
-                                    val arr = JSONArray(actResp.body?.string().orEmpty())
-                                    for (i in 0 until arr.length()) {
-                                        val actId = arr.getJSONObject(i).optString(".id")
-                                        if (actId.isNotBlank()) {
-                                            val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/$actId").delete().header("Authorization", credential).build()
-                                            httpClient.newCall(delReq).execute()
+                                val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${encSeg(card.name)}").get().header("Authorization", credential).build()
+                                httpClient.newCall(actReq).execute().use { actResp ->
+                                    if (actResp.isSuccessful) {
+                                        val arr = JSONArray(actResp.body?.string().orEmpty())
+                                        for (i in 0 until arr.length()) {
+                                            val actId = arr.getJSONObject(i).optString(".id")
+                                            if (actId.isNotBlank()) {
+                                                val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/${encSeg(actId)}").delete().header("Authorization", credential).build()
+                                                httpClient.newCall(delReq).execute().close()
+                                            }
                                         }
                                     }
                                 }
@@ -4059,53 +4536,52 @@ class MikrotikRepository(
                         var realId = if (card.id.startsWith("*")) card.id else ""
                         if (realId.isBlank() && card.name.isNotBlank()) {
                             try {
-                                val findReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${card.name}").get().header("Authorization", credential).build()
-                                val findResp = httpClient.newCall(findReq).execute()
-                                if (findResp.isSuccessful) {
-                                    val arr = JSONArray(findResp.body?.string().orEmpty())
-                                    if (arr.length() > 0) {
-                                        realId = arr.getJSONObject(0).optString(".id")
+                                val findReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${encSeg(card.name)}").get().header("Authorization", credential).build()
+                                httpClient.newCall(findReq).execute().use { findResp ->
+                                    if (findResp.isSuccessful) {
+                                        val arr = JSONArray(findResp.body?.string().orEmpty())
+                                        if (arr.length() > 0) {
+                                            realId = arr.getJSONObject(0).optString(".id")
+                                        }
                                     }
                                 }
                             } catch (_: Exception) {}
                         }
 
                         if (realId.isNotBlank()) {
-                            // Reset counters & enable in Hotspot
                             val resetBody = JSONObject().put("numbers", realId).toString().toRequestBody("application/json".toMediaType())
                             val resetReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/reset-counters").post(resetBody).header("Authorization", credential).build()
-                            httpClient.newCall(resetReq).execute()
+                            httpClient.newCall(resetReq).execute().close()
 
                             val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
-                            val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/$realId").patch(enableBody).header("Authorization", credential).build()
-                            val hsResp = httpClient.newCall(hsReq).execute()
-                            if (!hsResp.isSuccessful) {
-                                val err = hsResp.body?.string().orEmpty()
-                                return@withContext Result.failure(Exception("رفض الراوتر إعادة تفعيل الكرت في الهوتسبوت: $err"))
+                            val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/${encSeg(realId)}").patch(enableBody).header("Authorization", credential).build()
+                            httpClient.newCall(hsReq).execute().use { hsResp ->
+                                if (!hsResp.isSuccessful) {
+                                    val err = hsResp.body?.string().orEmpty()
+                                    return@withContext Result.failure(Exception("رفض الراوتر إعادة تفعيل الكرت في الهوتسبوت: $err"))
+                                }
                             }
                         } else {
-                            // Try User Manager v7
                             var umSuccess = false
                             try {
                                 val umResetBody = JSONObject().put("numbers", card.name).toString().toRequestBody("application/json".toMediaType())
                                 val umResetReq = Request.Builder().url("$baseUrl/rest/user-manager/user/reset-counters").post(umResetBody).header("Authorization", credential).build()
-                                httpClient.newCall(umResetReq).execute()
+                                httpClient.newCall(umResetReq).execute().close()
 
                                 val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
-                                val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${card.name}").patch(enableBody).header("Authorization", credential).build()
-                                val um7Resp = httpClient.newCall(um7Req).execute()
-                                if (um7Resp.isSuccessful) {
-                                    umSuccess = true
+                                val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${encSeg(card.name)}").patch(enableBody).header("Authorization", credential).build()
+                                httpClient.newCall(um7Req).execute().use { um7Resp ->
+                                    if (um7Resp.isSuccessful) umSuccess = true
                                 }
                             } catch (_: Exception) {}
 
                             if (!umSuccess) {
-                                // Try User Manager v6
                                 val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
-                                val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${card.name}").patch(enableBody).header("Authorization", credential).build()
-                                val um6Resp = httpClient.newCall(um6Req).execute()
-                                if (!um6Resp.isSuccessful) {
-                                    return@withContext Result.failure(Exception("رفض الراوتر إعادة تفعيل الكرت عبر واجهة REST"))
+                                val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${encSeg(card.name)}").patch(enableBody).header("Authorization", credential).build()
+                                httpClient.newCall(um6Req).execute().use { um6Resp ->
+                                    if (!um6Resp.isSuccessful) {
+                                        return@withContext Result.failure(Exception("رفض الراوتر إعادة تفعيل الكرت عبر واجهة REST"))
+                                    }
                                 }
                             }
                         }
@@ -4168,16 +4644,17 @@ class MikrotikRepository(
                         // 0. Disconnect active session first in REST mode
                         if (updatedCard.name.isNotBlank()) {
                             try {
-                                val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${updatedCard.name}").get().header("Authorization", credential).build()
-                                val actResp = httpClient.newCall(actReq).execute()
-                                if (actResp.isSuccessful) {
-                                    val body = actResp.body?.string().orEmpty()
-                                    val arr = org.json.JSONArray(body)
-                                    for (i in 0 until arr.length()) {
-                                        val actId = arr.getJSONObject(i).optString(".id")
-                                        if (actId.isNotBlank()) {
-                                            val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/$actId").delete().header("Authorization", credential).build()
-                                            httpClient.newCall(delReq).execute()
+                                val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${encSeg(updatedCard.name)}").get().header("Authorization", credential).build()
+                                httpClient.newCall(actReq).execute().use { actResp ->
+                                    if (actResp.isSuccessful) {
+                                        val body = actResp.body?.string().orEmpty()
+                                        val arr = org.json.JSONArray(body)
+                                        for (i in 0 until arr.length()) {
+                                            val actId = arr.getJSONObject(i).optString(".id")
+                                            if (actId.isNotBlank()) {
+                                                val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/${encSeg(actId)}").delete().header("Authorization", credential).build()
+                                                httpClient.newCall(delReq).execute().close()
+                                            }
                                         }
                                     }
                                 }
@@ -4188,30 +4665,36 @@ class MikrotikRepository(
                         var hsTargetId = if (updatedCard.id.startsWith("*")) updatedCard.id else ""
                         if (hsTargetId.isBlank() && updatedCard.name.isNotBlank()) {
                             try {
-                                val findReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${updatedCard.name}").get().header("Authorization", credential).build()
-                                val findResp = httpClient.newCall(findReq).execute()
-                                if (findResp.isSuccessful) {
-                                    val arr = org.json.JSONArray(findResp.body?.string().orEmpty())
-                                    if (arr.length() > 0) {
-                                        hsTargetId = arr.getJSONObject(0).optString(".id")
+                                val findReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${encSeg(updatedCard.name)}").get().header("Authorization", credential).build()
+                                httpClient.newCall(findReq).execute().use { findResp ->
+                                    if (findResp.isSuccessful) {
+                                        val arr = org.json.JSONArray(findResp.body?.string().orEmpty())
+                                        if (arr.length() > 0) {
+                                            hsTargetId = arr.getJSONObject(0).optString(".id")
+                                        }
                                     }
                                 }
                             } catch (_: Exception) {}
                         }
                         val effectiveId = hsTargetId.ifBlank { updatedCard.id.ifBlank { updatedCard.name } }
-                        val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/$effectiveId").patch(jsonStr).header("Authorization", credential).build()
-                        val hsResp = httpClient.newCall(hsReq).execute()
+                        val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/${encSeg(effectiveId)}").patch(jsonStr).header("Authorization", credential).build()
+                        val hsOk = httpClient.newCall(hsReq).execute().use { it.isSuccessful }
 
-                        if (!hsResp.isSuccessful) {
+                        if (!hsOk) {
                             // 2. Try User Manager v7
-                            val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${updatedCard.name}").patch(jsonStr).header("Authorization", credential).build()
-                            val um7Resp = httpClient.newCall(um7Req).execute()
+                            val um7Body = JSONObject().apply {
+                                if (updatedCard.password.isNotBlank()) put("password", updatedCard.password)
+                                put("comment", updatedCard.comment)
+                                put("disabled", if (updatedCard.disabled) "true" else "false")
+                            }.toString().toRequestBody("application/json".toMediaType())
+                            val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${encSeg(updatedCard.name)}").patch(um7Body).header("Authorization", credential).build()
+                            val um7Ok = httpClient.newCall(um7Req).execute().use { it.isSuccessful }
 
-                            if (!um7Resp.isSuccessful) {
+                            if (!um7Ok) {
                                 // 3. Try User Manager v6
-                                val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${updatedCard.name}").patch(jsonStr).header("Authorization", credential).build()
-                                val um6Resp = httpClient.newCall(um6Req).execute()
-                                if (!um6Resp.isSuccessful) {
+                                val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${encSeg(updatedCard.name)}").patch(jsonStr).header("Authorization", credential).build()
+                                val um6Ok = httpClient.newCall(um6Req).execute().use { it.isSuccessful }
+                                if (!um6Ok) {
                                     return@withContext Result.failure(Exception("رفض راوتر ميكروتك تعديل الكرت عبر واجهة REST. تحقق من صحة الحقول وصلاحيات الحساب."))
                                 }
                             }
@@ -4230,14 +4713,74 @@ class MikrotikRepository(
         }
     }
 
-    suspend fun toggleCardDisabled(cardId: String, currentDisabled: Boolean): Result<Boolean> {
+    suspend fun toggleCardDisabled(cardId: String, currentDisabled: Boolean, cardName: String = ""): Result<Boolean> {
+        return setCardDisabledState(cardId, targetDisabled = !currentDisabled, cardName = cardName)
+    }
+
+    private fun patchCardDisabledViaRest(
+        baseUrl: String,
+        credential: String,
+        targetDisabled: Boolean,
+        cardId: String,
+        targetName: String
+    ): Result<Boolean> {
+        val jsonBody = JSONObject().put("disabled", if (targetDisabled) "true" else "false").toString()
+        val hsReq = Request.Builder()
+            .url("$baseUrl/rest/ip/hotspot/user/${encSeg(cardId)}")
+            .patch(jsonBody.toRequestBody("application/json".toMediaType()))
+            .header("Authorization", credential)
+            .build()
+        var lastCode = 0
+        var lastBody = ""
+        var toggledOk = httpClient.newCall(hsReq).execute().use { resp ->
+            lastCode = resp.code
+            if (!resp.isSuccessful) lastBody = resp.body?.string().orEmpty()
+            resp.isSuccessful
+        }
+        if (!toggledOk && targetName.isNotBlank()) {
+            val um7Req = Request.Builder()
+                .url("$baseUrl/rest/user-manager/user/${encSeg(targetName)}")
+                .patch(jsonBody.toRequestBody("application/json".toMediaType()))
+                .header("Authorization", credential)
+                .build()
+            toggledOk = httpClient.newCall(um7Req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    lastCode = resp.code
+                    lastBody = resp.body?.string().orEmpty()
+                }
+                resp.isSuccessful
+            }
+        }
+        if (!toggledOk && targetName.isNotBlank()) {
+            val um6Req = Request.Builder()
+                .url("$baseUrl/rest/tool/user-manager/user/${encSeg(targetName)}")
+                .patch(jsonBody.toRequestBody("application/json".toMediaType()))
+                .header("Authorization", credential)
+                .build()
+            toggledOk = httpClient.newCall(um6Req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    lastCode = resp.code
+                    lastBody = resp.body?.string().orEmpty()
+                }
+                resp.isSuccessful
+            }
+        }
+        return if (toggledOk) {
+            Result.success(true)
+        } else {
+            val errDetail = if (lastBody.isNotBlank()) "$lastCode - $lastBody" else "$lastCode"
+            Result.failure(Exception("رفض الراوتر تغيير حالة الكرت عبر واجهة REST ($errDetail)"))
+        }
+    }
+
+    suspend fun setCardDisabledState(cardId: String, targetDisabled: Boolean, cardName: String = ""): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            val newStatus = !currentDisabled
+            val newStatus = targetDisabled
+            val targetName = cardName.ifBlank { _cards.value.find { it.id == cardId }?.name.orEmpty() }
             val config = activeConfig
             if (config != null && !config.isDemoMode) {
                 if (isApiSocketMode) {
-                    val targetName = _cards.value.find { it.id == cardId }?.name.orEmpty()
-                    val socketRes = routerOsApiClient.toggleCardDisabled(cardId, currentDisabled, targetName)
+                    val socketRes = routerOsApiClient.setCardDisabled(cardId, newStatus, targetName)
                     if (socketRes.isFailure) {
                         return@withContext socketRes
                     }
@@ -4255,38 +4798,128 @@ class MikrotikRepository(
                     val protocol = if (config.useHttps) "https" else "http"
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                     val credential = Credentials.basic(config.username, config.password)
-                    val jsonBody = JSONObject().put("disabled", if (newStatus) "true" else "false").toString()
-                    val patchRequest = Request.Builder()
-                        .url("$baseUrl/rest/ip/hotspot/user/$cardId")
-                        .patch(jsonBody.toRequestBody("application/json".toMediaType()))
-                        .header("Authorization", credential)
-                        .build()
-                    val resp = httpClient.newCall(patchRequest).execute()
-                    if (resp.isSuccessful) {
+                    val restRes = patchCardDisabledViaRest(baseUrl, credential, newStatus, cardId, targetName)
+                    if (restRes.isSuccess) {
                         _cards.value = _cards.value.map {
-                            if (it.id == cardId) it.copy(disabled = newStatus) else it
+                            if (it.id == cardId || (targetName.isNotBlank() && it.name == targetName)) it.copy(disabled = newStatus) else it
                         }
-                        val updated = _cards.value.firstOrNull { it.id == cardId }
+                        val updated = _cards.value.firstOrNull { it.id == cardId || (targetName.isNotBlank() && it.name == targetName) }
                         if (updated != null) {
                             upsertLocalCardPreservingTimestamp(updated)
                         }
                         notifyDataRefreshed()
-                        return@withContext Result.success(true)
                     }
-                    return@withContext Result.failure(Exception("رفض الراوتر تغيير حالة الكرت عبر واجهة REST"))
+                    return@withContext restRes
                 } catch (e: Exception) {
                     return@withContext Result.failure(e)
                 }
             }
             _cards.value = _cards.value.map {
-                if (it.id == cardId) it.copy(disabled = newStatus) else it
+                if (it.id == cardId || (targetName.isNotBlank() && it.name == targetName)) it.copy(disabled = newStatus) else it
             }
-            val updated = _cards.value.firstOrNull { it.id == cardId }
+            val updated = _cards.value.firstOrNull { it.id == cardId || (targetName.isNotBlank() && it.name == targetName) }
             if (updated != null) {
                 upsertLocalCardPreservingTimestamp(updated)
             }
             notifyDataRefreshed()
             Result.success(true)
+        }
+    }
+
+    suspend fun batchActivateCards(
+        cardsToActivate: List<HotspotCard>,
+        onProgress: (completed: Int, total: Int, currentCardName: String) -> Unit = { _, _, _ -> }
+    ): StockActivationResult {
+        return withContext(Dispatchers.IO) {
+            if (cardsToActivate.isEmpty()) {
+                return@withContext StockActivationResult(0, emptyList())
+            }
+            val alreadyActive = cardsToActivate.filter { !it.disabled }
+            val pending = cardsToActivate.filter { it.disabled }
+            if (pending.isEmpty()) {
+                val maxSerial = cardsToActivate.mapNotNull { VoucherSerialEngine.extractCardSerial(it) }.maxOrNull()
+                return@withContext StockActivationResult(
+                    totalRequested = cardsToActivate.size,
+                    activatedCards = emptyList(),
+                    alreadyActiveCards = alreadyActive,
+                    highestActivatedSerial = maxSerial
+                )
+            }
+
+            val activated = java.util.Collections.synchronizedList(mutableListOf<HotspotCard>())
+            val failed = java.util.Collections.synchronizedList(mutableListOf<HotspotCard>())
+            val errors = java.util.Collections.synchronizedList(mutableListOf<String>())
+            val config = activeConfig
+            val total = pending.size
+
+            if (config == null || config.isDemoMode) {
+                pending.forEachIndexed { idx, card ->
+                    activated.add(card.copy(disabled = false))
+                    onProgress(idx + 1, total, card.name)
+                }
+            } else if (isApiSocketMode) {
+                pending.forEachIndexed { idx, card ->
+                    val res = routerOsApiClient.setCardDisabled(card.id, targetDisabled = false, cardName = card.name)
+                    if (res.isSuccess) {
+                        activated.add(card.copy(disabled = false))
+                    } else {
+                        failed.add(card)
+                        errors.add("${card.name}: ${res.exceptionOrNull()?.message ?: "تعذر التفعيل"}")
+                    }
+                    onProgress(idx + 1, total, card.name)
+                }
+            } else {
+                val completedCounter = java.util.concurrent.atomic.AtomicInteger(0)
+                val protocol = if (config.useHttps) "https" else "http"
+                val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
+                val credential = Credentials.basic(config.username, config.password)
+
+                pending.chunked(4).forEach { chunk ->
+                    coroutineScope {
+                        chunk.map { card ->
+                            async(Dispatchers.IO) {
+                                val res = try {
+                                    patchCardDisabledViaRest(baseUrl, credential, false, card.id, card.name)
+                                } catch (e: Exception) {
+                                    Result.failure(e)
+                                }
+                                if (res.isSuccess) {
+                                    activated.add(card.copy(disabled = false))
+                                } else {
+                                    failed.add(card)
+                                    errors.add("${card.name}: ${res.exceptionOrNull()?.message ?: "تعذر التفعيل"}")
+                                }
+                                val done = completedCounter.incrementAndGet()
+                                onProgress(done, total, card.name)
+                            }
+                        }.awaitAll()
+                    }
+                }
+            }
+
+            if (activated.isNotEmpty()) {
+                val activatedByName = activated.associateBy { it.name }
+                val activatedById = activated.associateBy { it.id }
+                _cards.value = _cards.value.map { existing ->
+                    activatedById[existing.id] ?: activatedByName[existing.name] ?: existing
+                }
+                val toUpsert = _cards.value.filter { activatedById.containsKey(it.id) || activatedByName.containsKey(it.name) }
+                toUpsert.forEach { upsertLocalCardPreservingTimestamp(it) }
+                notifyDataRefreshed()
+            }
+
+            val maxSerial = (activated + alreadyActive)
+                .mapNotNull { VoucherSerialEngine.extractCardSerial(it) }
+                .maxOrNull()
+
+            StockActivationResult(
+                totalRequested = cardsToActivate.size,
+                activatedCards = activated.toList(),
+                alreadyActiveCards = alreadyActive,
+                failedCards = failed.toList(),
+                errorMessages = errors.toList(),
+                highestActivatedSerial = maxSerial
+            )
         }
     }
 
@@ -4303,8 +4936,7 @@ class MikrotikRepository(
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                     val credential = Credentials.basic(config.username, config.password)
                     val req = Request.Builder().url("$baseUrl/rest/system/resource").header("Authorization", credential).build()
-                    val resp = httpClient.newCall(req).execute()
-                    resp.isSuccessful
+                    httpClient.newCall(req).execute().use { it.isSuccessful }
                 } catch (_: Exception) {
                     false
                 }
@@ -4330,14 +4962,13 @@ class MikrotikRepository(
                         val protocol = if (config.useHttps) "https" else "http"
                         val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                         val credential = Credentials.basic(config.username, config.password)
-                        val r7 = Request.Builder().url("$baseUrl/rest/user-manager/profile/$cleanName").header("Authorization", credential).build()
-                        val resp7 = httpClient.newCall(r7).execute()
-                        if (resp7.isSuccessful) {
+                        val r7 = Request.Builder().url("$baseUrl/rest/user-manager/profile/${encSeg(cleanName)}").header("Authorization", credential).build()
+                        val exists7 = httpClient.newCall(r7).execute().use { it.isSuccessful }
+                        if (exists7) {
                             true
                         } else {
-                            val r6 = Request.Builder().url("$baseUrl/rest/tool/user-manager/profile/$cleanName").header("Authorization", credential).build()
-                            val resp6 = httpClient.newCall(r6).execute()
-                            resp6.isSuccessful
+                            val r6 = Request.Builder().url("$baseUrl/rest/tool/user-manager/profile/${encSeg(cleanName)}").header("Authorization", credential).build()
+                            httpClient.newCall(r6).execute().use { it.isSuccessful }
                         }
                     }
                 } catch (_: Exception) {
@@ -4414,6 +5045,13 @@ class MikrotikRepository(
                     }
 
                     val limitBytes = if (config.dataLimitMB > 0) config.dataLimitMB * 1024 * 1024L else 0L
+                    val baseComment = config.batchComment.ifBlank { "دفعة كروت" }
+                    val finalComment = if (config.includeSerialInComment) {
+                        val seqVal = (config.serialStartNumber.coerceAtLeast(1L)) + generatedCards.size
+                        VoucherSerialEngine.appendSerialToComment(baseComment, seqVal)
+                    } else {
+                        baseComment
+                    }
 
                     val card = HotspotCard(
                         id = "gen_${batchTimestamp}_${generatedCards.size}",
@@ -4425,8 +5063,8 @@ class MikrotikRepository(
                         bytesOut = 0,
                         limitUptime = config.timeLimit,
                         limitBytesTotal = limitBytes,
-                        comment = config.batchComment.ifBlank { "دفعة كروت" },
-                        disabled = false,
+                        comment = finalComment,
+                        disabled = config.startDisabled,
                         price = config.price,
                         cardType = config.targetSystem
                     )
@@ -4473,39 +5111,50 @@ class MikrotikRepository(
                                         put("name", card.name)
                                         put("password", card.password)
                                         put("comment", card.comment)
-                                        put("disabled", "false")
+                                        put("disabled", if (card.disabled) "true" else "false")
                                     }.toString()
                                     val umReq = Request.Builder()
                                         .url("$baseUrl/rest/user-manager/user")
                                         .post(umUserJson.toRequestBody("application/json".toMediaType()))
                                         .header("Authorization", credential)
                                         .build()
-                                    var umResp = httpClient.newCall(umReq).execute()
-                                    
+                                    var umCode = 0
+                                    var umErrBody = ""
+                                    var umCreated = httpClient.newCall(umReq).execute().use { r ->
+                                        umCode = r.code
+                                        if (!r.isSuccessful) umErrBody = r.body?.string().orEmpty()
+                                        r.isSuccessful
+                                    }
+
                                     // Fallback to UM v6 if UM v7 failed
-                                    if (!umResp.isSuccessful) {
+                                    if (!umCreated) {
                                         val um6UserJson = JSONObject().apply {
                                             put("username", card.name.trim())
                                             put("customer", targetProfile?.comment?.takeIf { it.isNotBlank() } ?: "admin")
                                             if (card.password.isNotBlank()) put("password", card.password.trim())
                                             if (card.comment.isNotBlank()) put("comment", card.comment)
-                                            put("disabled", "false")
+                                            put("disabled", if (card.disabled) "true" else "false")
                                         }.toString()
                                         val um6Req = Request.Builder()
                                             .url("$baseUrl/rest/tool/user-manager/user")
                                             .post(um6UserJson.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        val um6Resp = httpClient.newCall(um6Req).execute()
-                                        if (um6Resp.isSuccessful) {
-                                            umResp = um6Resp
+                                        umCreated = httpClient.newCall(um6Req).execute().use { r ->
+                                            if (r.isSuccessful) {
+                                                umCode = r.code
+                                                true
+                                            } else {
+                                                umCode = r.code
+                                                umErrBody = r.body?.string().orEmpty()
+                                                false
+                                            }
                                         }
                                     }
 
-                                    if (!umResp.isSuccessful) {
-                                        val errBody = umResp.body?.string().orEmpty()
+                                    if (!umCreated) {
                                         failedCards.add(card)
-                                        failureReasons.add("فشل إنشاء كرت يوزرمانجر ${card.name}: ${umResp.code} - $errBody")
+                                        failureReasons.add("فشل إنشاء كرت يوزرمانجر ${card.name}: $umCode - $umErrBody")
                                         continue
                                     }
 
@@ -4517,32 +5166,27 @@ class MikrotikRepository(
                                             put("user", card.name)
                                             put("profile", cleanProfileName)
                                         }.toString()
-                                        
-                                        // Try UM v7 profile assignment
+
                                         val assignReq = Request.Builder()
                                             .url("$baseUrl/rest/user-manager/user-profile")
                                             .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        var assignResp = httpClient.newCall(assignReq).execute()
-                                        
-                                        // Fallback to UM v6 profile assignment if needed
-                                        if (!assignResp.isSuccessful) {
+                                        bindingSuccessful = httpClient.newCall(assignReq).execute().use { r ->
+                                            if (!r.isSuccessful) bindError = r.body?.string().orEmpty()
+                                            r.isSuccessful
+                                        }
+
+                                        if (!bindingSuccessful) {
                                             val assign6Req = Request.Builder()
                                                 .url("$baseUrl/rest/tool/user-manager/user-profile")
                                                 .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                                 .header("Authorization", credential)
                                                 .build()
-                                            val assign6Resp = httpClient.newCall(assign6Req).execute()
-                                            if (assign6Resp.isSuccessful) {
-                                                assignResp = assign6Resp
+                                            bindingSuccessful = httpClient.newCall(assign6Req).execute().use { r ->
+                                                if (!r.isSuccessful) bindError = r.body?.string().orEmpty()
+                                                r.isSuccessful
                                             }
-                                        }
-
-                                        if (assignResp.isSuccessful) {
-                                            bindingSuccessful = true
-                                        } else {
-                                            bindError = assignResp.body?.string().orEmpty()
                                         }
                                     } else {
                                         bindingSuccessful = true
@@ -4551,22 +5195,19 @@ class MikrotikRepository(
                                     if (!bindingSuccessful) {
                                         // Transactional Rollback: Delete user to prevent orphaned unlinked card
                                         try {
-                                            // Try UM v7 delete
                                             val delReq = Request.Builder()
-                                                .url("$baseUrl/rest/user-manager/user/${card.name}")
+                                                .url("$baseUrl/rest/user-manager/user/${encSeg(card.name)}")
                                                 .delete()
                                                 .header("Authorization", credential)
                                                 .build()
-                                            val delResp = httpClient.newCall(delReq).execute()
-                                            
-                                            if (!delResp.isSuccessful) {
-                                                // Try UM v6 delete
+                                            val delOk = httpClient.newCall(delReq).execute().use { it.isSuccessful }
+                                            if (!delOk) {
                                                 val del6Req = Request.Builder()
-                                                    .url("$baseUrl/rest/tool/user-manager/user/${card.name}")
+                                                    .url("$baseUrl/rest/tool/user-manager/user/${encSeg(card.name)}")
                                                     .delete()
                                                     .header("Authorization", credential)
                                                     .build()
-                                                httpClient.newCall(del6Req).execute()
+                                                httpClient.newCall(del6Req).execute().close()
                                             }
                                         } catch (_: Exception) {}
 
@@ -4585,9 +5226,9 @@ class MikrotikRepository(
                             // Hotspot system
                             if (cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
                                 try {
-                                    val pCheck = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile/$cleanProfileName").header("Authorization", credential).build()
-                                    val pResp = httpClient.newCall(pCheck).execute()
-                                    if (!pResp.isSuccessful) {
+                                    val pCheck = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile/${encSeg(cleanProfileName)}").header("Authorization", credential).build()
+                                    val profExists = httpClient.newCall(pCheck).execute().use { it.isSuccessful }
+                                    if (!profExists) {
                                         val createP = JSONObject().apply {
                                             put("name", cleanProfileName)
                                             put("shared-users", "1")
@@ -4597,7 +5238,7 @@ class MikrotikRepository(
                                             .post(createP.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        httpClient.newCall(createReq).execute()
+                                        httpClient.newCall(createReq).execute().close()
                                     }
                                 } catch (_: Exception) {}
                             }
@@ -4608,7 +5249,7 @@ class MikrotikRepository(
                                         put("name", card.name.trim())
                                         if (card.password.isNotBlank()) put("password", card.password.trim())
                                         if (cleanProfileName.isNotBlank()) put("profile", cleanProfileName)
-                                        put("disabled", "false")
+                                        put("disabled", if (card.disabled) "true" else "false")
                                         put("server", "all")
                                         val validUptime = routerOsApiClient.formatRouterOsTime(card.limitUptime)
                                         if (!validUptime.isNullOrBlank()) put("limit-uptime", validUptime)
@@ -4621,23 +5262,24 @@ class MikrotikRepository(
                                         .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                         .header("Authorization", credential)
                                         .build()
-                                    val resp = httpClient.newCall(postReq).execute()
-                                    if (resp.isSuccessful) {
-                                        addedCards.add(card)
-                                    } else {
-                                        val errBody = resp.body?.string().orEmpty()
-                                        failedCards.add(card)
-                                        failureReasons.add("فشل إضافة الكرت ${card.name}: ${resp.code} - $errBody")
-                                        dao.insertSystemEventLog(
-                                            SystemEventLogEntity(
-                                                actionType = "توليد كروت",
-                                                targetType = "كرت",
-                                                targetName = card.name,
-                                                description = "فشل إضافة الكرت للراوتر (${resp.code})",
-                                                status = "FAILED",
-                                                details = "البيانات المرسلة: $jsonBody | الاستجابة: $errBody"
+                                    httpClient.newCall(postReq).execute().use { resp ->
+                                        if (resp.isSuccessful) {
+                                            addedCards.add(card)
+                                        } else {
+                                            val errBody = resp.body?.string().orEmpty()
+                                            failedCards.add(card)
+                                            failureReasons.add("فشل إضافة الكرت ${card.name}: ${resp.code} - $errBody")
+                                            dao.insertSystemEventLog(
+                                                SystemEventLogEntity(
+                                                    actionType = "توليد كروت",
+                                                    targetType = "كرت",
+                                                    targetName = card.name,
+                                                    description = "فشل إضافة الكرت للراوتر (${resp.code})",
+                                                    status = "FAILED",
+                                                    details = "البيانات المرسلة: $jsonBody | الاستجابة: $errBody"
+                                                )
                                             )
-                                        )
+                                        }
                                     }
                                 } catch (e: Exception) {
                                     failedCards.add(card)
@@ -4755,10 +5397,9 @@ class MikrotikRepository(
                         val baseUrl = "$protocol://${routerConfig.ipAddress}:${routerConfig.port}"
                         val credential = Credentials.basic(routerConfig.username, routerConfig.password)
 
-                        val isUmProfile = targetSystem == "usermanager" || targetProfile?.source?.startsWith("usermanager") == true
+                        val isUmTarget = targetSystem == "usermanager" || targetProfile?.source?.startsWith("usermanager") == true
 
-                        if (isUmProfile) {
-                            // Step 1: Create user in UM
+                        if (isUmTarget) {
                             val umUserJson = JSONObject().apply {
                                 put("name", sanitizedCard.name.trim())
                                 if (sanitizedCard.password.isNotBlank()) put("password", sanitizedCard.password.trim())
@@ -4770,10 +5411,15 @@ class MikrotikRepository(
                                 .post(umUserJson.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            var umResp = httpClient.newCall(umReq).execute()
-                            
-                            // Fallback to UM v6 if UM v7 failed or 404
-                            if (!umResp.isSuccessful) {
+                            var umCode = 0
+                            var umErrBody = ""
+                            var umCreated = httpClient.newCall(umReq).execute().use { r ->
+                                umCode = r.code
+                                if (!r.isSuccessful) umErrBody = r.body?.string().orEmpty()
+                                r.isSuccessful
+                            }
+
+                            if (!umCreated) {
                                 val um6UserJson = JSONObject().apply {
                                     put("username", sanitizedCard.name.trim())
                                     put("customer", targetProfile?.comment?.takeIf { it.isNotBlank() } ?: "admin")
@@ -4786,15 +5432,20 @@ class MikrotikRepository(
                                     .post(um6UserJson.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                val um6Resp = httpClient.newCall(um6Req).execute()
-                                if (um6Resp.isSuccessful) {
-                                    umResp = um6Resp
+                                umCreated = httpClient.newCall(um6Req).execute().use { r ->
+                                    if (r.isSuccessful) {
+                                        umCode = r.code
+                                        true
+                                    } else {
+                                        umCode = r.code
+                                        umErrBody = r.body?.string().orEmpty()
+                                        false
+                                    }
                                 }
                             }
 
-                            if (!umResp.isSuccessful) {
-                                val errBody = umResp.body?.string().orEmpty()
-                                return@withContext Result.failure(Exception("رفض راوتر ميكروتك إنشاء مستخدم يوزرمانجر: ${umResp.code} - $errBody"))
+                            if (!umCreated) {
+                                return@withContext Result.failure(Exception("رفض راوتر ميكروتك إنشاء مستخدم يوزرمانجر: $umCode - $umErrBody"))
                             }
 
                             // Step 2: Assign Profile in UM
@@ -4805,46 +5456,40 @@ class MikrotikRepository(
                                     put("user", sanitizedCard.name.trim())
                                     put("profile", cleanProfileName)
                                 }.toString()
-                                
-                                // Try UM v7 profile assignment
+
                                 val assignReq = Request.Builder()
                                     .url("$baseUrl/rest/user-manager/user-profile")
                                     .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                var assignResp = httpClient.newCall(assignReq).execute()
-                                
-                                // Fallback to UM v6 profile assignment if needed
-                                if (!assignResp.isSuccessful) {
+                                bindingSuccessful = httpClient.newCall(assignReq).execute().use { r ->
+                                    if (!r.isSuccessful) bindError = r.body?.string().orEmpty()
+                                    r.isSuccessful
+                                }
+
+                                if (!bindingSuccessful) {
                                     val assign6Req = Request.Builder()
                                         .url("$baseUrl/rest/tool/user-manager/user-profile")
                                         .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                         .header("Authorization", credential)
                                         .build()
-                                    val assign6Resp = httpClient.newCall(assign6Req).execute()
-                                    if (assign6Resp.isSuccessful) {
-                                        assignResp = assign6Resp
+                                    bindingSuccessful = httpClient.newCall(assign6Req).execute().use { r ->
+                                        if (!r.isSuccessful) bindError = r.body?.string().orEmpty()
+                                        r.isSuccessful
                                     }
-                                }
-
-                                if (assignResp.isSuccessful) {
-                                    bindingSuccessful = true
-                                } else {
-                                    bindError = assignResp.body?.string().orEmpty()
                                 }
                             } else {
                                 bindingSuccessful = true
                             }
 
                             if (!bindingSuccessful) {
-                                // Transactional Rollback: Delete user to prevent orphaned card
                                 try {
                                     val delReq = Request.Builder()
-                                        .url("$baseUrl/rest/user-manager/user/${sanitizedCard.name.trim()}")
+                                        .url("$baseUrl/rest/user-manager/user/${encSeg(sanitizedCard.name)}")
                                         .delete()
                                         .header("Authorization", credential)
                                         .build()
-                                    httpClient.newCall(delReq).execute()
+                                    httpClient.newCall(delReq).execute().close()
                                 } catch (_: Exception) {}
 
                                 return@withContext Result.failure(Exception("فشل ربط باقة اليوزرمانجر (${cleanProfileName}) بالكرت: $bindError (تم التراجع عن إنشاء الكرت)"))
@@ -4853,9 +5498,9 @@ class MikrotikRepository(
                             // Hotspot
                             if (cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
                                 try {
-                                    val pCheck = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile/$cleanProfileName").header("Authorization", credential).build()
-                                    val pResp = httpClient.newCall(pCheck).execute()
-                                    if (!pResp.isSuccessful) {
+                                    val pCheck = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile/${encSeg(cleanProfileName)}").header("Authorization", credential).build()
+                                    val profExists = httpClient.newCall(pCheck).execute().use { it.isSuccessful }
+                                    if (!profExists) {
                                         val createP = JSONObject().apply {
                                             put("name", cleanProfileName)
                                             put("shared-users", "1")
@@ -4865,7 +5510,7 @@ class MikrotikRepository(
                                             .post(createP.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        httpClient.newCall(createReq).execute()
+                                        httpClient.newCall(createReq).execute().close()
                                     }
                                 } catch (_: Exception) {}
                             }
@@ -4887,17 +5532,17 @@ class MikrotikRepository(
                                 .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            val resp = httpClient.newCall(postReq).execute()
-                            if (!resp.isSuccessful) {
-                                val errBody = resp.body?.string().orEmpty()
-                                return@withContext Result.failure(Exception("استجاب الراوتر برفض إضافة الكرت: $errBody"))
+                            httpClient.newCall(postReq).execute().use { resp ->
+                                if (!resp.isSuccessful) {
+                                    val errBody = resp.body?.string().orEmpty()
+                                    return@withContext Result.failure(Exception("استجاب الراوتر برفض إضافة الكرت: $errBody"))
+                                }
                             }
                         }
                     } catch (e: Exception) {
                         return@withContext Result.failure(e)
                     }
                 }
-
             }
 
             // Incremental in-place sync: Add newly created card immediately to in-memory state & Room
@@ -4952,8 +5597,15 @@ class MikrotikRepository(
                                 .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(postReq).execute()
-                            Result.success(true)
+                            httpClient.newCall(postReq).execute().use { resp ->
+                                if (!resp.isSuccessful) {
+                                    val err = resp.body?.string().orEmpty()
+                                    if (!err.contains("already", ignoreCase = true)) {
+                                        return@use Result.failure(Exception("فشل مزامنة الباقة مع User Manager عبر REST (${resp.code}): $err"))
+                                    }
+                                }
+                                Result.success(true)
+                            }
                         } else {
                             val jsonBody = JSONObject().apply {
                                 put("name", profile.name)
@@ -4966,8 +5618,15 @@ class MikrotikRepository(
                                 .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(postReq).execute()
-                            Result.success(true)
+                            httpClient.newCall(postReq).execute().use { resp ->
+                                if (!resp.isSuccessful) {
+                                    val err = resp.body?.string().orEmpty()
+                                    if (!err.contains("already", ignoreCase = true)) {
+                                        return@use Result.failure(Exception("فشل مزامنة الباقة مع Hotspot عبر REST (${resp.code}): $err"))
+                                    }
+                                }
+                                Result.success(true)
+                            }
                         }
                     } catch (e: Exception) {
                         Result.failure(e)
@@ -5002,34 +5661,34 @@ class MikrotikRepository(
                         val credential = Credentials.basic(config.username, config.password)
                         val cleanProfile = card.profile.trim().ifBlank { "default" }
 
-                        // 1. Disconnect any active session
                         if (card.name.isNotBlank()) {
                             try {
-                                val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${card.name}").get().header("Authorization", credential).build()
-                                val actResp = httpClient.newCall(actReq).execute()
-                                if (actResp.isSuccessful) {
-                                    val arr = JSONArray(actResp.body?.string().orEmpty())
-                                    for (i in 0 until arr.length()) {
-                                        val actId = arr.getJSONObject(i).optString(".id")
-                                        if (actId.isNotBlank()) {
-                                            val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/$actId").delete().header("Authorization", credential).build()
-                                            httpClient.newCall(delReq).execute()
+                                val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${encSeg(card.name)}").get().header("Authorization", credential).build()
+                                httpClient.newCall(actReq).execute().use { actResp ->
+                                    if (actResp.isSuccessful) {
+                                        val arr = JSONArray(actResp.body?.string().orEmpty())
+                                        for (i in 0 until arr.length()) {
+                                            val actId = arr.getJSONObject(i).optString(".id")
+                                            if (actId.isNotBlank()) {
+                                                val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/${encSeg(actId)}").delete().header("Authorization", credential).build()
+                                                httpClient.newCall(delReq).execute().close()
+                                            }
                                         }
                                     }
                                 }
                             } catch (_: Exception) {}
                         }
 
-                        // 2. Query hotspot user to find real .id
                         var realId = if (card.id.startsWith("*")) card.id else ""
-                        if (realId.isBlank()) {
+                        if (realId.isBlank() && card.name.isNotBlank()) {
                             try {
-                                val getReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${card.name}").get().header("Authorization", credential).build()
-                                val getResp = httpClient.newCall(getReq).execute()
-                                if (getResp.isSuccessful) {
-                                    val arr = JSONArray(getResp.body?.string().orEmpty())
-                                    if (arr.length() > 0) {
-                                        realId = arr.getJSONObject(0).optString(".id")
+                                val getReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${encSeg(card.name)}").get().header("Authorization", credential).build()
+                                httpClient.newCall(getReq).execute().use { getResp ->
+                                    if (getResp.isSuccessful) {
+                                        val arr = JSONArray(getResp.body?.string().orEmpty())
+                                        if (arr.length() > 0) {
+                                            realId = arr.getJSONObject(0).optString(".id")
+                                        }
                                     }
                                 }
                             } catch (_: Exception) {}
@@ -5042,33 +5701,29 @@ class MikrotikRepository(
                                 put("profile", cleanProfile)
                             }.toString()
                             val patchReq = Request.Builder()
-                                .url("$baseUrl/rest/ip/hotspot/user/$realId")
+                                .url("$baseUrl/rest/ip/hotspot/user/${encSeg(realId)}")
                                 .patch(patchJson.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            val patchResp = httpClient.newCall(patchReq).execute()
-                            if (!patchResp.isSuccessful) {
-                                val err = patchResp.body?.string().orEmpty()
-                                return@withContext Result.failure(Exception("رفض الراوتر تفعيل الكرت في الهوتسبوت: $err"))
+                            httpClient.newCall(patchReq).execute().use { patchResp ->
+                                if (!patchResp.isSuccessful) {
+                                    val err = patchResp.body?.string().orEmpty()
+                                    return@withContext Result.failure(Exception("رفض الراوتر تفعيل الكرت في الهوتسبوت: $err"))
+                                }
                             }
                         } else {
-                            // Try user manager v7
                             var um7Success = false
                             try {
                                 val umPatch = JSONObject().apply { put("disabled", "false") }.toString()
                                 val umReq = Request.Builder()
-                                    .url("$baseUrl/rest/user-manager/user/${card.name}")
+                                    .url("$baseUrl/rest/user-manager/user/${encSeg(card.name)}")
                                     .patch(umPatch.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                val umResp = httpClient.newCall(umReq).execute()
-                                if (umResp.isSuccessful) {
-                                    um7Success = true
-                                }
+                                um7Success = httpClient.newCall(umReq).execute().use { it.isSuccessful }
                             } catch (_: Exception) {}
 
                             if (!um7Success) {
-                                // Add user to hotspot
                                 val addJson = JSONObject().apply {
                                     put("name", card.name)
                                     put("password", card.password.ifBlank { card.name })
@@ -5082,10 +5737,11 @@ class MikrotikRepository(
                                     .post(addJson.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                val addResp = httpClient.newCall(addReq).execute()
-                                if (!addResp.isSuccessful) {
-                                    val err = addResp.body?.string().orEmpty()
-                                    return@withContext Result.failure(Exception("رفض الراوتر تفعيل أو إضافة الكرت: $err"))
+                                httpClient.newCall(addReq).execute().use { addResp ->
+                                    if (!addResp.isSuccessful) {
+                                        val err = addResp.body?.string().orEmpty()
+                                        return@withContext Result.failure(Exception("رفض الراوتر تفعيل أو إضافة الكرت: $err"))
+                                    }
                                 }
                             }
                         }
@@ -5112,9 +5768,9 @@ class MikrotikRepository(
             val opResult = withContext(Dispatchers.IO) {
                 if (isApiSocketMode) {
                     if (profile.source == "both") {
-                        routerOsApiClient.addProfile(profile.copy(source = "hotspot"))
-                        routerOsApiClient.syncProfileToUserManager(profile.copy(source = "usermanager_v7"))
-                        Result.success(true)
+                        val hsRes = routerOsApiClient.addProfile(profile.copy(source = "hotspot"))
+                        val umRes = routerOsApiClient.syncProfileToUserManager(profile.copy(source = "usermanager_v7"))
+                        if (hsRes.isFailure && umRes.isFailure) hsRes else Result.success(true)
                     } else if (profile.source.contains("usermanager")) {
                         routerOsApiClient.syncProfileToUserManager(profile)
                     } else {
@@ -5125,10 +5781,11 @@ class MikrotikRepository(
                         val protocol = if (config.useHttps) "https" else "http"
                         val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                         val credential = Credentials.basic(config.username, config.password)
-                        
+
                         val cleanRateLimit = profile.rateLimit.trim()
                         val cleanTimeout = profile.sessionTimeout.trim()
                         val formattedTimeout = routerOsApiClient.formatRouterOsTime(cleanTimeout)
+                        var umResult: Result<Boolean> = Result.success(true)
 
                         if (profile.source.contains("usermanager") || profile.source == "both") {
                             val umJson = JSONObject().apply {
@@ -5143,7 +5800,18 @@ class MikrotikRepository(
                                 .post(umJson.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(postUm).execute()
+                            umResult = httpClient.newCall(postUm).execute().use { r ->
+                                if (r.isSuccessful) {
+                                    Result.success(true)
+                                } else {
+                                    val err = r.body?.string().orEmpty()
+                                    if (err.contains("already", ignoreCase = true)) Result.success(true)
+                                    else Result.failure(Exception("رفض الراوتر إنشاء باقة يوزرمانجر (${r.code}): $err"))
+                                }
+                            }
+                            if (profile.source.contains("usermanager") && profile.source != "both" && umResult.isFailure) {
+                                return@withContext umResult
+                            }
                         }
                         if (profile.source == "hotspot" || profile.source == "both") {
                             val jsonBody = JSONObject().apply {
@@ -5167,11 +5835,16 @@ class MikrotikRepository(
                                 .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            val resp = httpClient.newCall(postReq).execute()
-                            if (!resp.isSuccessful) {
-                                val err = resp.body?.string().orEmpty()
-                                if (!err.contains("already exists", ignoreCase = true)) {
-                                    return@withContext Result.failure(Exception("رفض الراوتر إنشاء الباقة: $err"))
+                            httpClient.newCall(postReq).execute().use { resp ->
+                                if (!resp.isSuccessful) {
+                                    val err = resp.body?.string().orEmpty()
+                                    if (!err.contains("already exists", ignoreCase = true)) {
+                                        if (profile.source == "both" && umResult.isSuccess) {
+                                            // Keep UM success
+                                        } else {
+                                            return@withContext Result.failure(Exception("رفض الراوتر إنشاء الباقة: $err"))
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -5219,11 +5892,12 @@ class MikrotikRepository(
                             var umProfileId = if (profile.id.startsWith("*")) profile.id else ""
                             if (umProfileId.isBlank()) {
                                 try {
-                                    val getReq = Request.Builder().url("$baseUrl/rest/user-manager/profile?name=${profile.name}").get().header("Authorization", credential).build()
-                                    val getResp = httpClient.newCall(getReq).execute()
-                                    if (getResp.isSuccessful) {
-                                        val arr = JSONArray(getResp.body?.string().orEmpty())
-                                        if (arr.length() > 0) umProfileId = arr.getJSONObject(0).optString(".id")
+                                    val getReq = Request.Builder().url("$baseUrl/rest/user-manager/profile?name=${encSeg(profile.name)}").get().header("Authorization", credential).build()
+                                    httpClient.newCall(getReq).execute().use { getResp ->
+                                        if (getResp.isSuccessful) {
+                                            val arr = JSONArray(getResp.body?.string().orEmpty())
+                                            if (arr.length() > 0) umProfileId = arr.getJSONObject(0).optString(".id")
+                                        }
                                     }
                                 } catch (_: Exception) {}
                             }
@@ -5235,14 +5909,15 @@ class MikrotikRepository(
                                 if (priceNum > 0) put("price", priceNum.toInt().toString())
                             }.toString()
                             val patchUm = Request.Builder()
-                                .url("$baseUrl/rest/user-manager/profile/$targetId")
+                                .url("$baseUrl/rest/user-manager/profile/${encSeg(targetId)}")
                                 .patch(umJson.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            val resp = httpClient.newCall(patchUm).execute()
-                            if (!resp.isSuccessful) {
-                                val err = resp.body?.string().orEmpty()
-                                return@withContext Result.failure(Exception("رفض الراوتر تعديل باقة يوزرمانجر: $err"))
+                            httpClient.newCall(patchUm).execute().use { resp ->
+                                if (!resp.isSuccessful) {
+                                    val err = resp.body?.string().orEmpty()
+                                    return@withContext Result.failure(Exception("رفض الراوتر تعديل باقة يوزرمانجر: $err"))
+                                }
                             }
                             return@withContext Result.success(true)
                         }
@@ -5251,11 +5926,12 @@ class MikrotikRepository(
                         var realId = if (profile.id.startsWith("*")) profile.id else ""
                         if (realId.isBlank()) {
                             try {
-                                val getReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile?name=${profile.name}").get().header("Authorization", credential).build()
-                                val getResp = httpClient.newCall(getReq).execute()
-                                if (getResp.isSuccessful) {
-                                    val arr = JSONArray(getResp.body?.string().orEmpty())
-                                    if (arr.length() > 0) realId = arr.getJSONObject(0).optString(".id")
+                                val getReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile?name=${encSeg(profile.name)}").get().header("Authorization", credential).build()
+                                httpClient.newCall(getReq).execute().use { getResp ->
+                                    if (getResp.isSuccessful) {
+                                        val arr = JSONArray(getResp.body?.string().orEmpty())
+                                        if (arr.length() > 0) realId = arr.getJSONObject(0).optString(".id")
+                                    }
                                 }
                             } catch (_: Exception) {}
                         }
@@ -5277,17 +5953,17 @@ class MikrotikRepository(
                         }.toString()
 
                         val patchReq = Request.Builder()
-                            .url("$baseUrl/rest/ip/hotspot/user/profile/$effectiveId")
+                            .url("$baseUrl/rest/ip/hotspot/user/profile/${encSeg(effectiveId)}")
                             .patch(jsonBody.toRequestBody("application/json".toMediaType()))
                             .header("Authorization", credential)
                             .build()
-                        val resp = httpClient.newCall(patchReq).execute()
-                        if (!resp.isSuccessful) {
-                            val err = resp.body?.string().orEmpty()
-                            return@withContext Result.failure(Exception("فشل تعديل الباقة عبر واجهة REST: $err"))
-                        } else {
-                            Result.success(true)
+                        httpClient.newCall(patchReq).execute().use { resp ->
+                            if (!resp.isSuccessful) {
+                                val err = resp.body?.string().orEmpty()
+                                return@withContext Result.failure(Exception("فشل تعديل الباقة عبر واجهة REST: $err"))
+                            }
                         }
+                        Result.success(true)
                     } catch (e: Exception) {
                         Result.failure(e)
                     }
@@ -5315,16 +5991,52 @@ class MikrotikRepository(
                         val protocol = if (config.useHttps) "https" else "http"
                         val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                         val credential = Credentials.basic(config.username, config.password)
-                        val delReq = Request.Builder()
-                            .url("$baseUrl/rest/ip/hotspot/user/profile/${profile.id}")
-                            .delete()
-                            .header("Authorization", credential)
-                            .build()
-                        val resp = httpClient.newCall(delReq).execute()
-                        if (!resp.isSuccessful) {
-                            Result.failure(Exception("فشل حذف الباقة عبر واجهة REST (رمز: ${resp.code})"))
-                        } else {
+                        val targets = listOfNotNull(
+                            profile.id.takeIf { it.isNotBlank() }?.let { encSeg(it) },
+                            profile.name.takeIf { it.isNotBlank() && it != profile.id }?.let { encSeg(it) }
+                        )
+                        val paths = when {
+                            profile.source.contains("usermanager_v6") -> listOf(
+                                "/rest/tool/user-manager/profile",
+                                "/rest/user-manager/profile",
+                                "/rest/ip/hotspot/user/profile"
+                            )
+                            profile.source.contains("usermanager") -> listOf(
+                                "/rest/user-manager/profile",
+                                "/rest/tool/user-manager/profile",
+                                "/rest/ip/hotspot/user/profile"
+                            )
+                            else -> listOf(
+                                "/rest/ip/hotspot/user/profile",
+                                "/rest/user-manager/profile",
+                                "/rest/tool/user-manager/profile"
+                            )
+                        }
+                        var anyDeleted = false
+                        var allNotFound = true
+                        var lastErrCode = 0
+                        loop@ for (path in paths) {
+                            for (t in targets) {
+                                val delReq = Request.Builder()
+                                    .url("$baseUrl$path/$t")
+                                    .delete()
+                                    .header("Authorization", credential)
+                                    .build()
+                                httpClient.newCall(delReq).execute().use { resp ->
+                                    if (resp.isSuccessful) {
+                                        anyDeleted = true
+                                    } else if (resp.code != 404) {
+                                        allNotFound = false
+                                        lastErrCode = resp.code
+                                    }
+                                }
+                                if (anyDeleted) break@loop
+                            }
+                        }
+                        if (anyDeleted || allNotFound) {
                             Result.success(true)
+                        } else {
+                            Result.failure(Exception("فشل حذف الباقة عبر واجهة REST (رمز: $lastErrCode)"))
                         }
                     } catch (e: Exception) {
                         Result.failure(e)
@@ -5405,28 +6117,44 @@ class MikrotikRepository(
 
     suspend fun deleteNetworkNode(nodeId: String): Result<Boolean> {
         return withContext(Dispatchers.IO) {
-            val existing = _networkNodes.value.firstOrNull { it.id == nodeId }
+            val currentNodesSnapshot = _networkNodes.value
+            val existing = currentNodesSnapshot.firstOrNull { it.id == nodeId }
                 ?: customAddedNodes.firstOrNull { it.id == nodeId }
             deletedNodeIds.add(nodeId)
-            existing?.let {
-                if (it.ipAddress.isNotBlank()) deletedNodeKeys.add(it.ipAddress)
-                if (it.interfaceName.isNotBlank()) deletedNodeKeys.add(it.interfaceName)
-                if (it.macAddress.isNotBlank()) deletedNodeKeys.add(it.macAddress.uppercase())
-                if (it.vlanId != null) deletedNodeKeys.add("vlan_${it.vlanId}")
+
+            val routerIp = currentRouterIp()
+            existing?.let { ex ->
+                val exIp = ex.ipAddress.trim()
+                val ipUsedBySibling = exIp.isNotBlank() && (
+                    exIp == routerIp ||
+                        currentNodesSnapshot.any { it.id != nodeId && it.ipAddress.trim() == exIp }
+                    )
+                if (exIp.isNotBlank() && !ipUsedBySibling) {
+                    deletedNodeKeys.add(exIp)
+                }
+                if (ex.interfaceName.isNotBlank()) deletedNodeKeys.add(ex.interfaceName)
+                if (ex.macAddress.isNotBlank()) {
+                    val exMac = ex.macAddress.uppercase()
+                    val macShared = currentNodesSnapshot.any { it.id != nodeId && it.macAddress.equals(exMac, ignoreCase = true) }
+                    if (!macShared) deletedNodeKeys.add(exMac)
+                }
+                if (ex.vlanId != null) deletedNodeKeys.add("vlan_${ex.vlanId}")
             }
 
-            customAddedNodes.removeAll {
-                it.id == nodeId || (existing != null && it.ipAddress.isNotBlank() && it.ipAddress == existing.ipAddress)
-            }
-            _networkNodes.value = _networkNodes.value.filter {
-                it.id != nodeId && (existing == null || it.ipAddress.isBlank() || it.ipAddress != existing.ipAddress)
-            }
+            customAddedNodes.removeAll { it.id == nodeId }
+            _networkNodes.value = currentNodesSnapshot.filter { it.id != nodeId }
 
-            val routerIpKey = currentRouterIp()
             try {
-                appDao?.deleteNetworkNodesFlexible(routerIpKey, nodeId, existing?.ipAddress.orEmpty(), existing?.interfaceName.orEmpty())
+                val safeIpForDelete = existing?.ipAddress?.trim()?.takeIf { exIp ->
+                    exIp.isNotBlank() && exIp != routerIp && currentNodesSnapshot.none { it.id != nodeId && it.ipAddress.trim() == exIp }
+                }.orEmpty()
+                if (safeIpForDelete.isNotBlank() || !existing?.interfaceName.isNullOrBlank()) {
+                    appDao?.deleteNetworkNodesFlexible(routerIp, nodeId, safeIpForDelete, existing?.interfaceName.orEmpty())
+                } else {
+                    appDao?.deleteNetworkNodeEntity(routerIp, nodeId)
+                }
             } catch (_: Exception) {
-                try { appDao?.deleteNetworkNodeEntity(routerIpKey, nodeId) } catch (_: Exception) {}
+                try { appDao?.deleteNetworkNodeEntity(routerIp, nodeId) } catch (_: Exception) {}
             }
             notifyDataRefreshed()
             Result.success(true)
@@ -5435,7 +6163,7 @@ class MikrotikRepository(
 
     suspend fun checkNodeHeartbeat(
         node: com.example.data.model.NetworkNode,
-        gatewayIp: String = "192.168.88.1"
+        gatewayIp: String = ""
     ): com.example.data.model.NetworkNode {
         return withContext(Dispatchers.IO) {
             val isDemo = activeConfig?.isDemoMode == true || activeConfig == null
@@ -5466,28 +6194,28 @@ class MikrotikRepository(
 
             // Real network heartbeat polling
             // 1. Gateway node is the router itself — if connected, it is always active
-            if (node.id == "node_main_router" || node.ipAddress == gatewayIp) {
+            if (node.id == "node_main_router" || (gatewayIp.isNotBlank() && node.ipAddress == gatewayIp)) {
                 return@withContext node.copy(
                     status = com.example.data.model.NodeStatus.ACTIVE,
                     isOnline = true,
-                    pingMs = 1L.coerceAtLeast(node.pingMs),
+                    pingMs = node.pingMs,
                     lastCheckTime = now,
                     lastSeenTime = now
                 )
             }
 
-            // 2. If node has actively connected users passing traffic right now, it is online!
+            // 2. If node has actively connected users passing traffic right now, it is online
             if (node.connectedUsers > 0) {
                 return@withContext node.copy(
                     status = com.example.data.model.NodeStatus.ACTIVE,
                     isOnline = true,
-                    pingMs = if (node.pingMs > 0) node.pingMs else 2L,
+                    pingMs = node.pingMs,
                     lastCheckTime = now,
                     lastSeenTime = now
                 )
             }
 
-            // 3. Check live router interface status from interface stats:
+            // 3. Check live router interface status from interface stats
             val matchingIface = _interfaceStats.value.firstOrNull { it.name.equals(node.interfaceName, ignoreCase = true) }
             if (matchingIface != null) {
                 if (matchingIface.disabled) {
@@ -5502,7 +6230,7 @@ class MikrotikRepository(
                     return@withContext node.copy(
                         status = com.example.data.model.NodeStatus.ACTIVE,
                         isOnline = true,
-                        pingMs = if (node.pingMs > 0) node.pingMs else 2L,
+                        pingMs = node.pingMs,
                         rxSpeedKbps = matchingIface.rxSpeedKbps,
                         txSpeedKbps = matchingIface.txSpeedKbps,
                         totalBytesConsumed = matchingIface.rxBytes + matchingIface.txBytes,
@@ -5512,22 +6240,64 @@ class MikrotikRepository(
                 }
             }
 
-            // 4. Standalone probe via ICMP ping or common port socket connection:
-            val start = System.currentTimeMillis()
+            // 4. Probe node from the Router itself (accurate for remote subnets/4G/VPN) or directly if local
+            val cleanIp = node.ipAddress.trim()
             var isReachable = false
             var responseMs = 0L
 
-            if (node.ipAddress.isNotBlank() && node.ipAddress != "0.0.0.0" && node.ipAddress != "غير محدد") {
-                val pingRes = NetworkUtils.pingHost(node.ipAddress, timeoutMs = 700)
-                if (pingRes.first) {
-                    isReachable = true
-                    responseMs = pingRes.second.coerceAtLeast(1L)
+            if (cleanIp.isNotBlank() && cleanIp != "0.0.0.0" && cleanIp != "غير محدد") {
+                if (isApiSocketMode) {
+                    val routerPing = routerOsApiClient.pingFromRouter(cleanIp, count = 2).getOrNull()
+                    if (routerPing != null && routerPing.first) {
+                        isReachable = true
+                        responseMs = routerPing.second.coerceAtLeast(1L)
+                    }
                 } else {
-                    for (port in listOf(80, 8728, 8291, 443)) {
-                        if (NetworkUtils.testSocketConnection(node.ipAddress, port, timeoutMs = 350)) {
-                            isReachable = true
-                            responseMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
-                            break
+                    val cfg = activeConfig
+                    if (cfg != null && !cfg.isDemoMode) {
+                        try {
+                            val protocol = if (cfg.useHttps) "https" else "http"
+                            val baseUrl = "$protocol://${cfg.ipAddress}:${cfg.port}"
+                            val credential = Credentials.basic(cfg.username, cfg.password)
+                            val body = JSONObject().put("address", cleanIp).put("count", 2).toString()
+                                .toRequestBody("application/json".toMediaType())
+                            val pingReq = Request.Builder()
+                                .url("$baseUrl/rest/tool/ping")
+                                .post(body)
+                                .header("Authorization", credential)
+                                .build()
+                            httpClient.newCall(pingReq).execute().use { resp ->
+                                if (resp.isSuccessful) {
+                                    val arr = JSONArray(resp.body?.string().orEmpty())
+                                    for (i in 0 until arr.length()) {
+                                        val row = arr.optJSONObject(i) ?: continue
+                                        val rec = row.optString("received", "0").toIntOrNull() ?: 0
+                                        if (rec > 0 || row.has("time")) {
+                                            isReachable = true
+                                            val timeStr = row.optString("avg-rtt", row.optString("time", ""))
+                                            val ms = Regex("""(\d+)ms""").find(timeStr)?.groupValues?.get(1)?.toLongOrNull() ?: 2L
+                                            responseMs = ms.coerceAtLeast(1L)
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+                if (!isReachable) {
+                    val pingRes = NetworkUtils.pingHost(cleanIp, timeoutMs = 700)
+                    if (pingRes.first) {
+                        isReachable = true
+                        responseMs = pingRes.second.coerceAtLeast(1L)
+                    } else {
+                        val start = System.currentTimeMillis()
+                        for (port in listOf(80, 8728, 8291, 443)) {
+                            if (NetworkUtils.testSocketConnection(cleanIp, port, timeoutMs = 350)) {
+                                isReachable = true
+                                responseMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+                                break
+                            }
                         }
                     }
                 }
@@ -5542,18 +6312,8 @@ class MikrotikRepository(
                 )
             }
 
-            // Node responded directly: test gateway reachability to detect internet problems
-            val isGwReachable = NetworkUtils.pingHost(gatewayIp, timeoutMs = 800).first ||
-                    NetworkUtils.testSocketConnection("8.8.8.8", 53, timeoutMs = 600)
-
-            val resolvedStatus = if (isGwReachable) {
-                com.example.data.model.NodeStatus.ACTIVE
-            } else {
-                com.example.data.model.NodeStatus.NO_INTERNET
-            }
-
             node.copy(
-                status = resolvedStatus,
+                status = com.example.data.model.NodeStatus.ACTIVE,
                 isOnline = true,
                 pingMs = responseMs,
                 lastCheckTime = now,
@@ -5568,7 +6328,7 @@ class MikrotikRepository(
             val currentNodes = _networkNodes.value
             if (currentNodes.isEmpty()) return@withContext emptyList()
 
-            val gateway = activeConfig?.ipAddress?.ifBlank { "192.168.88.1" } ?: "192.168.88.1"
+            val gateway = activeConfig?.ipAddress?.trim().orEmpty()
             val checkedNodes = kotlinx.coroutines.coroutineScope {
                 currentNodes.map { node ->
                     async {
@@ -5581,7 +6341,6 @@ class MikrotikRepository(
                 return@withContext _networkNodes.value
             }
 
-            // Merge heartbeat status into the latest _networkNodes list so live session updates arriving mid-scan are never lost
             val checkedById = checkedNodes.associateBy { it.id }
             val mergedNodes = _networkNodes.value.map { latest ->
                 val checked = checkedById[latest.id]
@@ -5611,27 +6370,28 @@ class MikrotikRepository(
 
             _networkNodes.value = mergedNodes
 
-            // Persist immediately on topology/status change, or periodically when only ping ms ticks change
             val nowMs = System.currentTimeMillis()
             if (context != null && (nodeStateChanged || (nowMs - lastHeartbeatSnapshotDiskSaveMs) >= 5000L)) {
                 lastHeartbeatSnapshotDiskSaveMs = nowMs
                 val cfg = activeConfig
                 val rName = cfg?.name?.ifBlank { "راوتر MikroTik" } ?: "راوتر MikroTik"
-                val rIp = cfg?.ipAddress ?: "192.168.88.1"
-                com.example.data.local.RouterCacheManager.saveSnapshot(
-                    context = context,
-                    ipAddress = rIp,
-                    routerName = rName,
-                    resource = _resourceState.value,
-                    routerBoard = _routerBoardInfo.value,
-                    cards = _cards.value,
-                    profiles = _profiles.value,
-                    activeUsers = _activeUsers.value,
-                    servers = _hotspotServers.value,
-                    nodes = mergedNodes,
-                    logs = _systemLogs.value,
-                    ipBindings = _ipBindings.value
-                )
+                val rIp = cfg?.ipAddress?.trim().orEmpty()
+                if (rIp.isNotBlank()) {
+                    com.example.data.local.RouterCacheManager.saveSnapshot(
+                        context = context,
+                        ipAddress = rIp,
+                        routerName = rName,
+                        resource = _resourceState.value,
+                        routerBoard = _routerBoardInfo.value,
+                        cards = _cards.value,
+                        profiles = _profiles.value,
+                        activeUsers = _activeUsers.value,
+                        servers = _hotspotServers.value,
+                        nodes = mergedNodes,
+                        logs = _systemLogs.value,
+                        ipBindings = _ipBindings.value
+                    )
+                }
             }
 
             mergedNodes
@@ -5642,7 +6402,7 @@ class MikrotikRepository(
         return withContext(Dispatchers.IO) {
             val node = _networkNodes.value.firstOrNull { it.id == nodeId }
             if (node != null) {
-                val updatedNode = checkNodeHeartbeat(node, activeConfig?.ipAddress ?: "192.168.88.1")
+                val updatedNode = checkNodeHeartbeat(node, activeConfig?.ipAddress?.trim().orEmpty())
                 _networkNodes.value = _networkNodes.value.map {
                     if (it.id == nodeId) updatedNode else it
                 }
@@ -5683,8 +6443,8 @@ class MikrotikRepository(
 
     suspend fun inspectSubscriberApps(ipAddress: String): List<com.example.data.model.AppUsageItem> {
         return withContext(Dispatchers.IO) {
-            val isDemo = activeConfig?.isDemoMode == true || activeConfig == null
-            if (isDemo || ipAddress.isBlank()) {
+            val cfg = activeConfig
+            if (cfg?.isDemoMode == true) {
                 return@withContext listOf(
                     com.example.data.model.AppUsageItem("YouTube (فيديوهات عالية الدقة)", "googlevideo.com / ytimg.com", 1450000000L, 45f, 0xFFFF0000L),
                     com.example.data.model.AppUsageItem("Instagram (ريلز وستوري)", "instagram.com / cdninstagram.com", 850000000L, 26f, 0xFFE1306CL),
@@ -5694,13 +6454,45 @@ class MikrotikRepository(
                     com.example.data.model.AppUsageItem("WhatsApp (مراسلة)", "whatsapp.net / whatsapp.com", 95000000L, 3f, 0xFF25D366L)
                 )
             }
+            if (cfg == null || ipAddress.isBlank()) {
+                return@withContext emptyList()
+            }
 
-            val dnsCache = routerOsApiClient.getDnsCache().getOrDefault(emptyList())
+            val dnsCache: List<Map<String, String>> = if (isApiSocketMode) {
+                routerOsApiClient.getDnsCache().getOrDefault(emptyList())
+            } else {
+                try {
+                    val protocol = if (cfg.useHttps) "https" else "http"
+                    val baseUrl = "$protocol://${cfg.ipAddress}:${cfg.port}"
+                    val credential = Credentials.basic(cfg.username, cfg.password)
+                    val req = Request.Builder().url("$baseUrl/rest/ip/dns/cache").get().header("Authorization", credential).build()
+                    httpClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val arr = JSONArray(resp.body?.string().orEmpty())
+                            (0 until arr.length()).mapNotNull { i ->
+                                val obj = arr.optJSONObject(i) ?: return@mapNotNull null
+                                mapOf(
+                                    "name" to obj.optString("name"),
+                                    "data" to obj.optString("data"),
+                                    "address" to obj.optString("address"),
+                                    "answer" to obj.optString("answer")
+                                )
+                            }
+                        } else emptyList()
+                    }
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            }
+
+            if (dnsCache.isEmpty()) {
+                return@withContext emptyList()
+            }
+
             val matchedDomains = mutableMapOf<String, Int>()
-
             dnsCache.forEach { entry ->
-                val name = entry["name"] ?: entry["data"] ?: ""
-                val answer = entry["answer"] ?: entry["address"] ?: ""
+                val name = entry["name"].orEmpty().ifBlank { entry["data"].orEmpty() }
+                val answer = entry["answer"].orEmpty().ifBlank { entry["address"].orEmpty() }
                 if (name.isNotBlank() && (answer == ipAddress || name.contains(ipAddress) || dnsCache.size < 50)) {
                     val appKey = categorizeDomain(name)
                     matchedDomains[appKey] = (matchedDomains[appKey] ?: 0) + 1
@@ -5708,29 +6500,25 @@ class MikrotikRepository(
             }
 
             if (matchedDomains.isEmpty()) {
-                return@withContext listOf(
-                    com.example.data.model.AppUsageItem("YouTube (فيديوهات وبث)", "googlevideo.com", 920000000L, 50f, 0xFFFF0000L),
-                    com.example.data.model.AppUsageItem("Instagram (تصفح وريلز)", "instagram.com", 550000000L, 30f, 0xFFE1306CL),
-                    com.example.data.model.AppUsageItem("WhatsApp & Messaging", "whatsapp.net", 360000000L, 20f, 0xFF25D366L)
-                )
+                return@withContext emptyList()
             }
 
             val totalHits = matchedDomains.values.sum().toFloat().coerceAtLeast(1f)
             matchedDomains.entries.map { (appName, hits) ->
                 val pct = (hits / totalHits) * 100f
-                val bytes = (pct / 100f * 2000000000L).toLong()
                 val color = when {
                     appName.contains("YouTube") -> 0xFFFF0000L
                     appName.contains("Instagram") -> 0xFFE1306CL
                     appName.contains("TikTok") -> 0xFF000000L
                     appName.contains("PUBG") -> 0xFFFFB300L
                     appName.contains("Facebook") -> 0xFF1877F2L
-                    else -> 0xFF25D366L
+                    appName.contains("WhatsApp") -> 0xFF25D366L
+                    else -> 0xFF607D8BL
                 }
                 com.example.data.model.AppUsageItem(
                     appName = appName,
-                    category = "فحص مباشر عبر DNS",
-                    bytesUsed = bytes,
+                    category = "سجل DNS ($hits استعلام)",
+                    bytesUsed = hits.toLong(),
                     percentage = pct,
                     color = color
                 )
@@ -5745,8 +6533,8 @@ class MikrotikRepository(
             d.contains("instagram") || d.contains("cdninstagram") -> "Instagram (ريلز وستوري)"
             d.contains("tiktok") || d.contains("byteoversea") || d.contains("musical.ly") -> "TikTok (فيديوهات قصيرة)"
             d.contains("pubg") || d.contains("tencent") || d.contains("igdb") -> "PUBG Mobile (ألعاب)"
-            d.contains("facebook") || d.contains("fbcdn") || d.contains("messenger") -> "Facebook & Messenger"
-            d.contains("whatsapp") || d.contains("fb.com") -> "WhatsApp (مراسلة ومكالمات)"
+            d.contains("facebook") || d.contains("fbcdn") || d.contains("messenger") || d.contains("fb.com") -> "Facebook & Messenger"
+            d.contains("whatsapp") -> "WhatsApp (مراسلة ومكالمات)"
             d.contains("telegram") || d.contains("t.me") -> "Telegram (مراسلة وقنوات)"
             d.contains("netflix") || d.contains("shahid") -> "Netflix & Shahid (مسلسلات)"
             d.contains("play.google") || d.contains("gvt1") || d.contains("apple.com") || d.contains("itunes") -> "App Stores & Updates (متاجر التطبيقات)"

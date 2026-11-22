@@ -139,6 +139,8 @@ fun CardsScreen(
     val cardDisplayLimit by viewModel.cardDisplayLimit.collectAsStateWithLifecycle()
     val pendingTasksCount by viewModel.pendingTasksCount.collectAsStateWithLifecycle()
     val isProcessingQueue by viewModel.isProcessingQueue.collectAsStateWithLifecycle()
+    val lastSavedStockSerial by viewModel.lastSavedStockSerial.collectAsStateWithLifecycle()
+    val stockActivationState by viewModel.stockActivationState.collectAsStateWithLifecycle()
 
     var cardToDelete by remember { mutableStateOf<HotspotCard?>(null) }
     var cardToEdit by remember { mutableStateOf<HotspotCard?>(null) }
@@ -181,7 +183,7 @@ fun CardsScreen(
         val session = realSession ?: UserSessionRecord(
             id = card.id,
             username = card.name,
-            ipAddress = activeUser?.address?.ifBlank { "غير متصل" } ?: "192.168.88.x",
+            ipAddress = activeUser?.address?.ifBlank { "غير متصل" } ?: "غير متصل",
             macAddress = activeUser?.macAddress?.ifBlank { "00:00:00:00:00:00" } ?: "غير مسجل",
             isOnline = activeUser != null || (card.isActive && !card.isExpired),
             loginTime = if (activeUser != null) "متصل الآن (${activeUser.uptime})" else if (card.uptime != "0s") "جلسة سابقة (${card.uptime})" else "غير متصل",
@@ -243,6 +245,8 @@ fun CardsScreen(
 
                 Button(
                     onClick = {
+                        viewModel.refreshSavedStockSerialForActiveRouter()
+                        viewModel.dismissStockActivationError()
                         showPrintSelectionDialog = true
                     },
                     shape = RoundedCornerShape(10.dp),
@@ -952,12 +956,32 @@ fun CardsScreen(
         PrintSelectionDialog(
             allCards = allCards,
             batchOptions = printableBatchOptions,
-            onDismiss = { showPrintSelectionDialog = false },
+            lastSavedSerial = lastSavedStockSerial,
+            stockActivationState = stockActivationState,
+            timestampProvider = { viewModel.getCardCreationTimestamp(it) },
+            onDismiss = {
+                viewModel.dismissStockActivationError()
+                showPrintSelectionDialog = false
+            },
             onBatchSelectedForPrint = { key -> selectedBatchKeyForPrint = key },
             onConfirmSelection = { selectedCards ->
                 viewModel.setPrintableCards(selectedCards, selectedBatchKeyForPrint)
                 showPrintSelectionDialog = false
                 onOpenPrintScreen()
+            },
+            onConfirmStockSelection = { selectedCards, activateNow, batchKey ->
+                viewModel.setPrintableCards(selectedCards, batchKey)
+                if (activateNow) {
+                    viewModel.activatePrintableCardsOnRouter(selectedCards) { activationResult ->
+                        if (activationResult.isCompleteSuccess || activationResult.activatedCards.isNotEmpty() || activationResult.alreadyActiveCards.isNotEmpty()) {
+                            showPrintSelectionDialog = false
+                            onOpenPrintScreen()
+                        }
+                    }
+                } else {
+                    showPrintSelectionDialog = false
+                    onOpenPrintScreen()
+                }
             }
         )
     }
@@ -1091,8 +1115,8 @@ fun HotspotCardItem(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     when {
-                        card.disabled -> StatusPill(text = "معطل", type = StatusType.ERROR)
                         card.isExpired -> StatusPill(text = "منتهي", type = StatusType.WARNING)
+                        card.isManuallyDisabled -> StatusPill(text = "معطل يدوياً", type = StatusType.ERROR)
                         card.isActive -> StatusPill(text = "نشط", type = StatusType.SUCCESS)
                         else -> StatusPill(text = "جاهز للبيع", type = StatusType.INFO)
                     }
@@ -1359,9 +1383,7 @@ fun formatCardCreationDate(card: HotspotCard): String {
 }
 
 fun parsePriceNumber(priceStr: String): Double {
-    if (priceStr.isBlank()) return 0.0
-    val cleaned = priceStr.replace(",", "").filter { it.isDigit() || it == '.' }
-    return cleaned.toDoubleOrNull() ?: 0.0
+    return com.example.data.util.FinanceAnalyticsEngine.parsePriceValue(priceStr)
 }
 
 @Composable

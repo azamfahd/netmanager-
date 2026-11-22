@@ -25,6 +25,8 @@ import android.print.PrintManager
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.example.data.model.HotspotCard
+import com.example.data.util.SerialCorner
+import com.example.data.util.VoucherSerialEngine
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.max
@@ -50,7 +52,14 @@ data class CardDesignConfig(
     val rows: Int = 15,
     val cardWidthMm: Float = 50f,
     val cardHeightMm: Float = 18f,
-    val customCodeColorArgb: Int = Color.BLACK
+    val customCodeColorArgb: Int = Color.BLACK,
+    val showSerialNumber: Boolean = false,
+    val serialPrefix: String = "#",
+    val serialCorner: SerialCorner = SerialCorner.TOP_END,
+    val serialOffsetXPercent: Float = 0f,
+    val serialOffsetYPercent: Float = 0f,
+    val serialFontSizeSp: Float = 8f,
+    val serialMap: Map<String, String> = emptyMap()
 ) {
     val safeColumns: Int get() = columns.coerceAtLeast(1)
     val safeRows: Int get() = rows.coerceAtLeast(1)
@@ -131,7 +140,7 @@ object VoucherPrintUtils {
         }
         val paintCodeValue = Paint().apply {
             isAntiAlias = true
-            color = Color.rgb(10, 20, 30)
+            color = config.customCodeColorArgb
             textSize = cardH * 0.22f * (config.fontSizeSp / 14f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
@@ -166,6 +175,12 @@ object VoucherPrintUtils {
             textSize = cardH * 0.12f
             textAlign = Paint.Align.CENTER
         }
+        val paintSerial = Paint().apply {
+            isAntiAlias = true
+            color = if (config.templateType == CardTemplateType.CUSTOM_IMAGE) config.customCodeColorArgb else Color.rgb(38, 50, 56)
+            textSize = (cardH * 0.135f * (config.serialFontSizeSp / 8f)).coerceAtLeast(6f * scale)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
         val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
 
         // Fill background of page
@@ -198,7 +213,8 @@ object VoucherPrintUtils {
                     val badgeRect = RectF(right - badgeWidth, top, right, bottom)
                     canvas.drawRoundRect(badgeRect, 2f * scale, 2f * scale, paintPriceBadgeBg)
 
-                    val priceNum = card.price.replace(Regex("[^0-9]"), "").ifEmpty { "500" }
+                    val normalizedPrice = com.example.data.util.FinanceAnalyticsEngine.normalizeDigits(card.price)
+                    val priceNum = Regex("""\d+(?:\.\d+)?""").find(normalizedPrice)?.value ?: "0"
                     canvas.drawText(priceNum, badgeRect.centerX(), top + cardH * 0.45f, paintPriceText)
                     canvas.drawText("ريال", badgeRect.centerX(), top + cardH * 0.75f, paintPriceSub)
 
@@ -209,19 +225,21 @@ object VoucherPrintUtils {
                 // 2. Draw border
                 canvas.drawRoundRect(cardRect, 4f * scale, 4f * scale, paintBorder)
 
-                // 3. Card Texts
-                val contentCenterX = (if (isCustomImg) cardRect.centerX() else left + cardW * 0.40f) + (config.offsetXPercent * cardW * 0.2f)
+                // 3. Card Texts (offset formulas aligned with SingleCardRender preview)
+                val baseCenterX = if (isCustomImg) cardRect.centerX() else left + cardW * 0.40f
+                val contentCenterX = baseCenterX + (config.offsetXPercent / 100f) * cardW * 0.45f
+                val offsetYDelta = (config.offsetYPercent / 50f) * cardH * 0.45f
 
                 if (isCustomImg) {
-                    val codeY = top + (cardH * 0.55f) + (config.offsetYPercent * cardH * 0.2f)
+                    val codeY = top + (cardH * 0.55f) + offsetYDelta
                     canvas.drawText(card.name, contentCenterX, codeY, paintCodeValue)
                 } else {
-                    val timeLimit = if (card.limitUptime.isNotBlank()) card.limitUptime else "24 ساعة"
-                    val quotaMb = if (card.limitBytesTotal > 0) "${card.limitBytesTotal / (1024 * 1024)} ميجا" else "1024 ميجا"
+                    val timeLimit = if (card.limitUptime.isNotBlank()) card.limitUptime else "مفتوح"
+                    val quotaMb = if (card.limitBytesTotal > 0L) "${card.limitBytesTotal / (1024L * 1024L)} ميجا" else "مفتوح"
                     val headerStr = "$timeLimit . $quotaMb"
                     canvas.drawText(headerStr, contentCenterX, top + cardH * 0.24f, paintTextHeader)
 
-                    val codeY = top + cardH * 0.58f + (config.offsetYPercent * cardH * 0.2f)
+                    val codeY = top + cardH * 0.58f + offsetYDelta
                     canvas.drawText("رمز الدخول: ${card.name}", contentCenterX, codeY, paintCodeValue)
 
                     val linePaint = Paint().apply {
@@ -233,6 +251,30 @@ object VoucherPrintUtils {
 
                     val footerStr = "${config.networkName} | ت: ${config.contactPhone}"
                     canvas.drawText(footerStr, contentCenterX, top + cardH * 0.88f, paintFooter)
+                }
+
+                // 4. Optional Configurable Serial Number Badge
+                if (config.showSerialNumber) {
+                    val resolvedDigits = config.serialMap[card.name]
+                        ?: config.serialMap[card.id]
+                        ?: VoucherSerialEngine.extractCardSerial(card)?.let { VoucherSerialEngine.formatSerialDigits(it) }
+                        ?: VoucherSerialEngine.formatSerialDigits((cardIndexInList + 1).toLong())
+                    val serialLabel = "${config.serialPrefix}$resolvedDigits"
+                    val snShiftX = (config.serialOffsetXPercent / 100f) * cardW * 0.45f
+                    val snShiftY = (config.serialOffsetYPercent / 50f) * cardH * 0.45f
+                    val rightMarginAnchor = if (isCustomImg) right - (8f * scale) else right - (cardW * 0.23f)
+                    val leftMarginAnchor = left + (8f * scale)
+                    val topAnchorY = top + (cardH * 0.16f)
+                    val bottomAnchorY = bottom - (cardH * 0.08f)
+
+                    val (snX, snY, align) = when (config.serialCorner) {
+                        SerialCorner.TOP_START -> Triple(rightMarginAnchor, topAnchorY, Paint.Align.RIGHT)
+                        SerialCorner.TOP_END -> Triple(leftMarginAnchor, topAnchorY, Paint.Align.LEFT)
+                        SerialCorner.BOTTOM_START -> Triple(rightMarginAnchor, bottomAnchorY, Paint.Align.RIGHT)
+                        SerialCorner.BOTTOM_END -> Triple(leftMarginAnchor, bottomAnchorY, Paint.Align.LEFT)
+                    }
+                    paintSerial.textAlign = align
+                    canvas.drawText(serialLabel, snX + snShiftX, snY + snShiftY, paintSerial)
                 }
             }
         }
@@ -378,20 +420,30 @@ object VoucherPrintUtils {
         config: CardDesignConfig,
         targetWidth: Int = 1800
     ): Bitmap? {
+        var customBg: Bitmap? = null
+        var bitmap: Bitmap? = null
         return try {
             val pageWidth = targetWidth
             val pageHeight = (targetWidth * 1.4142f).toInt()
-            val bitmap = Bitmap.createBitmap(pageWidth, pageHeight, Bitmap.Config.ARGB_8888)
+            bitmap = Bitmap.createBitmap(pageWidth, pageHeight, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             canvas.drawColor(Color.WHITE)
-            val customBg = loadBitmapFromUri(context, config.customImageUri)
-            val cardsPerPage = max(1, config.cardsPerPage)
-            val start = pageIndex * cardsPerPage
-            val pageCards = cards.drop(start).take(cardsPerPage)
-            drawCardsPage(canvas, pageIndex, pageCards, config, customBg, pageWidth, pageHeight)
+            customBg = loadBitmapFromUri(context, config.customImageUri)
+            drawCardsPage(
+                canvas = canvas,
+                pageIndex = pageIndex.coerceAtLeast(0),
+                pageCards = cards,
+                config = config,
+                customBgBitmap = customBg,
+                pageWidth = pageWidth,
+                pageHeight = pageHeight
+            )
             bitmap
         } catch (_: Exception) {
+            try { bitmap?.recycle() } catch (_: Exception) {}
             null
+        } finally {
+            try { customBg?.recycle() } catch (_: Exception) {}
         }
     }
 
@@ -413,7 +465,7 @@ object VoucherPrintUtils {
             return
         }
 
-        val customBitmap = loadBitmapFromUri(context, config.customImageUri)
+        var customBitmap: Bitmap? = loadBitmapFromUri(context, config.customImageUri)
 
         val printAdapter = object : PrintDocumentAdapter() {
             private var totalPages = 1
@@ -487,6 +539,12 @@ object VoucherPrintUtils {
                 } finally {
                     try { pdfDocument.close() } catch (_: Exception) {}
                 }
+            }
+
+            override fun onFinish() {
+                super.onFinish()
+                try { customBitmap?.recycle() } catch (_: Exception) {}
+                customBitmap = null
             }
         }
 

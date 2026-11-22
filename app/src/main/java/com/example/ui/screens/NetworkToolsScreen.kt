@@ -530,7 +530,10 @@ fun NetworkToolsScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
-                            onClick = { viewModel.checkForUpdates(isManual = true) },
+                            onClick = {
+                                manualCheckTriggered = true
+                                viewModel.checkForUpdates(isManual = true)
+                            },
                             enabled = updateCheckState !is UpdateCheckState.Checking,
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier

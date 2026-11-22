@@ -39,7 +39,7 @@ class VoucherSettingsManager(context: Context) {
             dataLimitMB = prefs.getString("data_limit_mb", "2560") ?: "2560",
             isSingleCode = prefs.getBoolean("is_single_code", true),
             batchCount = prefs.getString("batch_count", "20") ?: "20",
-            codeLength = prefs.getString("code_length", "6") ?: "6",
+            codeLength = prefs.getString("code_length", null) ?: prefs.getString("codeLength", null) ?: "6",
             charType = charType,
             prefix = prefs.getString("prefix", "") ?: "",
             batchComment = prefs.getString("batch_comment", "دفعة كروت هوتسبوت") ?: "دفعة كروت هوتسبوت",
@@ -56,7 +56,7 @@ class VoucherSettingsManager(context: Context) {
             .putString("data_limit_mb", settings.dataLimitMB)
             .putBoolean("is_single_code", settings.isSingleCode)
             .putString("batch_count", settings.batchCount)
-            .putString("codeLength", settings.codeLength)
+            .putString("code_length", settings.codeLength)
             .putString("char_type", settings.charType.name)
             .putString("prefix", settings.prefix)
             .putString("batch_comment", settings.batchComment)

@@ -88,6 +88,7 @@ import com.example.ui.theme.CyberGreenNeon
 import com.example.ui.theme.CyberGreenPrimary
 import com.example.ui.theme.NetworkCyan
 import com.example.ui.theme.NetworkCyanLight
+import com.example.ui.theme.StatusErrorRed
 import kotlin.math.max
 
 /**
@@ -659,61 +660,89 @@ fun PeakHoursAnalysisCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            // 24-Hour Bar Graph
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(95.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF09140F))
-                    .padding(horizontal = 6.dp, vertical = 6.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Bottom
+            // 24-Hour Bar Graph (or honest empty state when router has no session history yet)
+            if (stats.isEmpty() || stats.all { it.userCount == 0 }) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                 ) {
-                    stats.forEach { stat ->
-                        val isCurrent = stat.hour == currentHour
-                        val heightFraction = (stat.userCount.toFloat() / maxUsers.toFloat()).coerceIn(0.08f, 1f)
+                    Column(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 18.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "لا توجد قياسات ذروة مسجلة من الراوتر حتى الآن",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "سيتم بناء الرسم البياني تلقائياً من الجلسات الفعلية عند تسجيل دخول المشتركين.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                            fontSize = 10.sp
+                        )
+                    }
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(95.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF09140F))
+                        .padding(horizontal = 6.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        stats.forEach { stat ->
+                            val isCurrent = stat.hour == currentHour
+                            val heightFraction = (stat.userCount.toFloat() / maxUsers.toFloat()).coerceIn(0.08f, 1f)
 
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Bottom,
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                        ) {
-                            Box(
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Bottom,
                                 modifier = Modifier
-                                    .fillMaxWidth(0.7f)
-                                    .fillMaxHeight(heightFraction)
-                                    .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
-                                    .background(
-                                        when {
-                                            isCurrent -> CyberGreenNeon
-                                            stat.isPeak -> CyberGreenBright
-                                            else -> NetworkCyan.copy(alpha = 0.45f)
-                                        }
-                                    )
-                            )
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.7f)
+                                        .fillMaxHeight(heightFraction)
+                                        .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                                        .background(
+                                            when {
+                                                isCurrent -> CyberGreenNeon
+                                                stat.isPeak -> CyberGreenBright
+                                                else -> NetworkCyan.copy(alpha = 0.45f)
+                                            }
+                                        )
+                                )
+                            }
                         }
                     }
                 }
-            }
 
-            // Hours labels strip (every 4 hours)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                listOf(0, 4, 8, 12, 16, 20, 23).forEach { hour ->
-                    Text(
-                        text = formatHourLabel(hour),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 9.sp
-                    )
+                // Hours labels strip (every 4 hours)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    listOf(0, 4, 8, 12, 16, 20, 23).forEach { hour ->
+                        Text(
+                            text = formatHourLabel(hour),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 9.sp
+                        )
+                    }
                 }
             }
         }
@@ -960,11 +989,13 @@ fun PackageSalesProfitAnalyticsCard(
                     valueColor = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f)
                 )
+                val isNetLoss = revenueSummary.totalNetProfit < 0.0
+                val netSign = if (revenueSummary.totalNetProfit > 0.0) "+" else ""
                 FinancialMetricBox(
-                    title = "صافي الأرباح",
-                    value = "+${revenueSummary.totalNetProfit.toLong()} ر.ي",
+                    title = if (isNetLoss) "صافي الخسارة" else "صافي الأرباح",
+                    value = "$netSign${revenueSummary.totalNetProfit.toLong()} ر.ي",
                     subtitle = "هامش ربح: ${revenueSummary.averageProfitMarginPercent.toInt()}%",
-                    valueColor = CyberGreenBright,
+                    valueColor = if (isNetLoss) StatusErrorRed else CyberGreenBright,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -980,10 +1011,11 @@ fun PackageSalesProfitAnalyticsCard(
                     valueColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f)
                 )
+                val topSign = if (revenueSummary.topProfitablePackageProfit > 0.0) "+" else ""
                 FinancialMetricBox(
                     title = "أعلى باقة ربحية",
                     value = revenueSummary.topProfitablePackage,
-                    subtitle = "ربح: +${revenueSummary.topProfitablePackageProfit.toLong()} ر.ي",
+                    subtitle = "ربح: $topSign${revenueSummary.topProfitablePackageProfit.toLong()} ر.ي",
                     valueColor = NetworkCyan,
                     modifier = Modifier.weight(1f)
                 )
@@ -1137,14 +1169,17 @@ private fun PackageProfitRowCard(
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     // Profit Per Card Pill
+                    val isCardLoss = stat.profitPerCard < 0.0
+                    val cardProfitColor = if (isCardLoss) StatusErrorRed else CyberGreenBright
+                    val cardSign = if (stat.profitPerCard > 0.0) "+" else ""
                     Surface(
-                        color = CyberGreenPrimary.copy(alpha = 0.15f),
+                        color = (if (isCardLoss) StatusErrorRed else CyberGreenPrimary).copy(alpha = 0.15f),
                         shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
-                            text = "ربح الكرت: +${stat.profitPerCard.toInt()} ر.ي",
+                            text = "${if (isCardLoss) "خسارة الكرت" else "ربح الكرت"}: $cardSign${stat.profitPerCard.toInt()} ر.ي",
                             style = MaterialTheme.typography.labelSmall,
-                            color = CyberGreenBright,
+                            color = cardProfitColor,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                             fontSize = 10.sp
@@ -1199,8 +1234,10 @@ private fun PackageProfitRowCard(
                     }
                 }
 
+                val marginBgColor = if (stat.profitMarginPercent < 0.0) StatusErrorRed else CyberGreenPrimary
+                val marginTextColor = if (stat.profitMarginPercent < 0.0) StatusErrorRed else CyberGreenBright
                 Surface(
-                    color = CyberGreenPrimary.copy(alpha = 0.1f),
+                    color = marginBgColor.copy(alpha = 0.1f),
                     shape = RoundedCornerShape(6.dp),
                     modifier = Modifier.weight(1f)
                 ) {
@@ -1208,8 +1245,8 @@ private fun PackageProfitRowCard(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(text = "هامش الربح:", fontSize = 10.sp, color = CyberGreenBright)
-                        Text(text = "${stat.profitMarginPercent.toInt()}%", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = CyberGreenBright)
+                        Text(text = "هامش الربح:", fontSize = 10.sp, color = marginTextColor)
+                        Text(text = "${stat.profitMarginPercent.toInt()}%", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = marginTextColor)
                     }
                 }
             }
@@ -1252,12 +1289,14 @@ private fun PackageProfitRowCard(
                         Text(text = "التكلفة: ${stat.totalCost.toLong()} ر.ي", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text(text = "صافي ربح الباقة:", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        val isPkgNetLoss = stat.netProfit < 0.0
+                        val pkgSign = if (stat.netProfit > 0.0) "+" else ""
+                        Text(text = if (isPkgNetLoss) "صافي خسارة الباقة:" else "صافي ربح الباقة:", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
-                            text = "+${stat.netProfit.toLong()} ر.ي",
+                            text = "$pkgSign${stat.netProfit.toLong()} ر.ي",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
-                            color = CyberGreenBright
+                            color = if (isPkgNetLoss) StatusErrorRed else CyberGreenBright
                         )
                     }
                 }
@@ -1305,13 +1344,26 @@ fun EditPackagePricingDialog(
     onDismiss: () -> Unit,
     onSave: (cost: Double, sale: Double) -> Unit
 ) {
-    var costInput by remember { mutableStateOf(stat.costPrice.toInt().toString()) }
-    var saleInput by remember { mutableStateOf(stat.salePrice.toInt().toString()) }
+    var costInput by remember {
+        mutableStateOf(
+            if (stat.costPrice % 1.0 == 0.0) stat.costPrice.toInt().toString() else stat.costPrice.toString()
+        )
+    }
+    var saleInput by remember {
+        mutableStateOf(
+            if (stat.salePrice % 1.0 == 0.0) stat.salePrice.toInt().toString() else stat.salePrice.toString()
+        )
+    }
 
-    val currentCost = costInput.filter { it.isDigit() }.toDoubleOrNull() ?: 0.0
-    val currentSale = saleInput.filter { it.isDigit() }.toDoubleOrNull() ?: 0.0
-    val currentProfit = (currentSale - currentCost).coerceAtLeast(0.0)
-    val currentMargin = if (currentSale > 0) ((currentProfit / currentSale) * 100.0) else 0.0
+    val cleanCost = com.example.data.util.FinanceAnalyticsEngine.normalizeDigits(costInput).filter { it.isDigit() || it == '.' }
+    val cleanSale = com.example.data.util.FinanceAnalyticsEngine.normalizeDigits(saleInput).filter { it.isDigit() || it == '.' }
+    val currentCost = cleanCost.toDoubleOrNull() ?: 0.0
+    val currentSale = cleanSale.toDoubleOrNull() ?: 0.0
+    val currentProfit = currentSale - currentCost
+    val currentMargin = if (currentSale > 0.0) ((currentProfit / currentSale) * 100.0) else 0.0
+    val isDialogLoss = currentProfit < 0.0
+    val dialogAccentColor = if (isDialogLoss) StatusErrorRed else CyberGreenBright
+    val dialogBorderColor = if (isDialogLoss) StatusErrorRed else CyberGreenPrimary
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1362,9 +1414,9 @@ fun EditPackagePricingDialog(
 
                 // Live Preview Card
                 Surface(
-                    color = CyberGreenPrimary.copy(alpha = 0.12f),
+                    color = dialogBorderColor.copy(alpha = 0.12f),
                     shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(1.dp, CyberGreenPrimary.copy(alpha = 0.3f)),
+                    border = BorderStroke(1.dp, dialogBorderColor.copy(alpha = 0.3f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -1372,21 +1424,22 @@ fun EditPackagePricingDialog(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = "📊 معاينة الأرباح المحسوبة للكرت:",
+                            text = if (isDialogLoss) "📊 معاينة الخسارة المحسوبة للكرت:" else "📊 معاينة الأرباح المحسوبة للكرت:",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = CyberGreenBright
+                            color = dialogAccentColor
                         )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(text = "صافي ربح الكرت:", style = MaterialTheme.typography.labelSmall)
+                            Text(text = if (isDialogLoss) "صافي خسارة الكرت:" else "صافي ربح الكرت:", style = MaterialTheme.typography.labelSmall)
+                            val sign = if (currentProfit > 0.0) "+" else ""
                             Text(
-                                text = "+${currentProfit.toInt()} ر.ي",
+                                text = "$sign${currentProfit.toInt()} ر.ي",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.Bold,
-                                color = CyberGreenBright
+                                color = dialogAccentColor
                             )
                         }
                         Row(
@@ -1398,7 +1451,7 @@ fun EditPackagePricingDialog(
                                 text = "${currentMargin.toInt()}%",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.Bold,
-                                color = NetworkCyan
+                                color = if (isDialogLoss) StatusErrorRed else NetworkCyan
                             )
                         }
                     }

@@ -68,6 +68,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -76,12 +77,15 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -112,6 +116,8 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import com.example.data.model.HotspotCard
 import com.example.data.model.PrintableBatchOption
+import com.example.data.util.SerialCorner
+import com.example.data.util.VoucherSerialEngine
 import com.example.ui.theme.NetworkCyan
 import com.example.ui.theme.RouterBlue
 import com.example.ui.theme.RouterBlueDark
@@ -119,6 +125,7 @@ import com.example.ui.theme.StatusActiveGreen
 import com.example.ui.util.CardDesignConfig
 import com.example.ui.util.CardTemplateType
 import com.example.ui.util.VoucherPrintUtils
+import com.example.ui.viewmodel.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -135,10 +142,16 @@ fun VoucherPrintScreen(
     batchOptions: List<PrintableBatchOption> = emptyList(),
     activeBatchKey: String? = null,
     onSelectBatchCards: ((List<HotspotCard>, String?) -> Unit)? = null,
-    onMarkPrinted: (() -> Unit)? = null
+    onMarkPrinted: (() -> Unit)? = null,
+    serialMap: Map<String, String> = emptyMap(),
+    stockActivationState: MainViewModel.StockActivationUiState = MainViewModel.StockActivationUiState.Idle,
+    onActivatePendingCards: ((() -> Unit) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val printDesignPrefs = remember(context) {
+        context.getSharedPreferences("voucher_print_design_prefs", Context.MODE_PRIVATE)
+    }
 
     // Design Customization State matching the uploaded image
     var offsetX by remember { mutableFloatStateOf(0f) } // horizontal offset in px/dp
@@ -155,6 +168,36 @@ fun VoucherPrintScreen(
     var networkName by remember { mutableStateOf("سكود نت") }
     var contactPhone by remember { mutableStateOf("777000111") }
     var customCodeColorArgb by remember { mutableIntStateOf(android.graphics.Color.rgb(13, 27, 42)) }
+
+    // Serial Number Print Customization State (persisted across sessions)
+    var showSerialNumber by remember { mutableStateOf(printDesignPrefs.getBoolean("show_serial", false)) }
+    var serialPrefix by remember { mutableStateOf(printDesignPrefs.getString("serial_prefix", "#") ?: "#") }
+    var serialCorner by remember {
+        val savedName = printDesignPrefs.getString("serial_corner", SerialCorner.TOP_END.name)
+        val parsed = SerialCorner.entries.firstOrNull { it.name == savedName } ?: SerialCorner.TOP_END
+        mutableStateOf(parsed)
+    }
+    var serialOffsetX by remember { mutableFloatStateOf(printDesignPrefs.getFloat("serial_offset_x", 0f)) }
+    var serialOffsetY by remember { mutableFloatStateOf(printDesignPrefs.getFloat("serial_offset_y", 0f)) }
+    var serialFontSizeSp by remember { mutableFloatStateOf(printDesignPrefs.getFloat("serial_font_sp", 8f)) }
+    var autoActivateOnPrint by remember { mutableStateOf(true) }
+
+    LaunchedEffect(showSerialNumber, serialPrefix, serialCorner, serialOffsetX, serialOffsetY, serialFontSizeSp) {
+        printDesignPrefs.edit()
+            .putBoolean("show_serial", showSerialNumber)
+            .putString("serial_prefix", serialPrefix)
+            .putString("serial_corner", serialCorner.name)
+            .putFloat("serial_offset_x", serialOffsetX)
+            .putFloat("serial_offset_y", serialOffsetY)
+            .putFloat("serial_font_sp", serialFontSizeSp)
+            .apply()
+    }
+
+    val effectiveSerialMap = remember(cards, serialMap) {
+        if (serialMap.isNotEmpty()) serialMap else VoucherSerialEngine.buildSerialMap(cards)
+    }
+
+    val pendingDisabledCards = remember(cards) { cards.filter { it.disabled } }
 
     // Pagination
     var currentPageIndex by remember { mutableIntStateOf(0) }
@@ -213,8 +256,27 @@ fun VoucherPrintScreen(
         rows = rows,
         cardWidthMm = cardWidthMm,
         cardHeightMm = cardHeightMm,
-        customCodeColorArgb = customCodeColorArgb
+        customCodeColorArgb = customCodeColorArgb,
+        showSerialNumber = showSerialNumber,
+        serialPrefix = serialPrefix,
+        serialCorner = serialCorner,
+        serialOffsetXPercent = serialOffsetX,
+        serialOffsetYPercent = serialOffsetY,
+        serialFontSizeSp = serialFontSizeSp,
+        serialMap = effectiveSerialMap
     )
+
+    val executePrintOrExport: (() -> Unit) -> Unit = { outputAction ->
+        if (pendingDisabledCards.isNotEmpty() && autoActivateOnPrint && onActivatePendingCards != null) {
+            onActivatePendingCards {
+                onMarkPrinted?.invoke()
+                outputAction()
+            }
+        } else {
+            onMarkPrinted?.invoke()
+            outputAction()
+        }
+    }
 
     // Get cards for current page
     val startIndex = safePageIndex * cardsPerPage
@@ -271,30 +333,33 @@ fun VoucherPrintScreen(
                             config = currentConfig,
                             onDismiss = { showHdPreview = false },
                             onExportPdf = {
-                                onMarkPrinted?.invoke()
-                                Toast.makeText(context, "جاري إنشاء ملف PDF بدقة عالية...", Toast.LENGTH_SHORT).show()
-                                VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
-                                    if (file != null) {
-                                        VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
-                                    } else {
-                                        Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                executePrintOrExport {
+                                    Toast.makeText(context, "جاري إنشاء ملف PDF بدقة عالية...", Toast.LENGTH_SHORT).show()
+                                    VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
+                                        if (file != null) {
+                                            VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
+                                        } else {
+                                            Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             },
                             onExportImage = {
-                                onMarkPrinted?.invoke()
-                                Toast.makeText(context, "جاري تصدير الصورة بجودة HD...", Toast.LENGTH_SHORT).show()
-                                VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
-                                    if (file != null) {
-                                        VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت عالية الدقة")
-                                    } else {
-                                        Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                executePrintOrExport {
+                                    Toast.makeText(context, "جاري تصدير الصورة بجودة HD...", Toast.LENGTH_SHORT).show()
+                                    VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
+                                        if (file != null) {
+                                            VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت عالية الدقة")
+                                        } else {
+                                            Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             },
                             onPrint = {
-                                onMarkPrinted?.invoke()
-                                VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                                executePrintOrExport {
+                                    VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                                }
                             }
                         )
                     }
@@ -302,13 +367,14 @@ fun VoucherPrintScreen(
                     // Export PDF Button
                     IconButton(
                         onClick = {
-                            onMarkPrinted?.invoke()
-                            Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
-                            VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
-                                if (file != null) {
-                                    VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
-                                } else {
-                                    Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                            executePrintOrExport {
+                                Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
+                                VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
+                                    if (file != null) {
+                                        VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
+                                    } else {
+                                        Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
                         },
@@ -324,13 +390,14 @@ fun VoucherPrintScreen(
                     // Export Image Button
                     IconButton(
                         onClick = {
-                            onMarkPrinted?.invoke()
-                            Toast.makeText(context, "جاري تصدير الصفحة الحالية كصورة...", Toast.LENGTH_SHORT).show()
-                            VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
-                                if (file != null) {
-                                    VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
-                                } else {
-                                    Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                            executePrintOrExport {
+                                Toast.makeText(context, "جاري تصدير الصفحة الحالية كصورة...", Toast.LENGTH_SHORT).show()
+                                VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
+                                    if (file != null) {
+                                        VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
+                                    } else {
+                                        Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
                         },
@@ -367,8 +434,9 @@ fun VoucherPrintScreen(
                     // Print Button (Compact)
                     Button(
                         onClick = {
-                            onMarkPrinted?.invoke()
-                            VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                            executePrintOrExport {
+                                VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                            }
                         },
                         shape = RoundedCornerShape(8.dp),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 4.dp),
@@ -462,6 +530,96 @@ fun VoucherPrintScreen(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             }
 
+            // Stock Pending Activation / Serial Activation Progress Banner
+            if (pendingDisabledCards.isNotEmpty() || stockActivationState !is MainViewModel.StockActivationUiState.Idle) {
+                val firstSn = cards.firstOrNull()?.let { effectiveSerialMap[it.name] ?: effectiveSerialMap[it.id] }
+                val lastSn = cards.lastOrNull()?.let { effectiveSerialMap[it.name] ?: effectiveSerialMap[it.id] }
+                val snRangeText = if (!firstSn.isNullOrBlank() && !lastSn.isNullOrBlank()) " (#$firstSn – #$lastSn)" else ""
+
+                Surface(
+                    color = when (stockActivationState) {
+                        is MainViewModel.StockActivationUiState.Error -> MaterialTheme.colorScheme.errorContainer
+                        is MainViewModel.StockActivationUiState.Activating -> Color(0xFFE3F2FD)
+                        else -> Color(0xFFFFF8E1)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        when (stockActivationState) {
+                            is MainViewModel.StockActivationUiState.Activating -> {
+                                val pct = if (stockActivationState.total > 0) {
+                                    stockActivationState.completed.toFloat() / stockActivationState.total.toFloat()
+                                } else 0f
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "جاري تفعيل ${stockActivationState.completed} من ${stockActivationState.total} كرت (${stockActivationState.currentCardName})...",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = RouterBlueDark
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                LinearProgressIndicator(
+                                    progress = { pct },
+                                    modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(4.dp)),
+                                    color = RouterBlue
+                                )
+                            }
+                            is MainViewModel.StockActivationUiState.Error -> {
+                                Text(
+                                    text = "تنبيه التفعيل: ${stockActivationState.message}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                            else -> {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "${pendingDisabledCards.size} كرت مخزون غير مفعّل$snRangeText",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFE65100)
+                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.clickable { autoActivateOnPrint = !autoActivateOnPrint }
+                                        ) {
+                                            Text(
+                                                text = if (autoActivateOnPrint) "تفعيل تلقائي لحظة الطباعة: مفعّل" else "تفعيل تلقائي لحظة الطباعة: متوقف",
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF5D4037)
+                                            )
+                                        }
+                                    }
+                                    if (onActivatePendingCards != null) {
+                                        Button(
+                                            onClick = { onActivatePendingCards {} },
+                                            shape = RoundedCornerShape(8.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE65100)),
+                                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.testTag("activate_pending_stock_btn")
+                                        ) {
+                                            Text("تفعيل الآن (${pendingDisabledCards.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            }
+
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -495,6 +653,14 @@ fun VoucherPrintScreen(
                             customCodeColorArgb = customCodeColorArgb,
                             networkName = networkName,
                             contactPhone = contactPhone,
+                            showSerialNumber = showSerialNumber,
+                            serialPrefix = serialPrefix,
+                            serialCorner = serialCorner,
+                            serialOffsetX = serialOffsetX,
+                            serialOffsetY = serialOffsetY,
+                            serialFontSizeSp = serialFontSizeSp,
+                            serialMap = effectiveSerialMap,
+                            startIndex = startIndex,
                             safePageIndex = safePageIndex,
                             totalPages = totalPages,
                             onPrevPage = { if (safePageIndex > 0) currentPageIndex-- },
@@ -543,29 +709,44 @@ fun VoucherPrintScreen(
                             onNetworkNameChange = { networkName = it },
                             contactPhone = contactPhone,
                             onContactPhoneChange = { contactPhone = it },
+                            showSerialNumber = showSerialNumber,
+                            onShowSerialNumberChange = { showSerialNumber = it },
+                            serialPrefix = serialPrefix,
+                            onSerialPrefixChange = { serialPrefix = it },
+                            serialCorner = serialCorner,
+                            onSerialCornerChange = { serialCorner = it },
+                            serialOffsetX = serialOffsetX,
+                            onSerialOffsetXChange = { serialOffsetX = it },
+                            serialOffsetY = serialOffsetY,
+                            onSerialOffsetYChange = { serialOffsetY = it },
+                            serialFontSizeSp = serialFontSizeSp,
+                            onSerialFontSizeChange = { serialFontSizeSp = it },
                             onPrintClick = {
-                                onMarkPrinted?.invoke()
-                                VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                                executePrintOrExport {
+                                    VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                                }
                             },
                             onExportPdfClick = {
-                                onMarkPrinted?.invoke()
-                                Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
-                                VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
-                                    if (file != null) {
-                                        VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
-                                    } else {
-                                        Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                executePrintOrExport {
+                                    Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
+                                    VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
+                                        if (file != null) {
+                                            VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
+                                        } else {
+                                            Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             },
                             onExportImageClick = {
-                                onMarkPrinted?.invoke()
-                                Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
-                                VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
-                                    if (file != null) {
-                                        VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
-                                    } else {
-                                        Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                executePrintOrExport {
+                                    Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
+                                    VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
+                                        if (file != null) {
+                                            VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
+                                        } else {
+                                            Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             }
@@ -595,6 +776,14 @@ fun VoucherPrintScreen(
                             customCodeColorArgb = customCodeColorArgb,
                             networkName = networkName,
                             contactPhone = contactPhone,
+                            showSerialNumber = showSerialNumber,
+                            serialPrefix = serialPrefix,
+                            serialCorner = serialCorner,
+                            serialOffsetX = serialOffsetX,
+                            serialOffsetY = serialOffsetY,
+                            serialFontSizeSp = serialFontSizeSp,
+                            serialMap = effectiveSerialMap,
+                            startIndex = startIndex,
                             safePageIndex = safePageIndex,
                             totalPages = totalPages,
                             onPrevPage = { if (safePageIndex > 0) currentPageIndex-- },
@@ -693,29 +882,44 @@ fun VoucherPrintScreen(
                                         onNetworkNameChange = { networkName = it },
                                         contactPhone = contactPhone,
                                         onContactPhoneChange = { contactPhone = it },
+                                        showSerialNumber = showSerialNumber,
+                                        onShowSerialNumberChange = { showSerialNumber = it },
+                                        serialPrefix = serialPrefix,
+                                        onSerialPrefixChange = { serialPrefix = it },
+                                        serialCorner = serialCorner,
+                                        onSerialCornerChange = { serialCorner = it },
+                                        serialOffsetX = serialOffsetX,
+                                        onSerialOffsetXChange = { serialOffsetX = it },
+                                        serialOffsetY = serialOffsetY,
+                                        onSerialOffsetYChange = { serialOffsetY = it },
+                                        serialFontSizeSp = serialFontSizeSp,
+                                        onSerialFontSizeChange = { serialFontSizeSp = it },
                                         onPrintClick = {
-                                            onMarkPrinted?.invoke()
-                                            VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                                            executePrintOrExport {
+                                                VoucherPrintUtils.printVouchers(context, cards, currentConfig)
+                                            }
                                         },
                                         onExportPdfClick = {
-                                            onMarkPrinted?.invoke()
-                                            Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
-                                            VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
-                                                if (file != null) {
-                                                    VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
-                                                } else {
-                                                    Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                            executePrintOrExport {
+                                                Toast.makeText(context, "جاري إنشاء ملف PDF...", Toast.LENGTH_SHORT).show()
+                                                VoucherPrintUtils.exportToPdf(context, cards, currentConfig) { file ->
+                                                    if (file != null) {
+                                                        VoucherPrintUtils.shareFile(context, file, "application/pdf", "مشاركة ملف PDF لكروت الهوتسبوت")
+                                                    } else {
+                                                        Toast.makeText(context, "فشل إنشاء ملف PDF", Toast.LENGTH_SHORT).show()
+                                                    }
                                                 }
                                             }
                                         },
                                         onExportImageClick = {
-                                            onMarkPrinted?.invoke()
-                                            Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
-                                            VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
-                                                if (file != null) {
-                                                    VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
-                                                } else {
-                                                    Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                            executePrintOrExport {
+                                                Toast.makeText(context, "جاري تصدير الصورة...", Toast.LENGTH_SHORT).show()
+                                                VoucherPrintUtils.exportPageToImage(context, cards, safePageIndex, currentConfig) { file ->
+                                                    if (file != null) {
+                                                        VoucherPrintUtils.shareFile(context, file, "image/png", "مشاركة صورة كروت الهوتسبوت")
+                                                    } else {
+                                                        Toast.makeText(context, "فشل تصدير الصورة", Toast.LENGTH_SHORT).show()
+                                                    }
                                                 }
                                             }
                                         }
@@ -749,6 +953,14 @@ fun SheetPreviewArea(
     customCodeColorArgb: Int,
     networkName: String,
     contactPhone: String,
+    showSerialNumber: Boolean,
+    serialPrefix: String,
+    serialCorner: SerialCorner,
+    serialOffsetX: Float,
+    serialOffsetY: Float,
+    serialFontSizeSp: Float,
+    serialMap: Map<String, String>,
+    startIndex: Int,
     safePageIndex: Int,
     totalPages: Int,
     onPrevPage: () -> Unit,
@@ -852,6 +1064,10 @@ fun SheetPreviewArea(
                                     .padding(if (templateType == CardTemplateType.CUSTOM_IMAGE) 0.dp else 1.dp)
                             ) {
                                 if (card != null) {
+                                    val resolvedDigits = serialMap[card.name]
+                                        ?: serialMap[card.id]
+                                        ?: VoucherSerialEngine.extractCardSerial(card)?.let { VoucherSerialEngine.formatSerialDigits(it) }
+                                        ?: VoucherSerialEngine.formatSerialDigits((startIndex + cardIndex + 1).toLong())
                                     SingleCardRender(
                                         card = card,
                                         offsetX = offsetX,
@@ -861,7 +1077,13 @@ fun SheetPreviewArea(
                                         customBitmap = customBitmap,
                                         customCodeColorArgb = customCodeColorArgb,
                                         networkName = networkName,
-                                        contactPhone = contactPhone
+                                        contactPhone = contactPhone,
+                                        showSerialNumber = showSerialNumber,
+                                        serialLabel = "$serialPrefix$resolvedDigits",
+                                        serialCorner = serialCorner,
+                                        serialOffsetX = serialOffsetX,
+                                        serialOffsetY = serialOffsetY,
+                                        serialFontSizeSp = serialFontSizeSp
                                     )
                                 }
                             }
@@ -886,11 +1108,18 @@ fun SingleCardRender(
     customBitmap: Bitmap?,
     customCodeColorArgb: Int,
     networkName: String,
-    contactPhone: String
+    contactPhone: String,
+    showSerialNumber: Boolean = false,
+    serialLabel: String = "",
+    serialCorner: SerialCorner = SerialCorner.TOP_END,
+    serialOffsetX: Float = 0f,
+    serialOffsetY: Float = 0f,
+    serialFontSizeSp: Float = 8f
 ) {
-    val priceNum = card.price.replace(Regex("[^0-9]"), "").ifEmpty { "500" }
-    val timeLimit = if (card.limitUptime.isNotBlank()) card.limitUptime else "20 ساعة"
-    val quotaMb = if (card.limitBytesTotal > 0) "${card.limitBytesTotal / (1024 * 1024)} ميجا" else "1024 ميجا"
+    val normalizedPrice = com.example.data.util.FinanceAnalyticsEngine.normalizeDigits(card.price)
+    val priceNum = Regex("""\d+(?:\.\d+)?""").find(normalizedPrice)?.value ?: "0"
+    val timeLimit = if (card.limitUptime.isNotBlank()) card.limitUptime else "مفتوح"
+    val quotaMb = if (card.limitBytesTotal > 0L) "${card.limitBytesTotal / (1024L * 1024L)} ميجا" else "مفتوح"
 
     val badgeColor = when (templateType) {
         CardTemplateType.VIP_GOLD -> Color(0xFFD4A017)
@@ -903,6 +1132,8 @@ fun SingleCardRender(
             .fillMaxSize()
             .clipToBounds()
     ) {
+        val boxConstraints = constraints
+        val boxMaxHeight = maxHeight
         // Custom Image Mode: strictly clear previous design & info, render ONLY image + card code
         if (templateType == CardTemplateType.CUSTOM_IMAGE) {
             if (customBitmap != null && !customBitmap.isRecycled) {
@@ -913,9 +1144,9 @@ fun SingleCardRender(
                     contentScale = ContentScale.FillBounds
                 )
             }
-            val offsetXPx = ((offsetX / 100f) * constraints.maxWidth * 0.45f).roundToInt()
-            val offsetYPx = ((offsetY / 50f) * constraints.maxHeight * 0.45f).roundToInt()
-            val scaledCodeFontSp = (maxHeight.value * 0.22f * (fontSizeSp / 14f)).coerceAtLeast(5f)
+            val offsetXPx = ((offsetX / 100f) * boxConstraints.maxWidth * 0.45f).roundToInt()
+            val offsetYPx = ((offsetY / 50f) * boxConstraints.maxHeight * 0.45f).roundToInt()
+            val scaledCodeFontSp = (boxMaxHeight.value * 0.22f * (fontSizeSp / 14f)).coerceAtLeast(5f)
 
             Box(
                 modifier = Modifier
@@ -964,7 +1195,10 @@ fun SingleCardRender(
                         overflow = TextOverflow.Ellipsis
                     )
 
-                    // Login Code with custom offsets & font size
+                    val builtinOffsetXPx = ((offsetX / 100f) * boxConstraints.maxWidth * 0.45f).roundToInt()
+                    val builtinOffsetYPx = ((offsetY / 50f) * boxConstraints.maxHeight * 0.45f).roundToInt()
+                    val scaledBuiltinFontSp = (boxMaxHeight.value * 0.22f * (fontSizeSp / 14f)).coerceAtLeast(4.5f)
+                    // Login Code with custom offsets, font size, & color
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center,
@@ -972,8 +1206,8 @@ fun SingleCardRender(
                             .fillMaxWidth()
                             .offset {
                                 IntOffset(
-                                    x = (offsetX * 0.4f).roundToInt(),
-                                    y = (offsetY * 0.2f).roundToInt()
+                                    x = builtinOffsetXPx,
+                                    y = builtinOffsetYPx
                                 )
                             }
                     ) {
@@ -985,10 +1219,12 @@ fun SingleCardRender(
                         )
                         Text(
                             text = card.name,
-                            fontSize = (fontSizeSp * 0.5f).sp,
+                            fontSize = scaledBuiltinFontSp.sp,
                             fontWeight = FontWeight.Black,
                             fontFamily = FontFamily.Monospace,
-                            color = Color(0xFF0D1B2A)
+                            color = Color(customCodeColorArgb),
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
 
@@ -1029,6 +1265,37 @@ fun SingleCardRender(
                 }
             }
         }
+
+        if (showSerialNumber && serialLabel.isNotBlank()) {
+            val snOffsetXPx = ((serialOffsetX / 100f) * boxConstraints.maxWidth * 0.45f).roundToInt()
+            val snOffsetYPx = ((serialOffsetY / 50f) * boxConstraints.maxHeight * 0.45f).roundToInt()
+            val snFontSp = (boxMaxHeight.value * 0.135f * (serialFontSizeSp / 8f)).coerceAtLeast(3.8f)
+            val snAlign = when (serialCorner) {
+                SerialCorner.TOP_START -> Alignment.TopStart
+                SerialCorner.TOP_END -> Alignment.TopEnd
+                SerialCorner.BOTTOM_START -> Alignment.BottomStart
+                SerialCorner.BOTTOM_END -> Alignment.BottomEnd
+            }
+            val rightReserveDp = if (templateType == CardTemplateType.CUSTOM_IMAGE) 3.dp else 18.dp
+            Text(
+                text = serialLabel,
+                fontSize = snFontSp.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+                color = if (templateType == CardTemplateType.CUSTOM_IMAGE) Color(customCodeColorArgb) else Color(0xFF263238),
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier
+                    .align(snAlign)
+                    .padding(
+                        start = if (serialCorner == SerialCorner.TOP_START || serialCorner == SerialCorner.BOTTOM_START) rightReserveDp else 3.dp,
+                        end = if (serialCorner == SerialCorner.TOP_END || serialCorner == SerialCorner.BOTTOM_END) 3.dp else 2.dp,
+                        top = 1.dp,
+                        bottom = 1.dp
+                    )
+                    .offset { IntOffset(x = snOffsetXPx, y = snOffsetYPx) }
+            )
+        }
     }
 }
 
@@ -1066,6 +1333,18 @@ fun CustomizationControlPanel(
     onNetworkNameChange: (String) -> Unit,
     contactPhone: String,
     onContactPhoneChange: (String) -> Unit,
+    showSerialNumber: Boolean,
+    onShowSerialNumberChange: (Boolean) -> Unit,
+    serialPrefix: String,
+    onSerialPrefixChange: (String) -> Unit,
+    serialCorner: SerialCorner,
+    onSerialCornerChange: (SerialCorner) -> Unit,
+    serialOffsetX: Float,
+    onSerialOffsetXChange: (Float) -> Unit,
+    serialOffsetY: Float,
+    onSerialOffsetYChange: (Float) -> Unit,
+    serialFontSizeSp: Float,
+    onSerialFontSizeChange: (Float) -> Unit,
     onPrintClick: () -> Unit,
     onExportPdfClick: () -> Unit,
     onExportImageClick: () -> Unit
@@ -1472,6 +1751,158 @@ fun CustomizationControlPanel(
                 .testTag("contact_phone_card_input")
         )
 
+        Spacer(modifier = Modifier.height(4.dp))
+        HorizontalDivider(color = Color(0xFF1E3A5F), thickness = 1.dp)
+
+        // Section 4B: الرقم التسلسلي على الكرت (Flexible Serial Display & Placement)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "إظهار الرقم التسلسلي على الكرت",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                Text(
+                    text = "ترقيم مطبوع قابل للتحريك والتخصيص",
+                    fontSize = 11.sp,
+                    color = Color(0xFFB0BEC5)
+                )
+            }
+            Switch(
+                checked = showSerialNumber,
+                onCheckedChange = onShowSerialNumberChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Color(0xFF0288D1)
+                ),
+                modifier = Modifier.testTag("toggle_show_serial_switch")
+            )
+        }
+
+        AnimatedVisibility(visible = showSerialNumber) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(text = "بادئة التسلسل :", color = Color(0xFFB0BEC5), fontSize = 12.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf("#" to "#", "S/N:" to "S/N:", "رقم:" to "رقم:", "" to "رقم فقط").forEach { (prefixVal, label) ->
+                        FilterChip(
+                            selected = serialPrefix == prefixVal,
+                            onClick = { onSerialPrefixChange(prefixVal) },
+                            label = { Text(label, fontSize = 11.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF0288D1),
+                                selectedLabelColor = Color.White,
+                                containerColor = Color(0xFF15334E),
+                                labelColor = Color(0xFFECEFF1)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                Text(text = "زاوية العرض على الكرت :", color = Color(0xFFB0BEC5), fontSize = 12.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(SerialCorner.TOP_START, SerialCorner.TOP_END).forEach { corner ->
+                        FilterChip(
+                            selected = serialCorner == corner,
+                            onClick = { onSerialCornerChange(corner) },
+                            label = { Text(corner.labelAr, fontSize = 10.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF0288D1),
+                                selectedLabelColor = Color.White,
+                                containerColor = Color(0xFF15334E),
+                                labelColor = Color(0xFFECEFF1)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(SerialCorner.BOTTOM_START, SerialCorner.BOTTOM_END).forEach { corner ->
+                        FilterChip(
+                            selected = serialCorner == corner,
+                            onClick = { onSerialCornerChange(corner) },
+                            label = { Text(corner.labelAr, fontSize = 10.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF0288D1),
+                                selectedLabelColor = Color.White,
+                                containerColor = Color(0xFF15334E),
+                                labelColor = Color(0xFFECEFF1)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                // Serial Horizontal Offset
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(text = "إزاحة التسلسل أفقياً :", color = Color(0xFFB0BEC5), fontSize = 12.sp)
+                        Text(text = "${serialOffsetX.roundToInt()}%", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = serialOffsetX,
+                        onValueChange = onSerialOffsetXChange,
+                        valueRange = -100f..100f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color.White,
+                            activeTrackColor = Color(0xFF0288D1),
+                            inactiveTrackColor = Color(0xFF1E3A5F)
+                        )
+                    )
+                }
+
+                // Serial Vertical Offset
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(text = "إزاحة التسلسل عمودياً :", color = Color(0xFFB0BEC5), fontSize = 12.sp)
+                        Text(text = "${serialOffsetY.roundToInt()}%", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = serialOffsetY,
+                        onValueChange = onSerialOffsetYChange,
+                        valueRange = -50f..50f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color.White,
+                            activeTrackColor = Color(0xFF0288D1),
+                            inactiveTrackColor = Color(0xFF1E3A5F)
+                        )
+                    )
+                }
+
+                // Serial Font Size
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(text = "حجم خط التسلسل :", color = Color(0xFFB0BEC5), fontSize = 12.sp)
+                        Text(text = "${serialFontSizeSp.roundToInt()}sp", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = serialFontSizeSp,
+                        onValueChange = onSerialFontSizeChange,
+                        valueRange = 5f..16f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color.White,
+                            activeTrackColor = Color(0xFF0288D1),
+                            inactiveTrackColor = Color(0xFF1E3A5F)
+                        )
+                    )
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(6.dp))
 
         // Section 5: Big Action Buttons
@@ -1549,10 +1980,25 @@ fun HdPreviewDialog(
 
     LaunchedEffect(pageIndex, config) {
         isLoading = true
-        previewBitmap = withContext(Dispatchers.IO) {
+        val prev = previewBitmap
+        val rendered = withContext(Dispatchers.IO) {
             VoucherPrintUtils.renderPageBitmap(context, cards, pageIndex, config, targetWidth = 1800)
         }
+        previewBitmap = rendered
+        if (prev != null && prev !== rendered && !prev.isRecycled) {
+            try { prev.recycle() } catch (_: Exception) {}
+        }
         isLoading = false
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            val bmp = previewBitmap
+            previewBitmap = null
+            if (bmp != null && !bmp.isRecycled) {
+                try { bmp.recycle() } catch (_: Exception) {}
+            }
+        }
     }
 
     androidx.compose.ui.window.Dialog(

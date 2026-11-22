@@ -110,7 +110,7 @@ fun DashboardScreen(
     var showRebootDialog by remember { mutableStateOf(false) }
 
     val isConnectedAsDemo = (connectionState as? ConnectionState.Connected)?.isDemo == true
-    val connectedIp = (connectionState as? ConnectionState.Connected)?.ipAddress ?: "192.168.88.1"
+    val connectedIp = (connectionState as? ConnectionState.Connected)?.ipAddress ?: "غير محدد"
     val connectedRouterName = (connectionState as? ConnectionState.Connected)?.routerName ?: resource.boardName
 
     val onlineNodesCount = remember(networkNodes) { networkNodes.count { it.isOnline } }
@@ -251,18 +251,23 @@ fun DashboardScreen(
                             }
                         }
 
+                        val netProfitColor = if (revenueSummary.totalNetProfit < 0.0) StatusErrorRed else Color(0xFF00B0FF)
                         Surface(
-                            color = Color(0xFF00B0FF).copy(alpha = 0.1f),
+                            color = netProfitColor.copy(alpha = 0.1f),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.weight(1f)
                         ) {
                             Column(modifier = Modifier.padding(10.dp)) {
-                                Text("صافي الأرباح", style = MaterialTheme.typography.labelSmall, color = Color(0xFF00B0FF))
+                                Text(
+                                    if (revenueSummary.totalNetProfit < 0.0) "صافي الخسارة" else "صافي الأرباح",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = netProfitColor
+                                )
                                 Text(
                                     "${"%,d".format(revenueSummary.totalNetProfit.toLong())} ر.ي",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF00B0FF)
+                                    color = netProfitColor
                                 )
                             }
                         }

@@ -25,7 +25,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RouterTaskEntity::class,
         MaterializedSummaryEntity::class
     ],
-    version = 19,
+    version = 20,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -79,6 +79,73 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Clean any legacy orphan rows whose parent agent no longer exists before enforcing FK
+                db.execSQL("DELETE FROM pos_card_assignments WHERE agentId NOT IN (SELECT id FROM pos_agents)")
+                db.execSQL("DELETE FROM pos_payments WHERE agentId NOT IN (SELECT id FROM pos_agents)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS pos_card_assignments_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        agentId INTEGER NOT NULL,
+                        agentName TEXT NOT NULL,
+                        cardName TEXT NOT NULL,
+                        batchId TEXT NOT NULL,
+                        profileName TEXT NOT NULL,
+                        priceAmount REAL NOT NULL,
+                        discountPercent REAL NOT NULL,
+                        assignedAt INTEGER NOT NULL,
+                        isSold INTEGER NOT NULL,
+                        soldAt INTEGER NOT NULL,
+                        FOREIGN KEY(agentId) REFERENCES pos_agents(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO pos_card_assignments_new (id, agentId, agentName, cardName, batchId, profileName, priceAmount, discountPercent, assignedAt, isSold, soldAt)
+                    SELECT id, agentId, agentName, cardName, batchId, profileName, priceAmount, discountPercent, assignedAt, isSold, soldAt
+                    FROM pos_card_assignments
+                    """.trimIndent()
+                )
+                db.execSQL("DROP TABLE pos_card_assignments")
+                db.execSQL("ALTER TABLE pos_card_assignments_new RENAME TO pos_card_assignments")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pos_card_assignments_agentId ON pos_card_assignments(agentId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pos_card_assignments_isSold ON pos_card_assignments(isSold)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pos_card_assignments_batchId ON pos_card_assignments(batchId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pos_card_assignments_cardName ON pos_card_assignments(cardName)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pos_card_assignments_soldAt ON pos_card_assignments(soldAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pos_card_assignments_agentId_isSold ON pos_card_assignments(agentId, isSold)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS pos_payments_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        agentId INTEGER NOT NULL,
+                        agentName TEXT NOT NULL,
+                        amount REAL NOT NULL,
+                        paymentDate INTEGER NOT NULL,
+                        paymentNote TEXT NOT NULL,
+                        FOREIGN KEY(agentId) REFERENCES pos_agents(id) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO pos_payments_new (id, agentId, agentName, amount, paymentDate, paymentNote)
+                    SELECT id, agentId, agentName, amount, paymentDate, paymentNote
+                    FROM pos_payments
+                    """.trimIndent()
+                )
+                db.execSQL("DROP TABLE pos_payments")
+                db.execSQL("ALTER TABLE pos_payments_new RENAME TO pos_payments")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pos_payments_agentId ON pos_payments(agentId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pos_payments_paymentDate ON pos_payments(paymentDate)")
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -89,8 +156,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "netmanager_database"
                 )
-                    .addMigrations(MIGRATION_18_19)
-                    .fallbackToDestructiveMigration()
+                    .addMigrations(MIGRATION_18_19, MIGRATION_19_20)
                     .build()
                 INSTANCE = instance
                 instance

@@ -67,9 +67,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.HotspotCard
 import com.example.data.model.HotspotProfile
+import com.example.data.util.FinanceAnalyticsEngine
 import com.example.ui.theme.CyberGreenBright
 import com.example.ui.theme.CyberGreenPrimary
 import com.example.ui.theme.NetworkCyan
+import com.example.ui.theme.StatusErrorRed
 import com.example.ui.viewmodel.MainViewModel
 import com.example.ui.viewmodel.ProfileSystemFilter
 import androidx.compose.material3.FilterChip
@@ -80,9 +82,9 @@ data class ProfileDisplayStats(
     val unusedCount: Int = 0,
     val expiredCount: Int = 0,
     val soldCount: Int = 0,
-    val salePrice: Double = 500.0,
-    val costPrice: Double = 200.0,
-    val profitPerCard: Double = 300.0,
+    val salePrice: Double = 0.0,
+    val costPrice: Double = 0.0,
+    val profitPerCard: Double = 0.0,
     val profileRevenue: Double = 0.0,
     val profileNetProfit: Double = 0.0
 )
@@ -120,9 +122,12 @@ fun ProfilesScreen(
             val sold = pCards.count { it.isActive || it.isExpired || (it.uptime.isNotBlank() && it.uptime != "0s") || it.bytesIn > 0L || it.bytesOut > 0L }
 
             val pricing = pricingMap[profile.name.trim().lowercase()]
-            val salePrice = pricing?.salePrice ?: profile.priceNumber.takeIf { it > 0 } ?: profile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
-            val costPrice = pricing?.costPrice ?: profile.costPrice.takeIf { it > 0 } ?: (salePrice * 0.40)
-            val profitPerCard = (salePrice - costPrice).coerceAtLeast(0.0)
+            val salePrice = pricing?.salePrice
+                ?: profile.priceNumber.takeIf { it > 0.0 }
+                ?: FinanceAnalyticsEngine.parsePriceValue(profile.price).takeIf { it > 0.0 }
+                ?: 0.0
+            val costPrice = pricing?.costPrice ?: profile.costPrice.takeIf { it > 0.0 } ?: 0.0
+            val profitPerCard = salePrice - costPrice
             val rev = sold * salePrice
             val net = sold * profitPerCard
 
@@ -372,7 +377,7 @@ fun ProfilesScreen(
             },
             onConfirm = { newProfile ->
                 viewModel.createProfile(newProfile)
-                val saleNum = newProfile.price.filter { it.isDigit() }.toDoubleOrNull() ?: 500.0
+                val saleNum = FinanceAnalyticsEngine.parsePriceValue(newProfile.price)
                 viewModel.updatePackageCostAndPrice(newProfile.name, newProfile.costPrice, saleNum)
                 showAddDialog = false
                 initialTemplateForAdd = null
@@ -523,7 +528,7 @@ fun ProfileCardItem(
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Text(
-                            text = profile.price.ifBlank { "500 ر.ي" },
+                            text = profile.price.ifBlank { "غير مسعر" },
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -655,6 +660,9 @@ fun ProfileCardItem(
                         .padding(8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    val profitAccent = if (profitPerCard >= 0.0) CyberGreenBright else StatusErrorRed
+                    val netAccent = if (profileNetProfit >= 0.0) CyberGreenBright else StatusErrorRed
+                    val profitSign = if (profitPerCard > 0.0) "+" else ""
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -667,14 +675,14 @@ fun ProfileCardItem(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Surface(
-                            color = CyberGreenPrimary.copy(alpha = 0.15f),
+                            color = (if (profitPerCard >= 0.0) CyberGreenPrimary else StatusErrorRed).copy(alpha = 0.15f),
                             shape = RoundedCornerShape(4.dp)
                         ) {
                             Text(
-                                text = "ربح الكرت: +${profitPerCard.toInt()} ر.ي",
+                                text = "ربح الكرت: $profitSign${profitPerCard.toInt()} ر.ي",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
-                                color = CyberGreenBright,
+                                color = profitAccent,
                                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
                                 fontSize = 10.sp
                             )
@@ -692,10 +700,10 @@ fun ProfileCardItem(
                             fontSize = 10.sp
                         )
                         Text(
-                            text = "صافي الربح: ${profileNetProfit.toLong()} ر.ي",
+                            text = "${if (profileNetProfit < 0.0) "صافي الخسارة" else "صافي الربح"}: ${profileNetProfit.toLong()} ر.ي",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = CyberGreenBright
+                            color = netAccent
                         )
                     }
 
@@ -979,8 +987,8 @@ fun ProfileDetailsDialog(
                 ProfileDetailItem(label = "تحديد السرعة (Rate Limit)", value = if (profile.rateLimit.isNotBlank() && profile.rateLimit != "غير محدد") profile.rateLimit else "مفتوح (حسب إعدادات الراوتر)")
                 ProfileDetailItem(label = "الأجهزة المسموحة (Shared Users)", value = "${profile.sharedUsers} جهاز")
                 ProfileDetailItem(label = "مهلة الجلسة (Session Timeout)", value = if (profile.sessionTimeout.isNotBlank() && profile.sessionTimeout != "غير محدد") profile.sessionTimeout else "غير محدد")
-                ProfileDetailItem(label = "مهلة الخمول (Keepalive)", value = profile.keepaliveTimeout.ifBlank { "5m" })
-                ProfileDetailItem(label = "سعر البيع المقترح", value = profile.price.ifBlank { "500 ر.ي" })
+                ProfileDetailItem(label = "مهلة الخمول (Keepalive)", value = profile.keepaliveTimeout.ifBlank { "غير محدد" })
+                ProfileDetailItem(label = "سعر البيع المقترح", value = profile.price.ifBlank { "غير محدد" })
                 ProfileDetailItem(label = "نوع الباقة ومصدرها", value = if (profile.source.contains("usermanager")) "يوزرمانجر (User Manager)" else "هوتسبوت ميكروتك (Hotspot Profile)")
                 if (profile.comment.isNotBlank()) {
                     ProfileDetailItem(label = "ملاحظات الراوتر", value = profile.comment)

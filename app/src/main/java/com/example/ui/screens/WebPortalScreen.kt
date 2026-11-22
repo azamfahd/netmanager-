@@ -7,18 +7,26 @@ import android.graphics.Bitmap
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.Uri
-import android.os.Message
+import android.net.http.SslError
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.print.PrintAttributes
 import android.print.PrintManager
 import android.util.Base64
+import android.view.ViewGroup
+import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.MimeTypeMap
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.SslErrorHandler
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -60,6 +68,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -80,6 +89,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -160,16 +170,19 @@ private object PortalBookmarkStore {
 }
 
 private class WebPortalJsBridge(
+    private val isHostAuthorized: () -> Boolean,
     private val onDataPayload: (base64DataUrl: String, fileName: String, mimeType: String) -> Unit,
     private val onPrintRequested: () -> Unit
 ) {
     @JavascriptInterface
     fun saveBase64File(dataUrl: String, fileName: String, mimeType: String) {
+        if (!isHostAuthorized()) return
         onDataPayload(dataUrl, fileName, mimeType)
     }
 
     @JavascriptInterface
     fun triggerNativePrint() {
+        if (!isHostAuthorized()) return
         onPrintRequested()
     }
 }
@@ -182,17 +195,25 @@ fun WebPortalScreen(
     onDisconnect: () -> Unit,
     onRetryApiConnection: (() -> Unit)? = null,
     onArchiveSaved: ((CachedPortalMeta) -> Unit)? = null,
+    onActivityRecorded: ((actionType: String, target: String, description: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var webViewKey by remember(portalState.url) { mutableIntStateOf(0) }
     var loadProgress by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
+    var isHydratingContent by remember { mutableStateOf(false) }
     var currentUrl by remember(portalState.url) { mutableStateOf(portalState.url) }
+    val latestAuthorizedUrlRef = remember(portalState.url) { java.util.concurrent.atomic.AtomicReference(portalState.url) }
     var pageTitle by remember(portalState.url) { mutableStateOf(portalState.serverName) }
     var mainFrameError by remember(portalState.url) { mutableStateOf<String?>(null) }
+    var partialLoadWarning by remember(portalState.url) { mutableStateOf<String?>(null) }
+    var autoCacheRecoveryAttempted by remember(portalState.url) { mutableStateOf(false) }
     var lastAutoFilledUrl by remember(portalState.url) { mutableStateOf<String?>(null) }
+    var lastSnapshotUrl by remember(portalState.url) { mutableStateOf<String?>(null) }
+    var lastRecordedPathUrl by remember(portalState.url) { mutableStateOf<String?>(null) }
     var pendingUploadCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     var bookmarks by remember(portalState.url) {
         mutableStateOf(PortalBookmarkStore.load(context, portalState.url))
@@ -208,6 +229,19 @@ fun WebPortalScreen(
         portalState.cachedArchivePath?.takeIf { it.isNotBlank() }?.let { File(it) }
             ?: WebPortalCacheManager.getArchiveTargetFile(context, portalState.url)
     }
+    fun isHostAuthorizedForUrl(candidateUrl: String?): Boolean {
+        val raw = candidateUrl.orEmpty()
+        if (raw.startsWith("file://", ignoreCase = true)) {
+            return runCatching { Uri.parse(raw).path == archiveFile.absolutePath }.getOrDefault(false)
+        }
+        val candidateHost = runCatching { Uri.parse(raw).host?.lowercase() }.getOrNull().orEmpty()
+        val expectedHost = hostName.lowercase()
+        if (expectedHost.isBlank()) return candidateHost.isNotBlank()
+        if (candidateHost.isBlank()) return false
+        return candidateHost == expectedHost ||
+            candidateHost.endsWith(".$expectedHost") ||
+            (isLocalHost && RouterConnectionParser.isPrivateOrLocalIpv4(candidateHost))
+    }
     var hasSavedArchive by remember(portalState.url) {
         mutableStateOf(archiveFile.exists() && archiveFile.length() > 0L)
     }
@@ -221,21 +255,28 @@ fun WebPortalScreen(
         mutableStateOf(portalState.isOfflinePreview || (!isLocalHost && !NetworkUtils.isNetworkOnline(context) && archiveFile.exists()))
     }
     val isEffectiveOffline = showingOfflineArchive || (!isLocalHost && !isDeviceOnline)
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
     DisposableEffect(context) {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                isDeviceOnline = true
+                mainHandler.post {
+                    isDeviceOnline = true
+                }
             }
 
             override fun onLost(network: Network) {
-                isDeviceOnline = NetworkUtils.isNetworkOnline(context)
+                val onlineNow = NetworkUtils.isNetworkOnline(context)
+                mainHandler.post {
+                    isDeviceOnline = onlineNow
+                }
             }
         }
         runCatching { cm?.registerDefaultNetworkCallback(callback) }
         onDispose {
             runCatching { cm?.unregisterNetworkCallback(callback) }
+            runCatching { CookieManager.getInstance().flush() }
         }
     }
 
@@ -244,6 +285,7 @@ fun WebPortalScreen(
             val targetLiveUrl = currentUrl.takeIf { it.startsWith("http", ignoreCase = true) } ?: portalState.url
             showingOfflineArchive = false
             mainFrameError = null
+            partialLoadWarning = null
             webViewRef?.settings?.cacheMode = WebSettings.LOAD_DEFAULT
             webViewRef?.loadUrl(targetLiveUrl)
             Toast.makeText(context, "✅ عاد الاتصال بالإنترنت — جاري التحديث المباشر", Toast.LENGTH_SHORT).show()
@@ -267,12 +309,20 @@ fun WebPortalScreen(
             .build()
     }
 
+    fun recordPortalMovement(actionType: String, target: String, description: String) {
+        onActivityRecorded?.invoke(actionType, target, description)
+        scope.launch(Dispatchers.IO) {
+            WebPortalCacheManager.appendPortalActivity(context, portalState.url, "$actionType: $target")
+        }
+    }
+
     fun printCurrentWebView(view: WebView?) {
         if (view == null) return
         val printManager = context.getSystemService(Context.PRINT_SERVICE) as? PrintManager ?: return
         val cleanName = pageTitle.ifBlank { portalState.serverName }.take(40).ifBlank { "PortalPage" }
         val adapter = view.createPrintDocumentAdapter(cleanName)
         printManager.print(cleanName, adapter, PrintAttributes.Builder().build())
+        recordPortalMovement("طباعة", cleanName, "طباعة / تصدير PDF من لوحة الويب ($currentUrl)")
     }
 
     fun openExportedFile(file: File, mimeType: String) {
@@ -314,6 +364,7 @@ fun WebPortalScreen(
                 val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
                 val outFile = File(exportDir, safeName)
                 outFile.writeBytes(bytes)
+                recordPortalMovement("تصدير ملف", safeName, "تم تصدير وحفظ الملف ($safeName) من لوحة التحكم")
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "تم تجهيز الملف: $safeName", Toast.LENGTH_SHORT).show()
                     openExportedFile(outFile, detectedMime)
@@ -359,6 +410,7 @@ fun WebPortalScreen(
                     resp.body?.byteStream()?.use { input ->
                         outFile.outputStream().use { output -> input.copyTo(output) }
                     }
+                    recordPortalMovement("تحميل ملف", guessed, "تم تنزيل الملف ($guessed) من ($fileUrl)")
                     withContext(Dispatchers.Main) {
                         openExportedFile(outFile, respMime)
                     }
@@ -373,6 +425,13 @@ fun WebPortalScreen(
 
     fun injectCredentialsAutoFill(view: WebView?, showFeedback: Boolean) {
         if (view == null) return
+        val activePageUrl = view.url.orEmpty().ifBlank { currentUrl }
+        if (!isHostAuthorizedForUrl(activePageUrl)) {
+            if (showFeedback) {
+                Toast.makeText(context, "التعبئة التلقائية مقيدة بنطاق البوابة الأصلي لحمايتك", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
         val user = portalState.username.trim()
         val pass = portalState.password
         if (user.isBlank() && pass.isBlank()) {
@@ -436,11 +495,150 @@ fun WebPortalScreen(
             })();
         """.trimIndent()
         view.evaluateJavascript(js) { result ->
+            if (result == "true") {
+                recordPortalMovement("تعبئة الدخول", portalState.username, "تعبئة بيانات الدخول تلقائياً في صفحة ($currentUrl)")
+            }
             if (showFeedback) {
                 val msg = if (result == "true") "تمت تعبئة البريد/المستخدم وكلمة المرور في الصفحة" else "لم يتم العثور على حقول تسجيل دخول فارغة في الصفحة الحالية"
                 Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    /**
+     * Waits until SPA main content (excluding header/nav/sidebar/footer chrome) has genuinely hydrated
+     * so loading doesn't dismiss early and valid offline MHT archives are never overwritten by blank shells.
+     */
+    fun scheduleHydratedSnapshot(view: WebView?, targetUrl: String, attempt: Int = 0) {
+        if (view == null || !targetUrl.startsWith("http", ignoreCase = true)) return
+        val delayMs = when (attempt) {
+            0 -> 900L
+            1 -> 1500L
+            2 -> 2200L
+            else -> 2800L
+        }
+        view.postDelayed({
+            val checkJs = """
+                (function() {
+                    var state = document.readyState || '';
+                    var mainEl = document.querySelector('main, [role="main"], .main-content, .page-content, .content-wrapper, .content');
+                    function stripChromeText(root) {
+                        if (!root) return '';
+                        try {
+                            var clone = root.cloneNode(true);
+                            var chrome = clone.querySelectorAll('nav, header, footer, aside, .sidebar, .navbar, .topbar, .app-footer, script, style');
+                            for (var i = 0; i < chrome.length; i++) {
+                                if (chrome[i] && chrome[i].parentNode) chrome[i].parentNode.removeChild(chrome[i]);
+                            }
+                            return (clone.innerText || '').trim();
+                        } catch (e) {
+                            return (root.innerText || '').trim();
+                        }
+                    }
+                    function countContentInteractive(root) {
+                        if (!root) return 0;
+                        var nodes = root.querySelectorAll('table tr, form, input:not([type="hidden"]), canvas, .card, [class*="card"], [class*="stat"], [class*="chart"]');
+                        var count = 0;
+                        for (var i = 0; i < nodes.length; i++) {
+                            if (!nodes[i].closest('nav, header, footer, aside, .sidebar, .navbar, .topbar')) {
+                                count++;
+                            }
+                        }
+                        return count;
+                    }
+                    var contentRoot = mainEl || document.querySelector('#app, #root') || document.body;
+                    var strippedText = stripChromeText(contentRoot);
+                    var contentText = strippedText.length;
+                    var mainInteractive = countContentInteractive(contentRoot);
+                    var loaderVisible = !!document.querySelector('[class*="spinner"]:not([style*="display: none"]), [class*="loading"]:not([style*="display: none"]), .v-progress-circular, .ant-spin-spinning');
+                    return JSON.stringify({
+                        state: state,
+                        contentText: contentText,
+                        interactive: mainInteractive,
+                        loading: loaderVisible
+                    });
+                })();
+            """.trimIndent()
+            view.evaluateJavascript(checkJs) { raw ->
+                val info = runCatching {
+                    val unwrapped = JSONObject(raw?.trim()?.let {
+                        if (it.startsWith("\"") && it.endsWith("\"")) JSONObject("{\"v\":$it}").getString("v") else it
+                    } ?: "{}")
+                    unwrapped
+                }.getOrNull()
+                val readyState = info?.optString("state").orEmpty()
+                val contentTextLen = info?.optInt("contentText", 0) ?: 0
+                val interactiveCount = info?.optInt("interactive", 0) ?: 0
+                val spinnerVisible = info?.optBoolean("loading", false) ?: false
+
+                val hasSubstantiveMainContent = contentTextLen >= 30 || interactiveCount >= 2
+                val isHydrated = readyState == "complete" && !spinnerVisible && hasSubstantiveMainContent
+                if (isHydrated) {
+                    isHydratingContent = false
+                    partialLoadWarning = null
+                    lastSnapshotUrl = targetUrl
+                    runCatching { CookieManager.getInstance().flush() }
+                    val targetFile = WebPortalCacheManager.getArchiveTargetFile(context, portalState.url)
+                    val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
+                    view.saveWebArchive(tempFile.absolutePath, false) { savedPath ->
+                        val candidateFile = savedPath?.takeIf { it.isNotBlank() }?.let { File(it) } ?: tempFile
+                        if (candidateFile.exists() && candidateFile.length() > 1024L) {
+                            val promoted = runCatching {
+                                if (candidateFile.absolutePath != targetFile.absolutePath) {
+                                    candidateFile.copyTo(targetFile, overwrite = true)
+                                    candidateFile.delete()
+                                }
+                                targetFile
+                            }.getOrNull()
+                            if (promoted != null && promoted.exists() && promoted.length() > 0L) {
+                                val now = System.currentTimeMillis()
+                                hasSavedArchive = true
+                                lastSavedTimeMs = now
+                                val meta = CachedPortalMeta(
+                                    host = hostName.ifBlank { portalState.url },
+                                    serverName = portalState.serverName,
+                                    baseUrl = portalState.url,
+                                    lastVisitedUrl = currentUrl,
+                                    lastPageTitle = pageTitle,
+                                    targetPathUrl = portalState.targetPathUrl,
+                                    username = portalState.username,
+                                    isAplusWifi = portalState.isAplusWifi,
+                                    isMikroTikWebFig = portalState.isMikroTikWebFig,
+                                    archiveFilePath = promoted.absolutePath,
+                                    lastSavedTime = now
+                                )
+                                WebPortalCacheManager.saveMeta(context, meta)
+                                onArchiveSaved?.invoke(meta)
+                            }
+                        } else {
+                            runCatching { candidateFile.delete() }
+                        }
+                    }
+                } else if (attempt < 3) {
+                    scheduleHydratedSnapshot(view, targetUrl, attempt + 1)
+                } else {
+                    isHydratingContent = false
+                    // Content stayed blank after multiple hydration checks on a non-login route: preserve existing valid MHT archive and show recovery banner
+                    val pathLower = runCatching { Uri.parse(targetUrl).path?.lowercase().orEmpty() }.getOrDefault("")
+                    if (pathLower.isNotBlank() && pathLower != "/" && !pathLower.contains("login") && !hasSubstantiveMainContent) {
+                        partialLoadWarning = "يبدو أن محتوى الصفحة لم يكتمل بسبب بطء الشبكة أو ملفات الكاش المؤقتة"
+                    }
+                }
+            }
+        }, delayMs)
+    }
+
+    fun reloadPortalWithoutCache(view: WebView?) {
+        if (view == null) return
+        mainFrameError = null
+        partialLoadWarning = null
+        isLoading = true
+        isHydratingContent = true
+        val liveUrl = currentUrl.takeIf { it.startsWith("http", ignoreCase = true) } ?: portalState.url
+        showingOfflineArchive = false
+        view.clearCache(false)
+        view.settings.cacheMode = WebSettings.LOAD_NO_CACHE
+        view.loadUrl(liveUrl)
     }
 
     BackHandler {
@@ -527,6 +725,7 @@ fun WebPortalScreen(
                                 val updated = (bookmarks + PortalBookmark(title = titleCandidate, url = currentUrl)).take(12)
                                 bookmarks = updated
                                 PortalBookmarkStore.save(context, portalState.url, updated)
+                                recordPortalMovement("تثبيت اختصار", titleCandidate, "تثبيت الصفحة ($currentUrl) في الاختصارات السريعة")
                                 Toast.makeText(context, "تم تثبيت الصفحة في الاختصارات السريعة", Toast.LENGTH_SHORT).show()
                             } else {
                                 Toast.makeText(context, "هذه الصفحة مثبتة بالفعل", Toast.LENGTH_SHORT).show()
@@ -539,8 +738,10 @@ fun WebPortalScreen(
                     IconButton(
                         onClick = {
                             mainFrameError = null
+                            partialLoadWarning = null
                             val wv = webViewRef
                             if (wv != null) {
+                                recordPortalMovement("تحديث الصفحة", currentUrl, "إعادة تحميل صفحة الويب ($currentUrl)")
                                 if (showingOfflineArchive || wv.url?.startsWith("file://", ignoreCase = true) == true) {
                                     val liveUrl = currentUrl.takeIf { it.startsWith("http", ignoreCase = true) } ?: portalState.url
                                     showingOfflineArchive = false
@@ -568,15 +769,6 @@ fun WebPortalScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            if (isLoading && loadProgress in 1..99) {
-                LinearProgressIndicator(
-                    progress = { loadProgress / 100f },
-                    modifier = Modifier.fillMaxWidth()
-                )
-            } else if (isLoading) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-
             Surface(
                 color = if (isEffectiveOffline)
                     Color(0xFFFFF3E0)
@@ -592,7 +784,11 @@ fun WebPortalScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (showingOfflineArchive) "نسخة محفوظة: $currentUrl" else currentUrl,
+                        text = when {
+                            showingOfflineArchive -> "نسخة محفوظة: $currentUrl"
+                            isHydratingContent && !isLoading -> "جاري استكمال تحميل عناصر الصفحة..."
+                            else -> currentUrl
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (isEffectiveOffline) Color(0xFF8D4E00) else MaterialTheme.colorScheme.onPrimaryContainer,
                         maxLines = 1,
@@ -600,7 +796,6 @@ fun WebPortalScreen(
                         modifier = Modifier.weight(1f)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    // Prominent Status Badge Pill (Offline Cached vs Live Auto-Save)
                     Surface(
                         shape = RoundedCornerShape(999.dp),
                         color = if (isEffectiveOffline) Color(0xFFE65100) else StatusActiveGreen,
@@ -697,6 +892,7 @@ fun WebPortalScreen(
                                 if (onlineNow || isLocalHost) {
                                     showingOfflineArchive = false
                                     mainFrameError = null
+                                    partialLoadWarning = null
                                     webViewRef?.settings?.cacheMode = WebSettings.LOAD_DEFAULT
                                     webViewRef?.loadUrl(targetLiveUrl)
                                 } else {
@@ -709,6 +905,57 @@ fun WebPortalScreen(
                             modifier = Modifier.height(36.dp)
                         ) {
                             Text("تحديث", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF6D3500))
+                        }
+                    }
+                }
+            }
+
+            // Recovery Strip when SPA subresources / JS chunks fail or inner body looks blank
+            AnimatedVisibility(visible = partialLoadWarning != null && !isEffectiveOffline) {
+                Surface(
+                    color = Color(0xFFFFF8E1),
+                    border = BorderStroke(1.dp, Color(0xFFFFB300)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("web_portal_partial_recovery_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = Color(0xFFE65100),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = partialLoadWarning.orEmpty(),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 11.sp,
+                                color = Color(0xFF5D4037),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = { reloadPortalWithoutCache(webViewRef) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("تحديث كامل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -821,43 +1068,66 @@ fun WebPortalScreen(
             }
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            val cookieManager = CookieManager.getInstance()
-                            cookieManager.setAcceptCookie(true)
-                            cookieManager.setAcceptThirdPartyCookies(this, true)
+                key(webViewKey) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            WebView(ctx).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT
+                                )
+                                isFocusable = true
+                                isFocusableInTouchMode = true
+                                scrollBarStyle = WebView.SCROLLBARS_INSIDE_OVERLAY
 
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.databaseEnabled = true
-                            // Allow local MHT WebArchive file:// loading without opening file-to-file or universal access
-                            settings.allowFileAccess = true
-                            settings.allowFileAccessFromFileURLs = false
-                            settings.allowUniversalAccessFromFileURLs = false
-                            settings.cacheMode = if (showingOfflineArchive || (!isLocalHost && !isDeviceOnline)) {
-                                WebSettings.LOAD_CACHE_ELSE_NETWORK
-                            } else {
-                                WebSettings.LOAD_DEFAULT
-                            }
-                            settings.useWideViewPort = true
-                            settings.loadWithOverviewMode = true
-                            settings.builtInZoomControls = true
-                            settings.displayZoomControls = false
-                            settings.setSupportMultipleWindows(true)
-                            settings.javaScriptCanOpenWindowsAutomatically = true
-                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                val cookieManager = CookieManager.getInstance()
+                                cookieManager.setAcceptCookie(true)
+                                cookieManager.setAcceptThirdPartyCookies(this, true)
 
-                            val bridge = WebPortalJsBridge(
-                                onDataPayload = { dataUrl, fileName, mimeType ->
-                                    saveDataUriToExports(dataUrl, fileName, mimeType)
-                                },
-                                onPrintRequested = {
-                                    post { printCurrentWebView(this) }
+                                // Strip Android "; wv" token so modern cloud dashboards/SPAs & WAFs treat WebView as standard Chrome Mobile
+                                val rawUa = settings.userAgentString.orEmpty()
+                                if (rawUa.isNotBlank()) {
+                                    settings.userAgentString = rawUa
+                                        .replace("; wv)", ")")
+                                        .replace("; wv;", ";")
                                 }
-                            )
-                            addJavascriptInterface(bridge, "NetManagerBridge")
+
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                settings.databaseEnabled = true
+                                settings.allowContentAccess = true
+                                settings.loadsImagesAutomatically = true
+                                settings.mediaPlaybackRequiresUserGesture = false
+                                settings.textZoom = 100
+                                // Allow local MHT WebArchive file:// loading without opening file-to-file or universal access
+                                settings.allowFileAccess = true
+                                settings.allowFileAccessFromFileURLs = false
+                                settings.allowUniversalAccessFromFileURLs = false
+                                settings.cacheMode = if (showingOfflineArchive || (!isLocalHost && !isDeviceOnline)) {
+                                    WebSettings.LOAD_CACHE_ELSE_NETWORK
+                                } else {
+                                    WebSettings.LOAD_DEFAULT
+                                }
+                                settings.useWideViewPort = true
+                                settings.loadWithOverviewMode = true
+                                settings.builtInZoomControls = true
+                                settings.displayZoomControls = false
+                                // Keep target="_blank" & window.open() navigation inside the same authenticated WebView session
+                                settings.setSupportMultipleWindows(false)
+                                settings.javaScriptCanOpenWindowsAutomatically = true
+                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+
+                                val bridge = WebPortalJsBridge(
+                                    isHostAuthorized = { isHostAuthorizedForUrl(latestAuthorizedUrlRef.get()) },
+                                    onDataPayload = { dataUrl, fileName, mimeType ->
+                                        saveDataUriToExports(dataUrl, fileName, mimeType)
+                                    },
+                                    onPrintRequested = {
+                                        post { printCurrentWebView(this) }
+                                    }
+                                )
+                                addJavascriptInterface(bridge, "NetManagerBridge")
 
                             setDownloadListener { fileUrl, userAgent, contentDisposition, mimeType, _ ->
                                 when {
@@ -897,7 +1167,30 @@ fun WebPortalScreen(
                                 }
 
                                 override fun onReceivedTitle(view: WebView?, title: String?) {
-                                    if (!title.isNullOrBlank()) pageTitle = title
+                                    if (!title.isNullOrBlank()) {
+                                        pageTitle = title
+                                        if (currentUrl.startsWith("http", ignoreCase = true)) {
+                                            WebPortalCacheManager.updateLastVisitedUrl(context, portalState.url, currentUrl, title)
+                                        }
+                                    }
+                                }
+
+                                override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                                    if (consoleMessage?.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                                        val msg = consoleMessage.message().orEmpty()
+                                        if (msg.contains("ChunkLoadError", ignoreCase = true) ||
+                                            msg.contains("Loading chunk", ignoreCase = true) ||
+                                            msg.contains("Failed to fetch dynamically imported module", ignoreCase = true)
+                                        ) {
+                                            if (!autoCacheRecoveryAttempted) {
+                                                autoCacheRecoveryAttempted = true
+                                                post { reloadPortalWithoutCache(this@apply) }
+                                            } else {
+                                                partialLoadWarning = "تعذر تحميل وحدة من الصفحة — اضغط تحديث كامل بدون كاش"
+                                            }
+                                        }
+                                    }
+                                    return super.onConsoleMessage(consoleMessage)
                                 }
 
                                 override fun onShowFileChooser(
@@ -921,40 +1214,15 @@ fun WebPortalScreen(
                                         false
                                     }
                                 }
-
-                                override fun onCreateWindow(
-                                    view: WebView?,
-                                    isDialog: Boolean,
-                                    isUserGesture: Boolean,
-                                    resultMsg: Message?
-                                ): Boolean {
-                                    val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
-                                    val tempWebView = WebView(ctx).apply {
-                                        webViewClient = object : WebViewClient() {
-                                            override fun shouldOverrideUrlLoading(
-                                                popupView: WebView?,
-                                                request: WebResourceRequest?
-                                            ): Boolean {
-                                                val target = request?.url?.toString()
-                                                if (!target.isNullOrBlank()) {
-                                                    view?.loadUrl(target)
-                                                }
-                                                popupView?.destroy()
-                                                return true
-                                            }
-                                        }
-                                    }
-                                    transport.webView = tempWebView
-                                    resultMsg.sendToTarget()
-                                    return true
-                                }
                             }
 
                             webViewClient = object : WebViewClient() {
                                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                                     val reqUrl = request?.url ?: return false
                                     val scheme = reqUrl.scheme?.lowercase().orEmpty()
-                                    if (scheme == "http" || scheme == "https") {
+                                    if (scheme == "http" || scheme == "https" || scheme == "about" ||
+                                        scheme == "blob" || scheme == "data" || scheme == "javascript"
+                                    ) {
                                         return false
                                     }
                                     if (scheme == "file" && reqUrl.path == archiveFile.absolutePath) {
@@ -970,21 +1238,67 @@ fun WebPortalScreen(
 
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                     isLoading = true
+                                    isHydratingContent = url?.startsWith("http", ignoreCase = true) == true
                                     mainFrameError = null
+                                    partialLoadWarning = null
                                     if (!url.isNullOrBlank() && !url.startsWith("file://", ignoreCase = true)) {
                                         currentUrl = url
+                                        latestAuthorizedUrlRef.set(url)
+                                    } else if (!url.isNullOrBlank()) {
+                                        latestAuthorizedUrlRef.set(url)
+                                    }
+                                }
+
+                                override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                                    super.doUpdateVisitedHistory(view, url, isReload)
+                                    if (url.isNullOrBlank()) return
+                                    latestAuthorizedUrlRef.set(url)
+                                    if (url.startsWith("file://", ignoreCase = true)) return
+                                    currentUrl = url
+                                    showingOfflineArchive = false
+                                    runCatching { CookieManager.getInstance().flush() }
+                                    if (url != lastRecordedPathUrl && url.startsWith("http", ignoreCase = true)) {
+                                        lastRecordedPathUrl = url
+                                        val pathSeg = runCatching { Uri.parse(url).path?.ifBlank { "/" } }.getOrNull() ?: url
+                                        WebPortalCacheManager.updateLastVisitedUrl(context, portalState.url, url, pageTitle)
+                                        onActivityRecorded?.invoke(
+                                            "تصفح لوحة التحكم",
+                                            pathSeg,
+                                            "الانتقال إلى الصفحة: $url"
+                                        )
+                                        isHydratingContent = true
+                                        scheduleHydratedSnapshot(view, url, attempt = 0)
                                     }
                                 }
 
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     isLoading = false
+                                    if (!url.isNullOrBlank()) {
+                                        latestAuthorizedUrlRef.set(url)
+                                    }
                                     if (url != null && url.startsWith("file://", ignoreCase = true)) {
+                                        isHydratingContent = false
                                         showingOfflineArchive = true
                                         return
                                     }
                                     if (!url.isNullOrBlank()) {
                                         currentUrl = url
                                         showingOfflineArchive = false
+                                        runCatching { CookieManager.getInstance().flush() }
+                                        if (url != lastRecordedPathUrl && url.startsWith("http", ignoreCase = true)) {
+                                            lastRecordedPathUrl = url
+                                            val pathSeg = runCatching { Uri.parse(url).path?.ifBlank { "/" } }.getOrNull() ?: url
+                                            WebPortalCacheManager.updateLastVisitedUrl(context, portalState.url, url, pageTitle)
+                                            onActivityRecorded?.invoke(
+                                                "تصفح لوحة التحكم",
+                                                pathSeg,
+                                                "فتح وتحميل الصفحة: $url"
+                                            )
+                                        }
+                                    }
+                                    // Restore standard cache mode after a forced cache-bypass reload
+                                    if (view?.settings?.cacheMode == WebSettings.LOAD_NO_CACHE) {
+                                        view.settings.cacheMode = WebSettings.LOAD_DEFAULT
                                     }
                                     // Wire window.print() inside portal pages directly to native Android Print/PDF
                                     view?.evaluateJavascript(
@@ -998,37 +1312,58 @@ fun WebPortalScreen(
                                             injectCredentialsAutoFill(view, showFeedback = false)
                                         }, 650L)
                                     }
-                                    // Automatically snapshot rendered portal DOM into local MHT WebArchive after hydration
-                                    if (url != null && url.startsWith("http", ignoreCase = true)) {
-                                        view?.postDelayed({
-                                            val targetFile = WebPortalCacheManager.getArchiveTargetFile(context, portalState.url)
-                                            view.saveWebArchive(targetFile.absolutePath, false) { savedPath ->
-                                                if (!savedPath.isNullOrBlank()) {
-                                                    val savedFile = File(savedPath)
-                                                    if (savedFile.exists() && savedFile.length() > 0L) {
-                                                        val now = System.currentTimeMillis()
-                                                        hasSavedArchive = true
-                                                        lastSavedTimeMs = now
-                                                        val meta = CachedPortalMeta(
-                                                            host = hostName.ifBlank { portalState.url },
-                                                            serverName = portalState.serverName,
-                                                            baseUrl = portalState.url,
-                                                            lastVisitedUrl = url,
-                                                            lastPageTitle = pageTitle,
-                                                            targetPathUrl = portalState.targetPathUrl,
-                                                            username = portalState.username,
-                                                            isAplusWifi = portalState.isAplusWifi,
-                                                            isMikroTikWebFig = portalState.isMikroTikWebFig,
-                                                            archiveFilePath = savedPath,
-                                                            lastSavedTime = now
-                                                        )
-                                                        WebPortalCacheManager.saveMeta(context, meta)
-                                                        onArchiveSaved?.invoke(meta)
-                                                    }
-                                                }
-                                            }
-                                        }, 1400L)
+                                    if (url != null && url.startsWith("http", ignoreCase = true) && url != lastSnapshotUrl) {
+                                        isHydratingContent = true
+                                        scheduleHydratedSnapshot(view, url, attempt = 0)
                                     }
+                                }
+
+                                override fun onReceivedHttpError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    errorResponse: WebResourceResponse?
+                                ) {
+                                    val status = errorResponse?.statusCode ?: return
+                                    val reqUrl = request?.url?.toString().orEmpty()
+                                    if (status >= 400 && (reqUrl.endsWith(".js", true) ||
+                                            reqUrl.endsWith(".mjs", true) ||
+                                            reqUrl.endsWith(".css", true) ||
+                                            reqUrl.contains("/assets/", true) ||
+                                            reqUrl.contains("chunk", true))
+                                    ) {
+                                        if (!autoCacheRecoveryAttempted) {
+                                            autoCacheRecoveryAttempted = true
+                                            post { reloadPortalWithoutCache(view) }
+                                        } else {
+                                            partialLoadWarning = "تعذر تحميل ملفات واجهة الصفحة (خطأ $status) — اضغط تحديث كامل"
+                                        }
+                                    }
+                                }
+
+                                override fun onReceivedSslError(
+                                    view: WebView?,
+                                    handler: SslErrorHandler?,
+                                    error: SslError?
+                                ) {
+                                    val sslHost = runCatching { Uri.parse(error?.url.orEmpty()).host.orEmpty() }.getOrDefault("")
+                                    if (RouterConnectionParser.isPrivateOrLocalIpv4(sslHost)) {
+                                        // Local MikroTik WebFig routers typically use self-signed HTTPS certificates on LAN
+                                        handler?.proceed()
+                                    } else {
+                                        handler?.cancel()
+                                    }
+                                }
+
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?
+                                ): Boolean {
+                                    webViewRef = null
+                                    runCatching { (view?.parent as? ViewGroup)?.removeView(view) }
+                                    runCatching { view?.destroy() }
+                                    partialLoadWarning = "تمت إعادة تنشيط محرك العرض تلقائياً"
+                                    webViewKey++
+                                    return true
                                 }
 
                                 override fun onReceivedError(
@@ -1036,9 +1371,10 @@ fun WebPortalScreen(
                                     request: WebResourceRequest?,
                                     error: WebResourceError?
                                 ) {
+                                    val failingUrl = request?.url?.toString().orEmpty()
                                     if (request?.isForMainFrame == true) {
                                         isLoading = false
-                                        val failingUrl = request.url?.toString().orEmpty()
+                                        isHydratingContent = false
                                         if (!failingUrl.startsWith("file://", ignoreCase = true) &&
                                             archiveFile.exists() && archiveFile.length() > 0L
                                         ) {
@@ -1055,6 +1391,12 @@ fun WebPortalScreen(
                                             val desc = error?.description?.toString()?.takeIf { it.isNotBlank() }
                                             mainFrameError = desc ?: "تعذر تحميل صفحة لوحة التحكم. تحقق من اتصال الإنترنت وحاول مجدداً."
                                         }
+                                    } else if (failingUrl.endsWith(".js", true) ||
+                                        failingUrl.endsWith(".mjs", true) ||
+                                        failingUrl.endsWith(".css", true) ||
+                                        failingUrl.contains("/api/", true)
+                                    ) {
+                                        partialLoadWarning = "تعذر تحميل بعض بيانات الصفحة من الشبكة — اضغط تحديث كامل"
                                     }
                                 }
                             }
@@ -1063,7 +1405,7 @@ fun WebPortalScreen(
                             val initialUrl = if (showingOfflineArchive && archiveFile.exists() && archiveFile.length() > 0L) {
                                 "file://${archiveFile.absolutePath}"
                             } else {
-                                portalState.url
+                                currentUrl.takeIf { it.startsWith("http", ignoreCase = true) } ?: portalState.url
                             }
                             loadUrl(initialUrl)
                         }
@@ -1071,7 +1413,26 @@ fun WebPortalScreen(
                     update = { wv ->
                         webViewRef = wv
                     }
-                )
+                    )
+                }
+
+                // Overlay progress indicator so showing/hiding it never causes WebView layout resize
+                if (isLoading || isHydratingContent) {
+                    if (isLoading && loadProgress in 1..99) {
+                        LinearProgressIndicator(
+                            progress = { loadProgress / 100f },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.TopCenter)
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.TopCenter)
+                        )
+                    }
+                }
 
                 val errMsg = mainFrameError
                 if (errMsg != null) {
@@ -1114,10 +1475,7 @@ fun WebPortalScreen(
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Button(
-                                        onClick = {
-                                            mainFrameError = null
-                                            webViewRef?.reload()
-                                        },
+                                        onClick = { reloadPortalWithoutCache(webViewRef) },
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .height(48.dp)

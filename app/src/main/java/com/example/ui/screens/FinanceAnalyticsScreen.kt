@@ -523,29 +523,40 @@ private fun FinanceGlobalKpiCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val isLoss = revenueSummary.totalNetProfit < 0.0
+                val profitColor = if (isLoss) StatusErrorRed else StatusActiveGreen
                 Column {
-                    Text("صافي الأرباح المحققة", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = if (isLoss) "صافي الخسارة المسجلة" else "صافي الأرباح المحققة",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text(
                         text = "${currencyFormat.format(revenueSummary.totalNetProfit)} ر.ي",
                         style = MaterialTheme.typography.headlineMedium,
                         fontWeight = FontWeight.Bold,
-                        color = StatusActiveGreen
+                        color = profitColor
                     )
                 }
 
                 Surface(
                     shape = RoundedCornerShape(10.dp),
-                    color = StatusActiveGreen.copy(alpha = 0.15f)
+                    color = profitColor.copy(alpha = 0.15f)
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Icon(Icons.Default.TrendingUp, contentDescription = null, tint = StatusActiveGreen, modifier = Modifier.size(16.dp))
+                        Icon(
+                            imageVector = if (isLoss) Icons.Default.TrendingDown else Icons.Default.TrendingUp,
+                            contentDescription = null,
+                            tint = profitColor,
+                            modifier = Modifier.size(16.dp)
+                        )
                         Text(
                             text = "هامش ${revenueSummary.averageProfitMarginPercent.toInt()}%",
-                            color = StatusActiveGreen,
+                            color = profitColor,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
                         )
@@ -772,8 +783,17 @@ private fun MonthlySummaryBanner(
                     Text("${currencyFormat.format(totalRevenueAllMonths)} ر.ي", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                 }
                 Column {
-                    Text("صافي الربح التراكمي", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${currencyFormat.format(totalProfitAllMonths)} ر.ي", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
+                    Text(
+                        text = if (totalProfitAllMonths < 0.0) "صافي الخسارة التراكمية" else "صافي الربح التراكمي",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "${currencyFormat.format(totalProfitAllMonths)} ر.ي",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (totalProfitAllMonths < 0.0) StatusErrorRed else StatusActiveGreen
+                    )
                 }
                 Column {
                     Text("إجمالي الكروت المباعة", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -816,17 +836,18 @@ private fun AllMonthsAggregateHeader(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
-                if (overallMarginPercent > 0) {
+                if (totalRevenueAllMonths > 0.0) {
+                    val marginColor = if (overallMarginPercent < 0) StatusErrorRed else StatusActiveGreen
                     Surface(
                         shape = RoundedCornerShape(8.dp),
-                        color = StatusActiveGreen.copy(alpha = 0.14f)
+                        color = marginColor.copy(alpha = 0.14f)
                     ) {
                         Text(
                             text = "هامش $overallMarginPercent%",
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = StatusActiveGreen
+                            color = marginColor
                         )
                     }
                 }
@@ -874,8 +895,17 @@ private fun AllMonthsAggregateHeader(
                     Text("${currencyFormat.format(totalCostAllMonths)} ر.ي", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = StatusErrorRed)
                 }
                 Column {
-                    Text("صافي الأرباح", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${currencyFormat.format(totalProfitAllMonths)} ر.ي", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
+                    Text(
+                        text = if (totalProfitAllMonths < 0.0) "صافي الخسارة" else "صافي الأرباح",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "${currencyFormat.format(totalProfitAllMonths)} ر.ي",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (totalProfitAllMonths < 0.0) StatusErrorRed else StatusActiveGreen
+                    )
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text("عجز الهدف", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -973,13 +1003,18 @@ private fun MonthlySalesDetailedCard(
                 }
 
                 Column(horizontalAlignment = Alignment.End) {
+                    val isMonthLoss = month.netProfit < 0.0
                     Text(
                         text = "${currencyFormat.format(month.netProfit)} ر.ي",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        color = StatusActiveGreen
+                        color = if (isMonthLoss) StatusErrorRed else StatusActiveGreen
                     )
-                    Text("صافي الربح", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = if (isMonthLoss) "صافي الخسارة" else "صافي الربح",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
@@ -1079,7 +1114,12 @@ private fun MonthlySalesDetailedCard(
                                             horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
                                             Text("الإيراد: ${currencyFormat.format(pkg.totalRevenue)} ر.ي", style = MaterialTheme.typography.labelSmall)
-                                            Text("الصافي: ${currencyFormat.format(pkg.netProfit)} ر.ي", style = MaterialTheme.typography.labelSmall, color = StatusActiveGreen, fontWeight = FontWeight.Bold)
+                                            Text(
+                                                text = "الصافي: ${currencyFormat.format(pkg.netProfit)} ر.ي",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = if (pkg.netProfit < 0.0) StatusErrorRed else StatusActiveGreen,
+                                                fontWeight = FontWeight.Bold
+                                            )
                                         }
                                     }
                                 }
@@ -1178,7 +1218,13 @@ private fun PackageProfitQuickSection(
                         Text("مباع: ${pkg.soldCardsCount} كرت", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("${currencyFormat.format(pkg.netProfit)} ر.ي ربح", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
+                        val isPkgLoss = pkg.netProfit < 0.0
+                        Text(
+                            text = "${currencyFormat.format(pkg.netProfit)} ر.ي ${if (isPkgLoss) "خسارة" else "ربح"}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isPkgLoss) StatusErrorRed else StatusActiveGreen
+                        )
                         Text("هامش ${pkg.profitMarginPercent.toInt()}%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
@@ -1199,8 +1245,10 @@ private fun PackagePricingDialog(
     var costPriceInput by remember { mutableStateOf(if (initialCostPrice > 0) initialCostPrice.toInt().toString() else "") }
     val previewSale = salePriceInput.toDoubleOrNull() ?: 0.0
     val previewCost = costPriceInput.toDoubleOrNull() ?: 0.0
-    val previewProfit = (previewSale - previewCost).coerceAtLeast(0.0)
+    val previewProfit = previewSale - previewCost
     val previewMargin = if (previewSale > 0.0) ((previewProfit / previewSale) * 100.0).toInt() else 0
+    val isPreviewLoss = previewProfit < 0.0
+    val previewColor = if (isPreviewLoss) StatusErrorRed else StatusActiveGreen
 
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1240,7 +1288,7 @@ private fun PackagePricingDialog(
 
                 Surface(
                     shape = RoundedCornerShape(10.dp),
-                    color = StatusActiveGreen.copy(alpha = 0.1f),
+                    color = previewColor.copy(alpha = 0.1f),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
@@ -1248,8 +1296,14 @@ private fun PackagePricingDialog(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("ربح الكرت: +${previewProfit.toInt()} ر.ي", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
-                        Text("هامش $previewMargin%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
+                        val sign = if (previewProfit > 0.0) "+" else ""
+                        Text(
+                            text = "${if (isPreviewLoss) "خسارة الكرت" else "ربح الكرت"}: $sign${previewProfit.toInt()} ر.ي",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = previewColor
+                        )
+                        Text("هامش $previewMargin%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = previewColor)
                     }
                 }
 
@@ -1310,13 +1364,14 @@ private fun PackageProfitDetailCard(
                 }
                 
                 if (pkg.salePrice > 0) {
+                    val pkgColor = if (pkg.profitPerCard < 0.0) StatusErrorRed else StatusActiveGreen
                     Surface(
                         shape = RoundedCornerShape(8.dp),
-                        color = StatusActiveGreen.copy(alpha = 0.15f)
+                        color = pkgColor.copy(alpha = 0.15f)
                     ) {
                         Text(
                             text = "هامش ${pkg.profitMarginPercent.toInt()}%",
-                            color = StatusActiveGreen,
+                            color = pkgColor,
                             fontWeight = FontWeight.Bold,
                             style = MaterialTheme.typography.labelSmall,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
@@ -1346,8 +1401,13 @@ private fun PackageProfitDetailCard(
                     Text("${currencyFormat.format(pkg.totalRevenue)} ر.ي", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("صافي الربح", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${currencyFormat.format(pkg.netProfit)} ر.ي", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = StatusActiveGreen)
+                    Text(if (pkg.netProfit < 0.0) "صافي الخسارة" else "صافي الربح", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = "${currencyFormat.format(pkg.netProfit)} ر.ي",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (pkg.netProfit < 0.0) StatusErrorRed else StatusActiveGreen
+                    )
                 }
             }
         }

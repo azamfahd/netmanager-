@@ -29,43 +29,48 @@ object NetworkUtils {
             val activeNetwork = connectivityManager.activeNetwork
             val caps = connectivityManager.getNetworkCapabilities(activeNetwork)
             val isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            val isEthernet = caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
+            val isCellular = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true && !isWifi && !isEthernet
+            val isLocalLan = isWifi || isEthernet
 
             var deviceIp: String? = null
             var gatewayIp: String? = null
             var ssid: String? = null
 
-            // 1. Try to read Gateway from LinkProperties (modern standard Android)
+            // 1. Read Gateway and Device IP from LinkProperties (modern standard Android)
             if (activeNetwork != null) {
                 val linkProperties = connectivityManager.getLinkProperties(activeNetwork)
                 if (linkProperties != null) {
-                    // Check routes for default gateway (destination 0.0.0.0/0 or destination with prefix 0)
-                    for (route in linkProperties.routes) {
-                        val gw = route.gateway?.hostAddress
-                        if (!gw.isNullOrBlank() && gw.contains(".") && gw != "0.0.0.0") {
-                            if (route.isDefaultRoute) {
-                                gatewayIp = gw
-                                break
-                            } else if (gatewayIp == null) {
-                                gatewayIp = gw
+                    if (isLocalLan) {
+                        // Check routes for default gateway (destination 0.0.0.0/0 or destination with prefix 0)
+                        for (route in linkProperties.routes) {
+                            val gw = route.gateway?.hostAddress
+                            if (!gw.isNullOrBlank() && gw.contains(".") && gw != "0.0.0.0") {
+                                if (route.isDefaultRoute) {
+                                    gatewayIp = gw
+                                    break
+                                } else if (gatewayIp == null) {
+                                    gatewayIp = gw
+                                }
                             }
                         }
-                    }
 
-                    // Android 11+ (API 30+) DHCP Server address
-                    if (gatewayIp.isNullOrBlank() && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                        val dhcpServer = linkProperties.dhcpServerAddress?.hostAddress
-                        if (!dhcpServer.isNullOrBlank() && dhcpServer.contains(".") && dhcpServer != "0.0.0.0") {
-                            gatewayIp = dhcpServer
+                        // Android 11+ (API 30+) DHCP Server address
+                        if (gatewayIp.isNullOrBlank() && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                            val dhcpServer = linkProperties.dhcpServerAddress?.hostAddress
+                            if (!dhcpServer.isNullOrBlank() && dhcpServer.contains(".") && dhcpServer != "0.0.0.0") {
+                                gatewayIp = dhcpServer
+                            }
                         }
-                    }
 
-                    // Local DNS server as router fallback
-                    if (gatewayIp.isNullOrBlank()) {
-                        for (dns in linkProperties.dnsServers) {
-                            val dnsHost = dns.hostAddress ?: ""
-                            if (dnsHost.startsWith("192.168.") || dnsHost.startsWith("10.") || dnsHost.startsWith("172.")) {
-                                gatewayIp = dnsHost
-                                break
+                        // Local private DNS server as router fallback on LAN
+                        if (gatewayIp.isNullOrBlank()) {
+                            for (dns in linkProperties.dnsServers) {
+                                val dnsHost = dns.hostAddress ?: ""
+                                if (RouterConnectionParser.isPrivateOrLocalIpv4(dnsHost)) {
+                                    gatewayIp = dnsHost
+                                    break
+                                }
                             }
                         }
                     }
@@ -83,8 +88,8 @@ object NetworkUtils {
                 }
             }
 
-            // 2. Try WifiManager DhcpInfo if not already found
-            if (wifiManager != null) {
+            // 2. Only read WifiManager DhcpInfo when actually connected via Wi-Fi
+            if (isWifi && wifiManager != null) {
                 val dhcpInfo = wifiManager.dhcpInfo
                 if (dhcpInfo != null) {
                     if (gatewayIp.isNullOrBlank() && dhcpInfo.gateway != 0) {
@@ -103,23 +108,28 @@ object NetworkUtils {
                 }
             }
 
-            // 3. Fallback standard default for MikroTik routers
-            if (gatewayIp.isNullOrBlank() || gatewayIp == "0.0.0.0") {
-                gatewayIp = "192.168.88.1"
+            if (gatewayIp == "0.0.0.0") gatewayIp = null
+
+            val resolvedSsid = when {
+                !ssid.isNullOrBlank() -> ssid
+                isWifi -> "شبكة Wi-Fi نشطة"
+                isEthernet -> "شبكة اتصال محلية (LAN)"
+                isCellular -> "بيانات الجوال (4G/5G)"
+                else -> null
             }
 
             LocalNetworkInfo(
-                isConnectedToWifi = isWifi || (activeNetwork != null),
-                wifiSsid = ssid ?: if (isWifi) "شبكة Wi-Fi نشطة" else "شبكة اتصال محلية (LAN)",
-                deviceIp = deviceIp ?: "192.168.88.245",
-                gatewayIp = gatewayIp
+                isConnectedToWifi = isLocalLan,
+                wifiSsid = resolvedSsid,
+                deviceIp = deviceIp,
+                gatewayIp = if (isLocalLan) gatewayIp else null
             )
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             LocalNetworkInfo(
-                isConnectedToWifi = true,
-                wifiSsid = "شبكة Wi-Fi نشطة",
-                deviceIp = "192.168.88.245",
-                gatewayIp = "192.168.88.1"
+                isConnectedToWifi = false,
+                wifiSsid = null,
+                deviceIp = null,
+                gatewayIp = null
             )
         }
     }
@@ -127,11 +137,24 @@ object NetworkUtils {
     suspend fun discoverRouter(context: Context): DiscoveredRouter {
         return withContext(Dispatchers.IO) {
             val netInfo = getLocalNetworkInfo(context)
-            val gateway = netInfo.gatewayIp ?: "192.168.88.1"
-            val ssid = netInfo.wifiSsid ?: "الشبكة الحالية"
+            val gateway = netInfo.gatewayIp?.takeIf { it.isNotBlank() }.orEmpty()
+            val ssid = netInfo.wifiSsid ?: "غير متصل بشبكة Wi-Fi محلية"
 
-            // Target candidates to probe: detected gateway first, then standard 192.168.88.1 if gateway is different
-            val ipCandidates = if (gateway != "192.168.88.1") listOf(gateway, "192.168.88.1") else listOf(gateway)
+            // Never probe bogus LAN gateway 192.168.88.1 when on cellular or offline without a LAN gateway
+            if (!netInfo.isConnectedToWifi || gateway.isBlank()) {
+                return@withContext DiscoveredRouter(
+                    ip = "",
+                    port = 8728,
+                    isReachable = false,
+                    useHttps = false,
+                    networkSsid = ssid,
+                    openPorts = emptyList(),
+                    serviceType = "اتصال خارجي / بيانات الجوال",
+                    statusMessage = "لست متصلاً بشبكة Wi-Fi محلية. أدخل عنوان IP السيرفر أو الدومين للاتصال المباشر."
+                )
+            }
+
+            val ipCandidates = listOf(gateway)
             // Probe only MikroTik API & Web/REST ports gently in staggered pairs to avoid triggering router PSD port-scan rules
             val primaryPair = listOf(8728, 80)
             val secondaryPair = listOf(8729, 443)
@@ -197,7 +220,13 @@ object NetworkUtils {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
             val network = cm.activeNetwork ?: return false
             val caps = cm.getNetworkCapabilities(network) ?: return false
-            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            val notSuspended = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)
+            } else {
+                true
+            }
+            notSuspended &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
                 (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ||

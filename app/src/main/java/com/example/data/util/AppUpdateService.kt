@@ -1,15 +1,18 @@
 package com.example.data.util
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.data.model.UpdateDownloadState
 import kotlinx.coroutines.CoroutineScope
@@ -27,7 +30,8 @@ class AppUpdateService : Service() {
     companion object {
         const val EXTRA_DOWNLOAD_URL = "extra_download_url"
         private const val CHANNEL_ID = "app_update_channel"
-        private const val NOTIFICATION_ID = 1001
+        private const val FOREGROUND_NOTIFICATION_ID = 1001
+        const val RESULT_NOTIFICATION_ID = 1002
 
         fun start(context: Context, downloadUrl: String) {
             val intent = Intent(context, AppUpdateService::class.java).apply {
@@ -60,9 +64,9 @@ class AppUpdateService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, initialNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            startForeground(FOREGROUND_NOTIFICATION_ID, initialNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
-            startForeground(NOTIFICATION_ID, initialNotification)
+            startForeground(FOREGROUND_NOTIFICATION_ID, initialNotification)
         }
 
         serviceScope.launch {
@@ -76,7 +80,7 @@ class AppUpdateService : Service() {
                 if (result.isSuccess) {
                     val apkFile = result.getOrThrow()
                     AppUpdateManager.updateState(UpdateDownloadState.Completed(apkFile))
-                    showCompletionNotification()
+                    showCompletionNotification(apkFile)
                     
                     withContext(Dispatchers.Main) {
                         AppUpdateManager.installApk(applicationContext, apkFile)
@@ -112,8 +116,20 @@ class AppUpdateService : Service() {
         }
     }
 
+    private fun canPostNotifications(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun safeNotify(id: Int, notification: android.app.Notification) {
+        if (!canPostNotifications()) return
+        try {
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.notify(id, notification)
+        } catch (_: SecurityException) {}
+    }
+
     private fun updateNotificationProgress(percent: Int) {
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("تحديث NetMaster Pro")
             .setContentText(if (percent >= 0) "جاري التنزيل: $percent%" else "جاري تنزيل التحديث...")
@@ -126,13 +142,25 @@ class AppUpdateService : Service() {
             builder.setProgress(100, 0, true)
         }
 
-        notificationManager.notify(NOTIFICATION_ID, builder.build())
+        safeNotify(FOREGROUND_NOTIFICATION_ID, builder.build())
     }
 
-    private fun showCompletionNotification() {
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+    private fun showCompletionNotification(apkFile: java.io.File) {
+        val intent = try {
+            val apkUri = androidx.core.content.FileProvider.getUriForFile(
+                this,
+                "${packageName}.fileprovider",
+                apkFile
+            )
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(apkUri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        } catch (_: Exception) {
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
         }
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent,
@@ -141,17 +169,16 @@ class AppUpdateService : Service() {
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("اكتمل تنزيل التحديث ⚡")
-            .setContentText("جاري تثبيت الإصدار الجديد تلقائياً...")
+            .setContentText("انقر هنا لتثبيت الإصدار الجديد بأمان")
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .build()
 
-        notificationManager.notify(NOTIFICATION_ID, notification)
+        safeNotify(RESULT_NOTIFICATION_ID, notification)
     }
 
     private fun showErrorNotification(errorMsg: String) {
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("فشل تحديث التطبيق")
             .setContentText(errorMsg)
@@ -159,7 +186,7 @@ class AppUpdateService : Service() {
             .setAutoCancel(true)
             .build()
 
-        notificationManager.notify(NOTIFICATION_ID, notification)
+        safeNotify(RESULT_NOTIFICATION_ID, notification)
     }
 
     override fun onDestroy() {

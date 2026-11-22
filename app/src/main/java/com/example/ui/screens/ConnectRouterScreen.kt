@@ -52,6 +52,7 @@ import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SignalCellularAlt
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -147,20 +148,51 @@ fun ConnectRouterScreen(
     val latestSnapshot by viewModel.latestCachedSnapshot.collectAsStateWithLifecycle()
     val latestCachedPortal by viewModel.latestCachedPortal.collectAsStateWithLifecycle()
 
+    val formPrefs = remember(context) {
+        context.getSharedPreferences("netmanager_connect_form_prefs", Context.MODE_PRIVATE)
+    }
+
     // User credentials (supports router usernames and cloud portal emails)
-    var username by remember { mutableStateOf("admin") }
+    var username by remember { mutableStateOf(formPrefs.getString("username", "admin") ?: "admin") }
     var password by remember { mutableStateOf("") }
     var isPasswordVisible by remember { mutableStateOf(false) }
     var rememberCredentials by remember { mutableStateOf(true) }
 
-    // Smart Mode Toggle: FALSE = Local LAN/Wi-Fi Discovery, TRUE = Custom Server / Domain / URL
-    var useManualNetworkSettings by remember { mutableStateOf(false) }
+    // Smart Mode Toggle: Auto LAN vs Direct RouterOS API vs Custom Domain / Cloud Server
+    var useManualNetworkSettings by remember {
+        mutableStateOf(formPrefs.getBoolean("use_manual_mode", false))
+    }
+    var useDirectApiMode by remember {
+        mutableStateOf(formPrefs.getBoolean("use_direct_api", false))
+    }
     var showAdvancedSettings by remember { mutableStateOf(false) }
-    var manualIp by remember { mutableStateOf("") }
-    var manualPort by remember { mutableIntStateOf(8728) }
-    var manualUseHttps by remember { mutableStateOf(false) }
-    var manualPreferredPath by remember { mutableStateOf<String?>(null) }
-    var manualRouterName by remember { mutableStateOf("") }
+    var manualIp by remember { mutableStateOf(formPrefs.getString("manual_ip", "") ?: "") }
+    var manualPort by remember { mutableIntStateOf(formPrefs.getInt("manual_port", 8728)) }
+    var manualUseHttps by remember { mutableStateOf(formPrefs.getBoolean("manual_https", false)) }
+    var manualPreferredPath by remember { mutableStateOf<String?>(formPrefs.getString("manual_path", null)) }
+    var manualRouterName by remember { mutableStateOf(formPrefs.getString("manual_name", "") ?: "") }
+
+    LaunchedEffect(
+        username,
+        useManualNetworkSettings,
+        useDirectApiMode,
+        manualIp,
+        manualPort,
+        manualUseHttps,
+        manualPreferredPath,
+        manualRouterName
+    ) {
+        formPrefs.edit()
+            .putString("username", username)
+            .putBoolean("use_manual_mode", useManualNetworkSettings)
+            .putBoolean("use_direct_api", useDirectApiMode)
+            .putString("manual_ip", manualIp)
+            .putInt("manual_port", manualPort)
+            .putBoolean("manual_https", manualUseHttps)
+            .putString("manual_path", manualPreferredPath)
+            .putString("manual_name", manualRouterName)
+            .apply()
+    }
 
     fun applySmartPaste(rawText: String, showFeedback: Boolean = true): Boolean {
         val parsed = RouterConnectionParser.parseSmartCredentialsPaste(rawText) ?: return false
@@ -171,7 +203,13 @@ fun ConnectRouterScreen(
         parsed.host?.let { extractedHost ->
             manualIp = extractedHost
             manualPreferredPath = parsed.path
-            useManualNetworkSettings = true
+            if (parsed.port in listOf(8728, 8729)) {
+                useDirectApiMode = true
+                useManualNetworkSettings = false
+            } else {
+                useDirectApiMode = false
+                useManualNetworkSettings = true
+            }
             val resolvedPort = parsed.port ?: if (parsed.useHttps == true) 443 else manualPort
             if (parsed.port != null || parsed.useHttps == true) {
                 manualPort = resolvedPort
@@ -213,22 +251,35 @@ fun ConnectRouterScreen(
         viewModel.refreshCachedSnapshot(context)
     }
 
-    // Default auto-detected values from current network
-    val autoDetectedIp = discoveredRouter?.ip ?: localNetwork.gatewayIp ?: "192.168.88.1"
+    // Default auto-detected values from current network (no fake 192.168.88.1 on cellular)
+    val autoDetectedIp = discoveredRouter?.ip?.ifBlank { null }
+        ?: localNetwork.gatewayIp?.ifBlank { null }
+        ?: ""
     val autoDetectedPort = discoveredRouter?.port ?: 8728
     val autoDetectedHttps = discoveredRouter?.useHttps ?: false
     val normalizedManual = remember(manualIp) { RouterConnectionParser.normalizeHostInput(manualIp) }
+    val isCustomHostMode = useManualNetworkSettings || useDirectApiMode
 
-    // If custom server mode is active, prioritize normalized custom domain/IP; otherwise auto-detected LAN router
-    val activeIp = if (useManualNetworkSettings && normalizedManual.host.isNotBlank()) {
+    // Active Host / Port / TLS resolution per selected connection mode
+    val activeIp = if (isCustomHostMode && normalizedManual.host.isNotBlank()) {
         normalizedManual.host
-    } else if (useManualNetworkSettings && manualIp.isNotBlank()) {
+    } else if (isCustomHostMode && manualIp.isNotBlank()) {
         manualIp.trim()
     } else {
         autoDetectedIp
     }
-    val activePort = if (useManualNetworkSettings) (normalizedManual.explicitPort ?: manualPort) else autoDetectedPort
-    val activeHttps = if (useManualNetworkSettings) (normalizedManual.inferredHttps ?: manualUseHttps) else autoDetectedHttps
+    val activePort = when {
+        useDirectApiMode -> normalizedManual.explicitPort
+            ?: if (manualPort in listOf(80, 443, 8080)) 8728 else manualPort
+        useManualNetworkSettings -> normalizedManual.explicitPort ?: manualPort
+        else -> autoDetectedPort
+    }
+    val activeHttps = when {
+        useDirectApiMode -> normalizedManual.inferredHttps
+            ?: (activePort == 8729 || (manualUseHttps && activePort != 8728))
+        useManualNetworkSettings -> normalizedManual.inferredHttps ?: manualUseHttps
+        else -> autoDetectedHttps
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -260,7 +311,11 @@ fun ConnectRouterScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = if (useManualNetworkSettings) "إدخال يدوي مخصص (اختياري)" else "التعرف التلقائي الذكي على الشبكة",
+                                text = when {
+                                    useDirectApiMode -> "اتصال مباشر عبر RouterOS API (بدون وسيط)"
+                                    useManualNetworkSettings -> "إدخال يدوي مخصص (اختياري)"
+                                    else -> "التعرف التلقائي الذكي على الشبكة"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -461,6 +516,15 @@ fun ConnectRouterScreen(
                                             style = MaterialTheme.typography.labelSmall,
                                             color = Color(0xFF7A3E00)
                                         )
+                                        val latestAction = cachedPortal.recentActions.firstOrNull()
+                                        if (!latestAction.isNullOrBlank()) {
+                                            Text(
+                                                text = "آخر حركة: $latestAction",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF8D4E00)
+                                            )
+                                        }
                                     }
                                 }
 
@@ -490,55 +554,78 @@ fun ConnectRouterScreen(
                         .fillMaxWidth()
                         .testTag("auto_discovered_router_card"),
                     shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (useManualNetworkSettings)
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                        else
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f)
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(28.dp)
-                                        .clip(CircleShape)
-                                        .background(if (useManualNetworkSettings) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = if (useManualNetworkSettings) Icons.Default.Tune else Icons.Default.AutoAwesome,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                                Column {
-                                    Text(
-                                        text = if (useManualNetworkSettings) "وضع السيرفر / الدومين المخصص" else "التعرف التلقائي على الراوتر",
-                                        fontWeight = FontWeight.Bold,
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontSize = 13.sp,
-                                        color = if (useManualNetworkSettings) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                    val serverKindLabel = discoveredRouter?.detectedServerKind?.takeIf { it.isNotBlank() }
-                                    Text(
-                                        text = serverKindLabel ?: if (useManualNetworkSettings) "يدعم IP محلي، دومين، أو لوحة سحابية" else "الافتراضي: تم الجلب من شبكتك",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontSize = 10.sp,
-                                        color = MaterialTheme.colorScheme.outline
-                                    )
-                                }
+                        colors = CardDefaults.cardColors(
+                            containerColor = when {
+                                useDirectApiMode -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)
+                                useManualNetworkSettings -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                                else -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f)
                             }
+                        ),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                when {
+                                                    useDirectApiMode -> StatusActiveGreen
+                                                    useManualNetworkSettings -> MaterialTheme.colorScheme.secondary
+                                                    else -> MaterialTheme.colorScheme.primary
+                                                }
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = when {
+                                                useDirectApiMode -> Icons.Default.Bolt
+                                                useManualNetworkSettings -> Icons.Default.Tune
+                                                else -> Icons.Default.AutoAwesome
+                                            },
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    Column {
+                                        Text(
+                                            text = when {
+                                                useDirectApiMode -> "اتصال مباشر عبر RouterOS API"
+                                                useManualNetworkSettings -> "وضع السيرفر / الدومين المخصص"
+                                                else -> "التعرف التلقائي على الراوتر"
+                                            },
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontSize = 13.sp,
+                                            color = when {
+                                                useDirectApiMode -> MaterialTheme.colorScheme.onSecondaryContainer
+                                                useManualNetworkSettings -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                else -> MaterialTheme.colorScheme.onPrimaryContainer
+                                            }
+                                        )
+                                        val serverKindLabel = discoveredRouter?.detectedServerKind?.takeIf { it.isNotBlank() && !useDirectApiMode }
+                                        Text(
+                                            text = serverKindLabel ?: when {
+                                                useDirectApiMode -> "مباشر على منفذ API ($activePort) بدون وسيط سحابي"
+                                                useManualNetworkSettings -> "يدعم IP محلي، دومين، أو لوحة سحابية"
+                                                else -> "الافتراضي: تم الجلب من شبكتك"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.outline
+                                        )
+                                    }
+                                }
 
                             if (isDiscovering) {
                                 Row(
@@ -596,11 +683,11 @@ fun ConnectRouterScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                     Text(
-                                        text = activeIp,
+                                        text = activeIp.ifBlank { "غير محدد — أدخل IP السيرفر أو الدومين" },
                                         style = MaterialTheme.typography.titleMedium,
-                                        fontFamily = FontFamily.Monospace,
+                                        fontFamily = if (activeIp.isNotBlank()) FontFamily.Monospace else FontFamily.Default,
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 14.sp,
+                                        fontSize = if (activeIp.isNotBlank()) 14.sp else 12.sp,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
@@ -668,10 +755,16 @@ fun ConnectRouterScreen(
                                         color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
                                         border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
                                         onClick = {
-                                            useManualNetworkSettings = true
                                             if (manualIp.isBlank()) manualIp = autoDetectedIp
                                             manualPort = p
                                             manualUseHttps = (p == 443 || p == 8729)
+                                            if (p == 8728 || p == 8729) {
+                                                useDirectApiMode = true
+                                                useManualNetworkSettings = false
+                                            } else {
+                                                useDirectApiMode = false
+                                                useManualNetworkSettings = true
+                                            }
                                         }
                                     ) {
                                         Text(
@@ -699,13 +792,13 @@ fun ConnectRouterScreen(
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Wifi,
+                                    imageVector = if (localNetwork.isConnectedToWifi) Icons.Default.Wifi else Icons.Default.SignalCellularAlt,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Text(
-                                    text = localNetwork.wifiSsid ?: "شبكة Wi-Fi متصلة",
+                                    text = localNetwork.wifiSsid ?: if (localNetwork.isConnectedToWifi) "شبكة Wi-Fi متصلة" else "بيانات الجوال / خارج Wi-Fi",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold
@@ -853,11 +946,13 @@ fun ConnectRouterScreen(
                                 Spacer(modifier = Modifier.height(8.dp))
                             }
 
-                            if (activePort != 8728) {
+                            if (activePort != 8728 || !useDirectApiMode) {
                                 Button(
                                     onClick = {
-                                        useManualNetworkSettings = true
+                                        useDirectApiMode = true
+                                        useManualNetworkSettings = false
                                         manualPort = 8728
+                                        manualUseHttps = false
                                         val cleanHost = RouterConnectionParser.normalizeHostInput(activeIp).host.ifBlank { activeIp.trim() }
                                         val config = RouterConnectionConfig(
                                             name = if (manualRouterName.isNotBlank()) manualRouterName else "راوتر $cleanHost",
@@ -867,7 +962,8 @@ fun ConnectRouterScreen(
                                             password = password,
                                             useHttps = false,
                                             autoDetectProtocol = true,
-                                            isDemoMode = false
+                                            isDemoMode = false,
+                                            directApiOnly = true
                                         )
                                         viewModel.connectToRouter(config, saveToFavorites = rememberCredentials, context = context)
                                     },
@@ -875,8 +971,9 @@ fun ConnectRouterScreen(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .height(48.dp)
+                                        .testTag("retry_direct_api_button")
                                 ) {
-                                    Text("محاولة الاتصال عبر منفذ MikroTik API الرسمي (8728)")
+                                    Text("اتصال مباشر عبر منفذ MikroTik API الرسمي (8728)")
                                 }
                                 Spacer(modifier = Modifier.height(6.dp))
                             }
@@ -1015,7 +1112,13 @@ fun ConnectRouterScreen(
                                                 manualIp = router.ipAddress
                                                 manualPort = router.port
                                                 manualUseHttps = router.useHttps
-                                                useManualNetworkSettings = true
+                                                if (router.port in listOf(8728, 8729)) {
+                                                    useDirectApiMode = true
+                                                    useManualNetworkSettings = false
+                                                } else {
+                                                    useDirectApiMode = false
+                                                    useManualNetworkSettings = true
+                                                }
                                                 Toast.makeText(context, "تم تحديد بيانات راوتر ${router.name}", Toast.LENGTH_SHORT).show()
                                             }
                                             .padding(12.dp),
@@ -1192,11 +1295,12 @@ fun ConnectRouterScreen(
                                                             tint = Color(0xFFE65100),
                                                             modifier = Modifier.size(12.dp)
                                                         )
+                                                        val latestAction = meta.recentActions.firstOrNull()
                                                         Text(
-                                                            text = if (meta.hasValidArchive) {
-                                                                "نسخة ويب محفوظة محلياً • جاهز للتصفح أوفلاين"
-                                                            } else {
-                                                                "مسجل كلوحة ويب • سيتم الحفظ التلقائي عند الفتح"
+                                                            text = when {
+                                                                !latestAction.isNullOrBlank() -> "آخر حركة: $latestAction"
+                                                                meta.hasValidArchive -> "نسخة ويب محفوظة محلياً • جاهز للتصفح أوفلاين"
+                                                                else -> "مسجل كلوحة ويب • سيتم الحفظ التلقائي عند الفتح"
                                                             },
                                                             fontSize = 10.sp,
                                                             fontWeight = FontWeight.SemiBold,
@@ -1247,10 +1351,10 @@ fun ConnectRouterScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = if (useManualNetworkSettings) {
-                                        "متوافق مع الدومينات (APlusWiFi/DDNS)، IP، أو الروابط"
-                                    } else {
-                                        "العنوان التلقائي: $activeIp"
+                                    text = when {
+                                        useDirectApiMode -> "اتصال مباشر عبر RouterOS API ($activePort) • بدون وسيط سحابي"
+                                        useManualNetworkSettings -> "متوافق مع الدومينات (APlusWiFi/DDNS)، IP، أو الروابط"
+                                        else -> "العنوان التلقائي: $activeIp"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1279,15 +1383,18 @@ fun ConnectRouterScreen(
                             }
                         }
 
-                        // Connection Mode Quick Chips
+                        // Connection Mode Quick Chips (Auto LAN / Direct RouterOS API / Custom Cloud & Domain)
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             FilterChip(
-                                selected = !useManualNetworkSettings,
+                                selected = !useManualNetworkSettings && !useDirectApiMode,
                                 onClick = {
                                     useManualNetworkSettings = false
+                                    useDirectApiMode = false
                                     viewModel.refreshDiscovery(context, showToast = false)
                                 },
                                 label = { Text("تلقائي من الشبكة", fontSize = 12.sp) },
@@ -1295,13 +1402,32 @@ fun ConnectRouterScreen(
                                     Icon(Icons.Default.Wifi, contentDescription = null, modifier = Modifier.size(16.dp))
                                 },
                                 modifier = Modifier
-                                    .weight(1f)
                                     .height(48.dp)
                                     .testTag("mode_auto_chip")
                             )
                             FilterChip(
-                                selected = useManualNetworkSettings,
+                                selected = useDirectApiMode,
                                 onClick = {
+                                    useDirectApiMode = true
+                                    useManualNetworkSettings = false
+                                    if (manualIp.isBlank()) manualIp = autoDetectedIp
+                                    if (manualPort in listOf(80, 443, 8080)) {
+                                        manualPort = 8728
+                                        manualUseHttps = false
+                                    }
+                                },
+                                label = { Text("اتصال مباشر (API)", fontSize = 12.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
+                                },
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("mode_direct_api_chip")
+                            )
+                            FilterChip(
+                                selected = useManualNetworkSettings && !useDirectApiMode,
+                                onClick = {
+                                    useDirectApiMode = false
                                     useManualNetworkSettings = true
                                 },
                                 label = { Text("دومين / سيرفر مخصص", fontSize = 12.sp) },
@@ -1309,62 +1435,126 @@ fun ConnectRouterScreen(
                                     Icon(Icons.Default.Language, contentDescription = null, modifier = Modifier.size(16.dp))
                                 },
                                 modifier = Modifier
-                                    .weight(1f)
                                     .height(48.dp)
                                     .testTag("mode_custom_server_chip")
                             )
                         }
 
-                        // Custom Server / Domain / URL Field (Visible when Custom Mode is active)
+                        // Target Host / IP Input & Direct API Port Selector
                         AnimatedVisibility(
-                            visible = useManualNetworkSettings,
+                            visible = isCustomHostMode,
                             enter = fadeIn() + expandVertically(),
                             exit = fadeOut() + shrinkVertically()
                         ) {
-                            OutlinedTextField(
-                                value = manualIp,
-                                onValueChange = { input ->
-                                    if (input.contains('\n') || input.contains("]:")) {
-                                        if (!applySmartPaste(input, showFeedback = true)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = manualIp,
+                                    onValueChange = { input ->
+                                        if (input.contains('\n') || input.contains("]:")) {
+                                            if (!applySmartPaste(input, showFeedback = true)) {
+                                                manualIp = input
+                                            }
+                                        } else {
                                             manualIp = input
+                                            val parsed = RouterConnectionParser.normalizeHostInput(input)
+                                            manualPreferredPath = parsed.rawPath
+                                            parsed.explicitPort?.let { manualPort = it }
+                                            parsed.inferredHttps?.let { manualUseHttps = it }
                                         }
-                                    } else {
-                                        manualIp = input
-                                        val parsed = RouterConnectionParser.normalizeHostInput(input)
-                                        manualPreferredPath = parsed.rawPath
-                                        parsed.explicitPort?.let { manualPort = it }
-                                        parsed.inferredHttps?.let { manualUseHttps = it }
-                                    }
-                                },
-                                label = { Text("عنوان الراوتر أو السيرفر (IP أو دومين أو رابط)") },
-                                placeholder = { Text("مثال: 192.168.88.1 أو myrouter.example.com") },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Language, contentDescription = null, tint = RouterBlue)
-                                },
-                                trailingIcon = {
-                                    IconButton(
-                                        onClick = {
-                                            val target = manualIp.ifBlank { activeIp }
-                                            viewModel.probeCustomHost(target, normalizedManual.explicitPort, showToast = true)
-                                        },
-                                        modifier = Modifier.testTag("probe_custom_host_btn")
+                                    },
+                                    label = {
+                                        Text(
+                                            if (useDirectApiMode) {
+                                                "عنوان IP أو مضيف راوتر ميكروتك (Direct API)"
+                                            } else {
+                                                "عنوان الراوتر أو السيرفر (IP أو دومين أو رابط)"
+                                            }
+                                        )
+                                    },
+                                    placeholder = {
+                                        Text(
+                                            if (useDirectApiMode) {
+                                                "مثال: 192.168.88.1 أو $autoDetectedIp"
+                                            } else {
+                                                "مثال: 192.168.88.1 أو myrouter.example.com"
+                                            }
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = if (useDirectApiMode) Icons.Default.Router else Icons.Default.Language,
+                                            contentDescription = null,
+                                            tint = if (useDirectApiMode) StatusActiveGreen else RouterBlue
+                                        )
+                                    },
+                                    trailingIcon = {
+                                        IconButton(
+                                            onClick = {
+                                                val target = manualIp.ifBlank { activeIp }
+                                                viewModel.probeCustomHost(target, normalizedManual.explicitPort, showToast = true)
+                                            },
+                                            modifier = Modifier.testTag("probe_custom_host_btn")
+                                        ) {
+                                            Icon(Icons.Default.Search, contentDescription = "فحص السيرفر والمنافذ")
+                                        }
+                                    },
+                                    supportingText = {
+                                        val kind = discoveredRouter?.detectedServerKind?.takeIf { it.isNotBlank() && !useDirectApiMode }
+                                        Text(
+                                            text = kind ?: if (useDirectApiMode) {
+                                                "اتصال مباشر عبر RouterOS API ($activePort) بدون أي وسيط سحابي أو متصفح ويب"
+                                            } else {
+                                                "يقبل الدومين، الرابط الكامل، IP:Port، أو لصق رسالة واتساب مباشرة"
+                                            },
+                                            fontSize = 11.sp
+                                        )
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("router_host_input"),
+                                    shape = RoundedCornerShape(12.dp),
+                                    singleLine = true
+                                )
+
+                                if (useDirectApiMode) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Icon(Icons.Default.Search, contentDescription = "فحص السيرفر والمنافذ")
+                                        Text(
+                                            text = "منفذ API:",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        FilterChip(
+                                            selected = activePort == 8728,
+                                            onClick = {
+                                                manualPort = 8728
+                                                manualUseHttps = false
+                                            },
+                                            label = { Text("8728 (API عادي)", fontSize = 11.sp) },
+                                            modifier = Modifier
+                                                .height(48.dp)
+                                                .testTag("direct_api_port_8728")
+                                        )
+                                        FilterChip(
+                                            selected = activePort == 8729,
+                                            onClick = {
+                                                manualPort = 8729
+                                                manualUseHttps = true
+                                            },
+                                            label = { Text("8729 (API-SSL مشفر)", fontSize = 11.sp) },
+                                            modifier = Modifier
+                                                .height(48.dp)
+                                                .testTag("direct_api_port_8729")
+                                        )
                                     }
-                                },
-                                supportingText = {
-                                    val kind = discoveredRouter?.detectedServerKind?.takeIf { it.isNotBlank() }
-                                    Text(
-                                        text = kind ?: "يقبل الدومين، الرابط الكامل، IP:Port، أو لصق رسالة واتساب مباشرة",
-                                        fontSize = 11.sp
-                                    )
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("router_host_input"),
-                                shape = RoundedCornerShape(12.dp),
-                                singleLine = true
-                            )
+                                }
+                            }
                         }
 
                         // 1. Username or Email
@@ -1433,15 +1623,19 @@ fun ConnectRouterScreen(
                             )
                         }
 
-                        // Big Primary Smart Login Button
+                        // Big Primary Login Button
                         Button(
                             onClick = {
-                                val rawOrActive = if (useManualNetworkSettings && manualIp.isNotBlank()) manualIp.trim() else activeIp
+                                val rawOrActive = if (isCustomHostMode && manualIp.isNotBlank()) manualIp.trim() else activeIp
                                 val parsedTarget = RouterConnectionParser.normalizeHostInput(rawOrActive)
                                 val cleanHost = parsedTarget.host.ifBlank { activeIp.trim() }
                                 val resolvedPort = parsedTarget.explicitPort ?: activePort
                                 val resolvedHttps = parsedTarget.inferredHttps ?: activeHttps
-                                val resolvedPath = parsedTarget.rawPath ?: if (useManualNetworkSettings) manualPreferredPath else null
+                                val resolvedPath = if (useDirectApiMode) {
+                                    null
+                                } else {
+                                    parsedTarget.rawPath ?: if (useManualNetworkSettings) manualPreferredPath else null
+                                }
                                 val config = RouterConnectionConfig(
                                     name = if (manualRouterName.isNotBlank()) manualRouterName else "راوتر $cleanHost",
                                     ipAddress = cleanHost,
@@ -1451,7 +1645,8 @@ fun ConnectRouterScreen(
                                     useHttps = resolvedHttps,
                                     autoDetectProtocol = true,
                                     preferredPath = resolvedPath,
-                                    isDemoMode = false
+                                    isDemoMode = false,
+                                    directApiOnly = useDirectApiMode
                                 )
                                 viewModel.connectToRouter(config, saveToFavorites = rememberCredentials, context = context)
                             },
@@ -1463,13 +1658,13 @@ fun ConnectRouterScreen(
                             enabled = connectionState !is ConnectionState.Verifying && username.isNotBlank() && activeIp.isNotBlank()
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Login,
+                                imageVector = if (useDirectApiMode) Icons.Default.Bolt else Icons.Default.Login,
                                 contentDescription = null,
                                 modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "اتصال ذكي وتسجيل الدخول",
+                                text = if (useDirectApiMode) "اتصال مباشر عبر API الآن" else "اتصال ذكي وتسجيل الدخول",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 16.sp
                             )
@@ -1547,9 +1742,13 @@ fun ConnectRouterScreen(
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = if (useManualNetworkSettings) "تم تفعيل التخصيص اليدوي الاختياري" else "الافتراضي: التعرف التلقائي مفعل",
+                                        text = when {
+                                            useDirectApiMode -> "وضع الاتصال المباشر RouterOS API مفعل ($activePort)"
+                                            useManualNetworkSettings -> "تم تفعيل التخصيص اليدوي الاختياري"
+                                            else -> "الافتراضي: التعرف التلقائي مفعل"
+                                        },
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (useManualNetworkSettings) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = if (isCustomHostMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                             }
@@ -1611,13 +1810,18 @@ fun ConnectRouterScreen(
                                         Spacer(modifier = Modifier.width(8.dp))
 
                                         Switch(
-                                            checked = useManualNetworkSettings,
-                                            onCheckedChange = { isManual ->
-                                                useManualNetworkSettings = isManual
-                                                if (isManual && manualIp.isBlank()) {
-                                                    manualIp = autoDetectedIp
-                                                    manualPort = autoDetectedPort
-                                                    manualUseHttps = autoDetectedHttps
+                                            checked = isCustomHostMode,
+                                            onCheckedChange = { isCustom ->
+                                                if (isCustom) {
+                                                    if (!useDirectApiMode) useManualNetworkSettings = true
+                                                    if (manualIp.isBlank()) {
+                                                        manualIp = autoDetectedIp
+                                                        manualPort = if (useDirectApiMode) 8728 else autoDetectedPort
+                                                        manualUseHttps = if (useDirectApiMode) false else autoDetectedHttps
+                                                    }
+                                                } else {
+                                                    useManualNetworkSettings = false
+                                                    useDirectApiMode = false
                                                 }
                                             }
                                         )
@@ -1625,7 +1829,7 @@ fun ConnectRouterScreen(
                                 }
 
                                 // If Default Automatic Mode is active
-                                if (!useManualNetworkSettings) {
+                                if (!isCustomHostMode) {
                                     Surface(
                                         color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
                                         shape = RoundedCornerShape(12.dp),
@@ -1714,11 +1918,14 @@ fun ConnectRouterScreen(
                                                 )
                                                 Spacer(modifier = Modifier.height(6.dp))
                                                 Row(
-                                                    modifier = Modifier.fillMaxWidth(),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .horizontalScroll(rememberScrollState()),
                                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                                 ) {
                                                     listOf(
                                                         8728 to "8728 (API)",
+                                                        8729 to "8729 (SSL)",
                                                         80 to "80 (HTTP)",
                                                         443 to "443 (HTTPS)",
                                                         8080 to "8080 (بديل)"
@@ -1727,9 +1934,10 @@ fun ConnectRouterScreen(
                                                             selected = manualPort == port,
                                                             onClick = {
                                                                 manualPort = port
-                                                                if (port == 443) manualUseHttps = true
+                                                                manualUseHttps = (port == 443 || port == 8729)
                                                             },
-                                                            label = { Text(label, fontSize = 12.sp) }
+                                                            label = { Text(label, fontSize = 12.sp) },
+                                                            modifier = Modifier.height(48.dp)
                                                         )
                                                     }
                                                 }
@@ -1800,6 +2008,7 @@ fun ConnectRouterScreen(
                                                 TextButton(
                                                     onClick = {
                                                         useManualNetworkSettings = false
+                                                        useDirectApiMode = false
                                                     },
                                                     shape = RoundedCornerShape(8.dp),
                                                     modifier = Modifier.weight(1f)

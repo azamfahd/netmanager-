@@ -71,6 +71,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -186,6 +187,7 @@ fun VoucherBatchDialog(
     profiles: List<HotspotProfile>,
     posAgents: List<PosAgentEntity> = emptyList(),
     preselectedAgentId: Long = 0L,
+    suggestedSerialStart: Long = 1L,
     onDismiss: () -> Unit,
     onGenerate: (BatchGenerationConfig) -> Unit,
     onAddSingleCard: ((HotspotCard, Long, String, Double) -> Unit)? = null
@@ -235,6 +237,9 @@ fun VoucherBatchDialog(
     var codeLengthInput by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.codeLength else "6") }
     var charType by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.charType else CodeCharType.NUMBERS_ONLY) }
     var batchComment by remember { mutableStateOf(if (savedSettings.hasCustomDefaults) savedSettings.batchComment else "دفعة كروت هوتسبوت") }
+    var startDisabled by remember { mutableStateOf(false) }
+    var includeSerialInComment by remember { mutableStateOf(false) }
+    var serialStartInput by remember(suggestedSerialStart) { mutableStateOf(suggestedSerialStart.toString()) }
 
     // Single card specific state
     var singleCode by remember { mutableStateOf("849201") }
@@ -257,8 +262,9 @@ fun VoucherBatchDialog(
         } else if (profile.sessionTimeout.isNotBlank() && profile.sessionTimeout != "غير محدد") {
             timeLimit = profile.sessionTimeout
         }
-        val parsedDataMb = Regex("""\d+""").find(profile.dataLimit)?.value?.toLongOrNull()
-        if (parsedDataMb != null && parsedDataMb > 0) {
+        val parsedBytes = com.example.data.network.NetworkUtils.parseSizeToBytes(profile.dataLimit)
+        val parsedDataMb = parsedBytes / (1024L * 1024L)
+        if (parsedDataMb > 0L) {
             dataLimitMBInput = parsedDataMb.toString()
         }
     }
@@ -920,10 +926,14 @@ fun VoucherBatchDialog(
                                 modifier = Modifier.size(18.dp)
                             )
                             Text(
-                                text = if (targetSystem == "hotspot")
-                                    "🌐 سيتم تفعيل الكرت في سيرفر الهوتسبوت الأساسي (/ip/hotspot/user) والتأكد التلقائي من توافق الباقة مع السيرفر وتنشيط الكرت فوراً (=disabled=no) للعمل على صفحة الدخول."
-                                else
-                                    "👤 سيتم تفعيل الكرت في نظام يوزرمانجر (/user-manager/user) وربطه بالباقة المحددة في الراوتر بنجاح.",
+                                text = when {
+                                    selectedTab == VoucherDialogTab.BATCH_GENERATE && startDisabled ->
+                                        "📦 سيتم حفظ الدفعة كمخزون معطّل في الراوتر (disabled=yes) وتفعيلها بالتسلسل لاحقاً عند سحبها وطباعتها فقط."
+                                    targetSystem == "hotspot" ->
+                                        "🌐 سيتم تفعيل الكرت في سيرفر الهوتسبوت الأساسي (/ip/hotspot/user) والتأكد التلقائي من توافق الباقة مع السيرفر وتنشيط الكرت فوراً (=disabled=no) للعمل على صفحة الدخول."
+                                    else ->
+                                        "👤 سيتم تفعيل الكرت في نظام يوزرمانجر (/user-manager/user) وربطه بالباقة المحددة في الراوتر بنجاح."
+                                },
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurface
@@ -1143,6 +1153,93 @@ fun VoucherBatchDialog(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp)
                     )
+
+                    // Stock & Sequential Serial Options
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f)
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(
+                                        text = "حفظ الدفعة كمخزون معطّل",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "تخزين الكروت معطّلة على الراوتر لتفعيلها بالتسلسل عند الطباعة",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = startDisabled,
+                                    onCheckedChange = { startDisabled = it },
+                                    modifier = Modifier.testTag("batch_start_disabled_switch")
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(
+                                        text = "ترقيم تسلسلي تلقائي (seq:XXXX)",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "إضافة الرقم التسلسلي في التعليق لترتيب السحب وإظهاره بالطباعة",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = includeSerialInComment,
+                                    onCheckedChange = { includeSerialInComment = it },
+                                    modifier = Modifier.testTag("batch_serial_comment_switch")
+                                )
+                            }
+
+                            AnimatedVisibility(visible = includeSerialInComment) {
+                                val parsedStart = serialStartInput.toLongOrNull()?.coerceAtLeast(1L) ?: suggestedSerialStart
+                                val parsedQty = batchCountInput.toIntOrNull()?.coerceIn(1, 5000) ?: 20
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    OutlinedTextField(
+                                        value = serialStartInput,
+                                        onValueChange = { serialStartInput = it.filter(Char::isDigit).take(8) },
+                                        label = { Text("بداية التسلسل للدفعة") },
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        singleLine = true,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("batch_serial_start_input"),
+                                        shape = RoundedCornerShape(10.dp)
+                                    )
+                                    Text(
+                                        text = "سيتم ترقيم الدفعة من #$parsedStart إلى #${parsedStart + parsedQty - 1}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
                 } else {
                     // ---- SINGLE CARD MANUAL MODE ----
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1491,6 +1588,7 @@ fun VoucherBatchDialog(
                         val selectedAgent = posAgents.find { it.id == selectedAgentId }
                         val userLimitMB = dataLimitMBInput.trim().toLongOrNull() ?: 0L
                         val userTimeLimit = timeLimit.trim()
+                        val parsedSerialStart = serialStartInput.toLongOrNull()?.coerceAtLeast(1L) ?: suggestedSerialStart
                         val config = BatchGenerationConfig(
                             count = parsedCount,
                             profile = selectedProfile.trim(),
@@ -1506,7 +1604,10 @@ fun VoucherBatchDialog(
                             posAgentName = selectedAgent?.name.orEmpty(),
                             discountPercent = selectedAgent?.discountPercent ?: 0.0,
                             targetSystem = targetSystem,
-                            profileSource = effectiveProfileObj.source
+                            profileSource = effectiveProfileObj.source,
+                            startDisabled = startDisabled,
+                            includeSerialInComment = includeSerialInComment,
+                            serialStartNumber = parsedSerialStart
                         )
                         onGenerate(config)
                         onDismiss()

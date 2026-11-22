@@ -68,18 +68,23 @@ object AppUpdateManager {
                     .header("User-Agent", "NetManager-Android-App")
                     .build()
 
-                val respLatest = httpClient.newCall(reqLatest).execute()
-                val codeLatest = respLatest.code
-                val bodyLatest = respLatest.body?.string()
+                val respLatestCode: Int
+                val respLatestSuccess: Boolean
+                val bodyLatest: String?
+                httpClient.newCall(reqLatest).execute().use { respLatest ->
+                    respLatestCode = respLatest.code
+                    respLatestSuccess = respLatest.isSuccessful
+                    bodyLatest = respLatest.body?.string()
+                }
 
-                if (respLatest.isSuccessful && !bodyLatest.isNullOrBlank()) {
+                if (respLatestSuccess && !bodyLatest.isNullOrBlank()) {
                     val json = JSONObject(bodyLatest)
                     val releaseInfo = parseReleaseJson(json, "https://github.com/$owner/$repo/releases")
                     val isNewer = isVersionNewer(releaseInfo.tagName, currentVersion)
                     return@withContext Result.success(Pair(releaseInfo, isNewer))
                 }
 
-                if (codeLatest == 403) {
+                if (respLatestCode == 403) {
                     isRateLimited = true
                 }
 
@@ -91,9 +96,13 @@ object AppUpdateManager {
                     .header("User-Agent", "NetManager-Android-App")
                     .build()
 
-                val respAll = httpClient.newCall(reqAll).execute()
-                val bodyAll = respAll.body?.string()
-                if (respAll.isSuccessful && !bodyAll.isNullOrBlank()) {
+                val respAllSuccess: Boolean
+                val bodyAll: String?
+                httpClient.newCall(reqAll).execute().use { respAll ->
+                    respAllSuccess = respAll.isSuccessful
+                    bodyAll = respAll.body?.string()
+                }
+                if (respAllSuccess && !bodyAll.isNullOrBlank()) {
                     val array = org.json.JSONArray(bodyAll)
                     if (array.length() > 0) {
                         val firstRelease = array.getJSONObject(0)
@@ -103,12 +112,12 @@ object AppUpdateManager {
                     }
                 }
 
-                if (codeLatest == 404) {
+                if (respLatestCode == 404) {
                     lastError = "لم يتم العثور على إصدارات جديدة حالياً."
-                } else if (codeLatest == 403) {
+                } else if (respLatestCode == 403) {
                     lastError = "الخدمة مشغولة مؤقتاً، يرجى المحاولة بعد قليل."
                 } else {
-                    lastError = "تعذر الاتصال بسيرفر التحديثات (رمز الخطأ: $codeLatest)"
+                    lastError = "تعذر الاتصال بسيرفر التحديثات (رمز الخطأ: $respLatestCode)"
                 }
             } catch (e: Exception) {
                 lastError = "تعذر الاتصال بسيرفر التحديثات: ${e.localizedMessage ?: e.message}"
@@ -140,8 +149,9 @@ object AppUpdateManager {
                 val downloadUrl = assetJson.optString("browser_download_url", "")
                 val contentType = assetJson.optString("content_type", "")
 
-                if (assetName.endsWith(".apk", ignoreCase = true) ||
-                    contentType.contains("android.package-archive", ignoreCase = true)
+                if ((assetName.endsWith(".apk", ignoreCase = true) ||
+                        contentType.contains("android.package-archive", ignoreCase = true)) &&
+                    downloadUrl.startsWith("https://", ignoreCase = true)
                 ) {
                     apkAsset = GitHubReleaseAsset(
                         name = assetName,
@@ -189,102 +199,129 @@ object AppUpdateManager {
     }
 
     /**
-     * Determines whether an update is a minor / lightweight update (patch or small revision).
+     * Determines whether an update is a minor / lightweight update (same major version).
      */
     fun isMinorUpdate(remoteTag: String, currentVersion: String): Boolean {
-        val cleanRemote = remoteTag.trim().removePrefix("v").removePrefix("V").trim()
-        val cleanCurrent = currentVersion.trim().removePrefix("v").removePrefix("V").trim()
+        val cleanRemote = remoteTag.trim().removePrefix("v").removePrefix("V").substringBefore("-").trim()
+        val cleanCurrent = currentVersion.trim().removePrefix("v").removePrefix("V").substringBefore("-").trim()
 
         val remoteParts = cleanRemote.split(".").mapNotNull { it.toIntOrNull() }
         val currentParts = cleanCurrent.split(".").mapNotNull { it.toIntOrNull() }
 
         if (remoteParts.isNotEmpty() && currentParts.isNotEmpty()) {
-            // Same major version means it's a minor / patch update
-            if (remoteParts[0] == currentParts[0]) {
-                return true
+            return remoteParts[0] == currentParts[0]
+        }
+        return false
+    }
+
+    fun isSecureUpdateUrl(url: String): Boolean {
+        return url.trim().startsWith("https://", ignoreCase = true)
+    }
+
+    fun computeFileSha256(file: File): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { inp ->
+            val buf = ByteArray(16384)
+            var read = inp.read(buf)
+            while (read != -1) {
+                digest.update(buf, 0, read)
+                read = inp.read(buf)
             }
         }
-        return true
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     /**
-     * Downloads the APK file with real-time percentage progress reporting.
+     * Downloads the APK file cleanly via HTTPS with real-time percentage progress reporting
+     * and optional SHA-256 integrity verification.
      */
     suspend fun downloadApk(
         context: Context,
         downloadUrl: String,
+        expectedSha256: String? = null,
         onProgress: (percent: Int, downloadedBytes: Long, totalBytes: Long) -> Unit
     ): Result<File> = withContext(Dispatchers.IO) {
-        var inputStream: InputStream? = null
-        var outputStream: FileOutputStream? = null
+        if (!isSecureUpdateUrl(downloadUrl)) {
+            return@withContext Result.failure(Exception("رُفض تنزيل التحديث: يجب أن يكون الرابط عبر بروتوكول HTTPS الآمن."))
+        }
         try {
             val request = Request.Builder()
                 .url(downloadUrl)
                 .header("User-Agent", "NetManager-Android-App")
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(Exception("فشل تنزيل ملف APK (رمز الاستجابة: ${response.code})"))
-            }
-
-            val responseBody = response.body
-                ?: return@withContext Result.failure(Exception("محتوى ملف APK فارغ!"))
-
-            val totalBytes = responseBody.contentLength()
-
-            val updatesDir = File(context.cacheDir, "updates")
-            if (!updatesDir.exists()) {
-                updatesDir.mkdirs()
-            }
-
-            val apkFile = File(updatesDir, "NetManager_update.apk")
-            if (apkFile.exists()) {
-                apkFile.delete()
-            }
-
-            inputStream = responseBody.byteStream()
-            outputStream = FileOutputStream(apkFile)
-
-            val buffer = ByteArray(16384) // Larger buffer for faster IO
-            var bytesRead = 0
-            var totalRead: Long = 0
-            var lastReportedPercent = -1
-
-            // Initial report to show user it started
-            onProgress(0, 0, totalBytes)
-            
-            while (kotlinx.coroutines.currentCoroutineContext().isActive && inputStream.read(buffer).also { bytesRead = it } != -1) {
-                outputStream.write(buffer, 0, bytesRead)
-                totalRead += bytesRead
-
-                if (totalBytes > 0) {
-                    val percent = ((totalRead * 100) / totalBytes).toInt().coerceIn(0, 100)
-                    if (percent != lastReportedPercent) {
-                        lastReportedPercent = percent
-                        onProgress(percent, totalRead, totalBytes)
-                    }
-                } else {
-                    onProgress(-1, totalRead, -1)
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(Exception("فشل تنزيل ملف APK (رمز الاستجابة: ${response.code})"))
                 }
-            }
 
-            outputStream.flush()
-            
-            if (!kotlinx.coroutines.currentCoroutineContext().isActive) {
-                if (apkFile.exists()) apkFile.delete()
-                return@withContext Result.failure(kotlinx.coroutines.CancellationException("Download cancelled"))
-            }
+                val responseBody = response.body
+                    ?: return@withContext Result.failure(Exception("محتوى ملف APK فارغ!"))
 
-            onProgress(100, totalRead, totalRead)
-            val finalFile = apkFile
-            updateState(UpdateDownloadState.Completed(finalFile))
-            Result.success(finalFile)
+                val totalBytes = responseBody.contentLength()
+
+                val updatesDir = File(context.cacheDir, "updates")
+                if (!updatesDir.exists()) {
+                    updatesDir.mkdirs()
+                }
+
+                val apkFile = File(updatesDir, "NetManager_update.apk")
+                if (apkFile.exists()) {
+                    apkFile.delete()
+                }
+
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                var totalRead: Long = 0
+
+                responseBody.byteStream().use { inputStream ->
+                    FileOutputStream(apkFile).use { outputStream ->
+                        val buffer = ByteArray(16384)
+                        var bytesRead = 0
+                        var lastReportedPercent = -1
+
+                        onProgress(0, 0, totalBytes)
+
+                        while (kotlinx.coroutines.currentCoroutineContext().isActive && inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            digest.update(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+
+                            if (totalBytes > 0) {
+                                val percent = ((totalRead * 100) / totalBytes).toInt().coerceIn(0, 100)
+                                if (percent != lastReportedPercent) {
+                                    lastReportedPercent = percent
+                                    onProgress(percent, totalRead, totalBytes)
+                                }
+                            } else {
+                                onProgress(-1, totalRead, -1)
+                            }
+                        }
+                        outputStream.flush()
+                    }
+                }
+
+                if (!kotlinx.coroutines.currentCoroutineContext().isActive) {
+                    if (apkFile.exists()) apkFile.delete()
+                    return@withContext Result.failure(kotlinx.coroutines.CancellationException("Download cancelled"))
+                }
+
+                val cleanExpected = expectedSha256?.trim()?.removePrefix("sha256:")?.lowercase()
+                if (!cleanExpected.isNullOrBlank()) {
+                    val actualHash = digest.digest().joinToString("") { "%02x".format(it) }
+                    if (actualHash != cleanExpected) {
+                        apkFile.delete()
+                        return@withContext Result.failure(Exception("فشل التحقق من سلامة ملف التحديث (SHA-256 غير متطابق)."))
+                    }
+                }
+
+                onProgress(100, totalRead, totalRead)
+                val finalFile = apkFile
+                updateState(UpdateDownloadState.Completed(finalFile))
+                Result.success(finalFile)
+            }
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(Exception("حدث خطأ أثناء تنزيل التحديث: ${e.localizedMessage ?: e.message}"))
-        } finally {
-            try { inputStream?.close() } catch (_: Exception) {}
-            try { outputStream?.close() } catch (_: Exception) {}
         }
     }
 
