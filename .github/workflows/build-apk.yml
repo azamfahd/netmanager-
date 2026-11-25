@@ -114,7 +114,22 @@ jobs:
             echo "Error: Missing GitHub Secret RELEASE_KEYSTORE_PASSWORD."
             exit 1
           fi
-          ./gradlew testReleaseUnitTest assembleRelease --no-daemon --no-configuration-cache --no-build-cache --stacktrace -Djava.awt.headless=true
+          set -o pipefail
+          ./gradlew testReleaseUnitTest assembleRelease --no-daemon --no-configuration-cache --no-build-cache --stacktrace -Djava.awt.headless=true 2>&1 | tee build.log
+
+      - name: Report build errors as annotations
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('build.log').read_text(errors='replace').splitlines() if Path('build.log').exists() else []
+          matches = [line.strip() for line in lines if any(marker in line for marker in (' e: ', 'e: file:', 'error:', 'FAILED', 'FAILURE:', 'What went wrong:', 'Execution failed for task', 'There were failing tests'))]
+          for line in matches[:20]:
+              print('::error::' + line[:900].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+          if not matches:
+              for line in lines[-15:]:
+                  print('::error::' + line[:900].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+          PY
 
       - name: Locate and Rename Release APK
         run: |
