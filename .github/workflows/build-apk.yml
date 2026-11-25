@@ -115,7 +115,7 @@ jobs:
             exit 1
           fi
           set -o pipefail
-          ./gradlew assembleRelease --no-daemon --no-configuration-cache --no-build-cache --stacktrace -Djava.awt.headless=true 2>&1 | tee build.log
+          ./gradlew testDebugUnitTest assembleRelease --no-daemon --no-configuration-cache --no-build-cache --stacktrace -Djava.awt.headless=true 2>&1 | tee build.log
 
       - name: Report build errors as annotations
         if: failure()
