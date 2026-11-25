@@ -132,6 +132,11 @@ jobs:
           if not matches:
               for line in lines[-15:]:
                   print('::error::' + line[:900].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+          import xml.etree.ElementTree as ET
+          for result in Path('app/build/test-results').rglob('TEST-*.xml'):
+              root = ET.parse(result).getroot()
+              for failure in root.iter('failure'):
+                  print('::error::' + (result.name + ': ' + failure.attrib.get('message', '') + ' ' + (failure.text or '')[:700]).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')[:900])
           PY
 
       - name: Locate and Rename Release APK
