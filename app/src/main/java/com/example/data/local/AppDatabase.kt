@@ -25,7 +25,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RouterTaskEntity::class,
         MaterializedSummaryEntity::class
     ],
-    version = 20,
+    version = 21,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -146,6 +146,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE router_task_queue ADD COLUMN routerKey TEXT NOT NULL DEFAULT ''")
+                // The target of old offline tasks cannot be recovered reliably; retain for review,
+                // but do not ever execute them against whichever router happens to be connected.
+                db.execSQL("UPDATE router_task_queue SET status = 'FAILED', lastError = 'Legacy task has no router identity; create a new task' WHERE status != 'COMPLETED'")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_router_task_queue_routerKey_status_nextAttemptTimestamp ON router_task_queue(routerKey, status, nextAttemptTimestamp)")
+                // Old events could contain voucher passwords and even the full REST request body.
+                db.execSQL("UPDATE system_event_logs SET details = '' WHERE lower(details) LIKE '%password%' OR details LIKE '%كلمة المرور%'")
+                db.execSQL("UPDATE system_event_logs SET description = '[تم حجب تفاصيل حساسة]' WHERE lower(description) LIKE '%password%' OR description LIKE '%كلمة المرور%'")
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -156,7 +169,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "netmanager_database"
                 )
-                    .addMigrations(MIGRATION_18_19, MIGRATION_19_20)
+                    .addMigrations(MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21)
                     .build()
                 INSTANCE = instance
                 instance

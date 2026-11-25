@@ -20,10 +20,15 @@ data class QueueProcessingResult(
 )
 
 class RouterTaskQueueManager(
-    private val appDao: AppDao
+    private val appDao: AppDao,
+    private val routerKeyProvider: () -> String
 ) {
     private val TAG = "RouterTaskQueue"
     private val queueMutex = Mutex()
+
+    private fun routerKey(): String = routerKeyProvider().trim().lowercase().also {
+        require(it.isNotBlank()) { "لا يمكن حفظ مهمة دون تحديد الراوتر" }
+    }
 
     private val _isProcessing = MutableStateFlow(false)
     val isProcessing: StateFlow<Boolean> = _isProcessing.asStateFlow()
@@ -36,13 +41,14 @@ class RouterTaskQueueManager(
      */
     suspend fun enqueueEditCard(card: HotspotCard): Long {
         return withContext(Dispatchers.IO) {
+            val key = routerKey()
             if (card.name.isNotBlank()) {
                 try {
-                    appDao.deletePendingTasksByCardAndType(card.name, RouterTaskEntity.TYPE_EDIT_CARD)
+                    appDao.deletePendingTasksByCardAndType(key, card.name, RouterTaskEntity.TYPE_EDIT_CARD)
                 } catch (_: Exception) {}
             }
 
-            val task = RouterTaskEntity.createEditTask(card)
+            val task = RouterTaskEntity.createEditTask(card, key)
             val insertedId = appDao.insertTask(task)
             Log.d(TAG, "Enqueued EDIT_CARD task #$insertedId for card ${card.name}")
             insertedId
@@ -55,12 +61,13 @@ class RouterTaskQueueManager(
     suspend fun enqueueDeleteCard(cardId: String, cardName: String): Long {
         return withContext(Dispatchers.IO) {
             // Deleting a card supersedes all pending edits/toggles/reactivations for this card
+            val key = routerKey()
             if (cardName.isNotBlank()) {
                 try {
-                    appDao.deleteTasksByCardName(cardName)
+                    appDao.deleteTasksByCardName(key, cardName)
                 } catch (_: Exception) {}
             }
-            val task = RouterTaskEntity.createDeleteTask(cardId, cardName)
+            val task = RouterTaskEntity.createDeleteTask(cardId, cardName, key)
             val insertedId = appDao.insertTask(task)
             Log.d(TAG, "Enqueued DELETE_CARD task #$insertedId for card $cardName (ID: $cardId)")
             insertedId
@@ -72,12 +79,13 @@ class RouterTaskQueueManager(
      */
     suspend fun enqueueToggleDisabled(cardId: String, cardName: String, targetDisabled: Boolean): Long {
         return withContext(Dispatchers.IO) {
+            val key = routerKey()
             if (cardName.isNotBlank()) {
                 try {
-                    appDao.deletePendingTasksByCardAndType(cardName, RouterTaskEntity.TYPE_TOGGLE_CARD)
+                    appDao.deletePendingTasksByCardAndType(key, cardName, RouterTaskEntity.TYPE_TOGGLE_CARD)
                 } catch (_: Exception) {}
             }
-            val task = RouterTaskEntity.createToggleTask(cardId, cardName, targetDisabled)
+            val task = RouterTaskEntity.createToggleTask(cardId, cardName, targetDisabled, key)
             val insertedId = appDao.insertTask(task)
             Log.d(TAG, "Enqueued TOGGLE_CARD task #$insertedId for card $cardName")
             insertedId
@@ -89,12 +97,13 @@ class RouterTaskQueueManager(
      */
     suspend fun enqueueReactivateCard(card: HotspotCard): Long {
         return withContext(Dispatchers.IO) {
+            val key = routerKey()
             if (card.name.isNotBlank()) {
                 try {
-                    appDao.deletePendingTasksByCardAndType(card.name, RouterTaskEntity.TYPE_REACTIVATE_CARD)
+                    appDao.deletePendingTasksByCardAndType(key, card.name, RouterTaskEntity.TYPE_REACTIVATE_CARD)
                 } catch (_: Exception) {}
             }
-            val task = RouterTaskEntity.createReactivateTask(card)
+            val task = RouterTaskEntity.createReactivateTask(card, key)
             val insertedId = appDao.insertTask(task)
             Log.d(TAG, "Enqueued REACTIVATE_CARD task #$insertedId for card ${card.name}")
             insertedId
@@ -106,12 +115,13 @@ class RouterTaskQueueManager(
      */
     suspend fun enqueueVerifyAndActivateCard(card: HotspotCard): Long {
         return withContext(Dispatchers.IO) {
+            val key = routerKey()
             if (card.name.isNotBlank()) {
                 try {
-                    appDao.deletePendingTasksByCardAndType(card.name, RouterTaskEntity.TYPE_VERIFY_ACTIVATE_CARD)
+                    appDao.deletePendingTasksByCardAndType(key, card.name, RouterTaskEntity.TYPE_VERIFY_ACTIVATE_CARD)
                 } catch (_: Exception) {}
             }
-            val task = RouterTaskEntity.createVerifyActivateTask(card)
+            val task = RouterTaskEntity.createVerifyActivateTask(card, key)
             val insertedId = appDao.insertTask(task)
             Log.d(TAG, "Enqueued VERIFY_ACTIVATE_CARD task #$insertedId for card ${card.name}")
             insertedId
@@ -124,6 +134,10 @@ class RouterTaskQueueManager(
      */
     suspend fun processPendingTasks(repository: MikrotikRepository): QueueProcessingResult {
         return withContext(Dispatchers.IO) {
+            val key = routerKeyProvider().trim().lowercase()
+            if (key.isBlank() || repository.connectedRouterKey() != key) {
+                return@withContext QueueProcessingResult(message = "لا يمكن تنفيذ المهام: هوية الراوتر المتصل غير مطابقة")
+            }
             if (!queueMutex.tryLock()) {
                 Log.d(TAG, "Queue processing already in progress, skipping concurrent run.")
                 return@withContext QueueProcessingResult(message = "المعالجة قيد التشغيل بالفعل")
@@ -136,10 +150,10 @@ class RouterTaskQueueManager(
 
             try {
                 val now = System.currentTimeMillis()
-                val tasks = appDao.getPendingTasksReady(now)
+                val tasks = appDao.getPendingTasksReady(key, now)
 
                 if (tasks.isEmpty()) {
-                    val totalPending = appDao.getPendingTaskCount()
+                    val totalPending = appDao.getPendingTaskCount(key)
                     val result = QueueProcessingResult(
                         processedCount = 0,
                         remainingPendingCount = totalPending,
@@ -152,6 +166,8 @@ class RouterTaskQueueManager(
                 Log.d(TAG, "Found ${tasks.size} ready pending tasks to process.")
 
                 for (task in tasks) {
+                    // A reconnect may switch targets while the batch is running.
+                    if (repository.connectedRouterKey() != key || routerKeyProvider().trim().lowercase() != key) break
                     processedCount++
                     appDao.updateTaskStatus(task.id, RouterTaskEntity.STATUS_PROCESSING)
 
@@ -190,7 +206,7 @@ class RouterTaskQueueManager(
                     }
                 }
 
-                val remainingPending = appDao.getPendingTaskCount()
+                val remainingPending = appDao.getPendingTaskCount(key)
                 val summaryMessage = when {
                     processedCount == 0 -> "لا توجد عمليات مؤجلة جاهزة"
                     failedCount == 0 -> "تم تنفيذ $successCount عملية على الراوتر بنجاح!"
@@ -213,7 +229,7 @@ class RouterTaskQueueManager(
                     processedCount = processedCount,
                     successCount = successCount,
                     failedCount = failedCount,
-                    remainingPendingCount = appDao.getPendingTaskCount(),
+                    remainingPendingCount = appDao.getPendingTaskCount(key),
                     message = "خطأ أثناء معالجة الطابور: ${e.message}"
                 )
                 _lastProcessResult.value = result
@@ -229,6 +245,9 @@ class RouterTaskQueueManager(
      * Executes the individual task against MikrotikRepository.
      */
     private suspend fun executeTaskOnRouter(task: RouterTaskEntity, repository: MikrotikRepository): Result<Boolean> {
+        if (task.routerKey.isBlank() || repository.connectedRouterKey() != task.routerKey) {
+            return Result.failure(IllegalStateException("تغير الراوتر المتصل؛ لم تُنفذ المهمة"))
+        }
         return try {
             when (task.taskType) {
                 RouterTaskEntity.TYPE_EDIT_CARD -> {
@@ -271,8 +290,12 @@ class RouterTaskQueueManager(
      */
     suspend fun forceRetryAllPending(repository: MikrotikRepository): QueueProcessingResult {
         return withContext(Dispatchers.IO) {
+            val key = routerKeyProvider().trim().lowercase()
+            if (key.isBlank() || repository.connectedRouterKey() != key) {
+                return@withContext QueueProcessingResult(message = "اتصل بالراوتر الصحيح قبل إعادة المحاولة")
+            }
             try {
-                val allTasks = appDao.getAllRetryableTasks()
+                val allTasks = appDao.getAllRetryableTasks(key)
                 val now = System.currentTimeMillis()
                 for (t in allTasks) {
                     appDao.updateTask(

@@ -114,7 +114,7 @@ jobs:
             echo "Error: Missing GitHub Secret RELEASE_KEYSTORE_PASSWORD."
             exit 1
           fi
-          ./gradlew assembleRelease --no-daemon --no-configuration-cache --no-build-cache --stacktrace -Djava.awt.headless=true
+          ./gradlew testReleaseUnitTest assembleRelease --no-daemon --no-configuration-cache --no-build-cache --stacktrace -Djava.awt.headless=true
 
       - name: Locate and Rename Release APK
         run: |

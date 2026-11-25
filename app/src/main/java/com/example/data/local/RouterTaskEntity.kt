@@ -13,7 +13,8 @@ import org.json.JSONObject
         Index(value = ["nextAttemptTimestamp"]),
         Index(value = ["status", "nextAttemptTimestamp"]),
         Index(value = ["cardName"]),
-        Index(value = ["createdAt"])
+        Index(value = ["createdAt"]),
+        Index(value = ["routerKey", "status", "nextAttemptTimestamp"])
     ]
 )
 data class RouterTaskEntity(
@@ -23,6 +24,8 @@ data class RouterTaskEntity(
     val cardId: String,
     val cardName: String,
     val payloadJson: String,
+    @androidx.room.ColumnInfo(defaultValue = "''")
+    val routerKey: String = "", // Host identity; legacy unscoped tasks must never execute automatically.
     val createdAt: Long = System.currentTimeMillis(),
     val retryCount: Int = 0,
     val maxRetries: Int = 8,
@@ -57,7 +60,7 @@ data class RouterTaskEntity(
             return System.currentTimeMillis() + delay
         }
 
-        fun createEditTask(card: HotspotCard): RouterTaskEntity {
+        fun createEditTask(card: HotspotCard, routerKey: String): RouterTaskEntity {
             val json = JSONObject().apply {
                 put("id", card.id)
                 put("name", card.name)
@@ -75,11 +78,12 @@ data class RouterTaskEntity(
                 cardId = card.id,
                 cardName = card.name,
                 payloadJson = json.toString(),
+                routerKey = routerKey,
                 status = STATUS_PENDING
             )
         }
 
-        fun createDeleteTask(cardId: String, cardName: String): RouterTaskEntity {
+        fun createDeleteTask(cardId: String, cardName: String, routerKey: String): RouterTaskEntity {
             val json = JSONObject().apply {
                 put("id", cardId)
                 put("name", cardName)
@@ -89,11 +93,12 @@ data class RouterTaskEntity(
                 cardId = cardId,
                 cardName = cardName,
                 payloadJson = json.toString(),
+                routerKey = routerKey,
                 status = STATUS_PENDING
             )
         }
 
-        fun createToggleTask(cardId: String, cardName: String, targetDisabled: Boolean): RouterTaskEntity {
+        fun createToggleTask(cardId: String, cardName: String, targetDisabled: Boolean, routerKey: String): RouterTaskEntity {
             val json = JSONObject().apply {
                 put("id", cardId)
                 put("name", cardName)
@@ -104,11 +109,12 @@ data class RouterTaskEntity(
                 cardId = cardId,
                 cardName = cardName,
                 payloadJson = json.toString(),
+                routerKey = routerKey,
                 status = STATUS_PENDING
             )
         }
 
-        fun createReactivateTask(card: HotspotCard): RouterTaskEntity {
+        fun createReactivateTask(card: HotspotCard, routerKey: String): RouterTaskEntity {
             val json = JSONObject().apply {
                 put("id", card.id)
                 put("name", card.name)
@@ -124,11 +130,12 @@ data class RouterTaskEntity(
                 cardId = card.id,
                 cardName = card.name,
                 payloadJson = json.toString(),
+                routerKey = routerKey,
                 status = STATUS_PENDING
             )
         }
 
-        fun createVerifyActivateTask(card: HotspotCard): RouterTaskEntity {
+        fun createVerifyActivateTask(card: HotspotCard, routerKey: String): RouterTaskEntity {
             val json = JSONObject().apply {
                 put("id", card.id)
                 put("name", card.name)
@@ -146,6 +153,7 @@ data class RouterTaskEntity(
                 cardId = card.id,
                 cardName = card.name,
                 payloadJson = json.toString(),
+                routerKey = routerKey,
                 status = STATUS_PENDING
             )
         }

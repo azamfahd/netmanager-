@@ -1345,13 +1345,9 @@ fun WebPortalScreen(
                                     handler: SslErrorHandler?,
                                     error: SslError?
                                 ) {
-                                    val sslHost = runCatching { Uri.parse(error?.url.orEmpty()).host.orEmpty() }.getOrDefault("")
-                                    if (RouterConnectionParser.isPrivateOrLocalIpv4(sslHost)) {
-                                        // Local MikroTik WebFig routers typically use self-signed HTTPS certificates on LAN
-                                        handler?.proceed()
-                                    } else {
-                                        handler?.cancel()
-                                    }
+                                    // A LAN IP is not proof of identity; never ignore a certificate error.
+                                    handler?.cancel()
+                                    mainFrameError = "شهادة HTTPS غير موثوقة لهذا الراوتر؛ ثبّت شهادة صالحة قبل إدخال بيانات الإدارة."
                                 }
 
                                 override fun onRenderProcessGone(

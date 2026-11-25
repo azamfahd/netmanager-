@@ -589,7 +589,7 @@ class EngineeringRepairVerificationTest {
 
         try {
             val dao = db.appDao()
-            val queueManager = RouterTaskQueueManager(dao)
+            val queueManager = RouterTaskQueueManager(dao) { "127.0.0.1" }
             val repo = MikrotikRepository(appDao = dao)
 
             runBlocking {
@@ -606,9 +606,9 @@ class EngineeringRepairVerificationTest {
 
                 // Also insert a previously FAILED task with high retryCount
                 dao.clearCompletedTasks()
-                dao.deleteTasksByCardName("Q_CARD")
+                dao.deleteTasksByCardName("127.0.0.1", "Q_CARD")
                 dao.insertTask(
-                    RouterTaskEntity.createToggleTask("*99", "Q_CARD", targetDisabled = true).copy(
+                    RouterTaskEntity.createToggleTask("*99", "Q_CARD", targetDisabled = true, routerKey = "127.0.0.1").copy(
                         status = RouterTaskEntity.STATUS_FAILED,
                         retryCount = 8,
                         nextAttemptTimestamp = System.currentTimeMillis() + 999_999L,
@@ -633,7 +633,7 @@ class EngineeringRepairVerificationTest {
                 assertEquals(1, result.successCount)
                 assertEquals(0, result.failedCount)
                 assertNotEquals(0, result.processedCount)
-                assertTrue(dao.getAllRetryableTasks().isEmpty())
+                assertTrue(dao.getAllRetryableTasks("127.0.0.1").isEmpty())
             }
         } finally {
             running.set(false)

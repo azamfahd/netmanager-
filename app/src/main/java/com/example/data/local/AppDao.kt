@@ -281,11 +281,11 @@ interface AppDao {
     // ==========================================
     // Router Task Queue (Offline sync & Exponential Backoff)
     // ==========================================
-    @Query("SELECT * FROM router_task_queue WHERE status = 'PENDING' AND nextAttemptTimestamp <= :currentTime ORDER BY createdAt ASC")
-    suspend fun getPendingTasksReady(currentTime: Long): List<RouterTaskEntity>
+    @Query("SELECT * FROM router_task_queue WHERE routerKey = :routerKey AND status = 'PENDING' AND nextAttemptTimestamp <= :currentTime ORDER BY createdAt ASC")
+    suspend fun getPendingTasksReady(routerKey: String, currentTime: Long): List<RouterTaskEntity>
 
-    @Query("SELECT * FROM router_task_queue WHERE status IN ('PENDING', 'FAILED') ORDER BY createdAt ASC")
-    suspend fun getAllRetryableTasks(): List<RouterTaskEntity>
+    @Query("SELECT * FROM router_task_queue WHERE routerKey = :routerKey AND status IN ('PENDING', 'FAILED') ORDER BY createdAt ASC")
+    suspend fun getAllRetryableTasks(routerKey: String): List<RouterTaskEntity>
 
     @Query("SELECT * FROM router_task_queue WHERE status != 'COMPLETED' ORDER BY createdAt DESC")
     fun getAllActiveTasksFlow(): Flow<List<RouterTaskEntity>>
@@ -293,8 +293,8 @@ interface AppDao {
     @Query("SELECT COUNT(*) FROM router_task_queue WHERE status = 'PENDING'")
     fun getPendingTaskCountFlow(): Flow<Int>
 
-    @Query("SELECT COUNT(*) FROM router_task_queue WHERE status = 'PENDING'")
-    suspend fun getPendingTaskCount(): Int
+    @Query("SELECT COUNT(*) FROM router_task_queue WHERE routerKey = :routerKey AND status = 'PENDING'")
+    suspend fun getPendingTaskCount(routerKey: String): Int
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTask(task: RouterTaskEntity): Long
@@ -308,11 +308,11 @@ interface AppDao {
     @Query("DELETE FROM router_task_queue WHERE id = :id")
     suspend fun deleteTaskById(id: Long)
 
-    @Query("DELETE FROM router_task_queue WHERE cardName = :cardName")
-    suspend fun deleteTasksByCardName(cardName: String)
+    @Query("DELETE FROM router_task_queue WHERE routerKey = :routerKey AND cardName = :cardName AND status IN ('PENDING', 'FAILED')")
+    suspend fun deleteTasksByCardName(routerKey: String, cardName: String)
 
-    @Query("DELETE FROM router_task_queue WHERE cardName = :cardName AND taskType = :taskType AND status IN ('PENDING', 'FAILED')")
-    suspend fun deletePendingTasksByCardAndType(cardName: String, taskType: String)
+    @Query("DELETE FROM router_task_queue WHERE routerKey = :routerKey AND cardName = :cardName AND taskType = :taskType AND status IN ('PENDING', 'FAILED')")
+    suspend fun deletePendingTasksByCardAndType(routerKey: String, cardName: String, taskType: String)
 
     @Query("DELETE FROM router_task_queue WHERE status = 'COMPLETED'")
     suspend fun clearCompletedTasks()

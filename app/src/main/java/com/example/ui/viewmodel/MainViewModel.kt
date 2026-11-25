@@ -165,13 +165,24 @@ class MainViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Local Task Queue for Offline Operations & Exponential Backoff
-    val taskQueueManager = RouterTaskQueueManager(database.appDao())
-    val pendingTasksCount: StateFlow<Int> = database.appDao().getPendingTaskCountFlow()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val taskQueueManager = RouterTaskQueueManager(database.appDao()) {
+        _currentConfig.value.ipAddress.trim().lowercase()
+    }
+    val pendingTasksCount: StateFlow<Int> = combine(
+        _currentConfig, database.appDao().getAllActiveTasksFlow()
+    ) { config, tasks ->
+        val key = config.ipAddress.trim().lowercase()
+        tasks.count { key.isNotBlank() && it.routerKey == key && it.status == RouterTaskEntity.STATUS_PENDING }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
     val isProcessingQueue: StateFlow<Boolean> = taskQueueManager.isProcessing
 
     fun processTaskQueueNow() {
         viewModelScope.launch {
+            val connection = _connectionState.value as? ConnectionState.Connected
+            if (connection == null || connection.isOffline || connection.isSyncing) {
+                _toastEvent.emit("اتصل بالراوتر مباشرةً قبل تنفيذ المهام المؤجلة")
+                return@launch
+            }
             _toastEvent.emit("جاري معالجة طابور العمليات المؤجلة مع الراوتر...")
             val result = taskQueueManager.forceRetryAllPending(repository)
             _toastEvent.emit(result.message)
@@ -292,11 +303,11 @@ class MainViewModel(
                 actionType = actionType,
                 targetType = targetType,
                 targetName = targetName,
-                description = description,
+                description = com.example.data.util.SensitiveLogRedactor.redact(description),
                 operatorUsername = actor,
                 routerIp = routerIp,
                 status = status,
-                details = details,
+                details = com.example.data.util.SensitiveLogRedactor.redact(details),
                 timestamp = timestamp
             )
             database.appDao().insertSystemEventLog(log)
@@ -2671,7 +2682,7 @@ class MainViewModel(
                     card.name,
                     "تم إنشاء المستخدم وربط الباقة (${card.profile}) وتفعيل الكرت بنجاح في راوتر ميكروتك",
                     "SUCCESS",
-                    "الباقة: ${card.profile}, كلمة المرور: ${card.password}, النظام: ${card.systemLabelAr}"
+                    "الباقة: ${card.profile}, النظام: ${card.systemLabelAr}"
                 )
                 if (posAgentId > 0L && posAgentName.isNotBlank()) {
                     val priceNum = parseBatchPriceValue(card.price).takeIf { it > 0.0 } ?: 0.0

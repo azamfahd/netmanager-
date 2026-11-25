@@ -19,14 +19,10 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.UnknownHostException
 import java.security.MessageDigest
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
 import kotlin.random.Random
 
 enum class CardTargetSystem {
@@ -106,17 +102,9 @@ class RouterOsApiClient {
         return InetSocketAddress(clean, port)
     }
 
+    // Use the platform trust store; LAN addresses must not bypass certificate validation.
     private val routerSslSocketFactory: SSLSocketFactory by lazy {
-        val trustAll = arrayOf<TrustManager>(
-            object : X509TrustManager {
-                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-                override fun checkClientTrusted(chain: Array<X509Certificate>?, authType: String?) {}
-                override fun checkServerTrusted(chain: Array<X509Certificate>?, authType: String?) {}
-            }
-        )
-        SSLContext.getInstance("TLS").apply {
-            init(null, trustAll, SecureRandom())
-        }.socketFactory
+        SSLContext.getDefault().socketFactory
     }
 
     private fun createRouterSocket(
@@ -139,17 +127,16 @@ class RouterOsApiClient {
         }
         val sslSocket = routerSslSocketFactory.createSocket(tcpSocket, host, port, true) as SSLSocket
         try {
-            val supported = sslSocket.supportedCipherSuites
-            val enabled = sslSocket.enabledCipherSuites.toMutableList()
-            supported.filter { it.contains("anon", ignoreCase = true) || it.contains("ADH", ignoreCase = true) }
-                .forEach { if (it !in enabled) enabled.add(it) }
-            if (enabled.isNotEmpty()) {
-                sslSocket.enabledCipherSuites = enabled.toTypedArray()
+            sslSocket.sslParameters = sslSocket.sslParameters.apply {
+                endpointIdentificationAlgorithm = "HTTPS"
             }
-        } catch (_: Exception) {}
-        sslSocket.soTimeout = effectiveHandshakeTimeout
-        sslSocket.startHandshake()
-        return sslSocket
+            sslSocket.soTimeout = effectiveHandshakeTimeout
+            sslSocket.startHandshake()
+            return sslSocket
+        } catch (e: Exception) {
+            sslSocket.close()
+            throw e
+        }
     }
 
     private fun readLoginSentencesUntilDone(inS: InputStream): List<List<String>> {

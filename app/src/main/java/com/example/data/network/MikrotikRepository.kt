@@ -143,7 +143,8 @@ class MikrotikRepository(
             prev.sourceSystem != next.sourceSystem
     }
 
-    suspend fun syncCardsToRoom(cards: List<HotspotCard>) {
+    /** Full snapshots prune missing cards; incremental mutations must never prune the other cards. */
+    suspend fun syncCardsToRoom(cards: List<HotspotCard>, pruneMissing: Boolean = true) {
         val dao = appDao ?: return
         try {
             val existing = dao.getAllLocalCardsSync().associateBy { it.name }
@@ -170,14 +171,14 @@ class MikrotikRepository(
             if (changedEntities.isNotEmpty()) {
                 dao.insertOrUpdateLocalCards(changedEntities)
             }
-            if (cards.isEmpty()) {
-                if (existing.isNotEmpty()) {
-                    dao.clearAllLocalCards()
-                }
-            } else {
-                val liveNames = cards.map { it.name }.toSet()
-                existing.keys.filter { !liveNames.contains(it) }.forEach { staleName ->
-                    dao.deleteLocalCardByName(staleName)
+            if (pruneMissing) {
+                if (cards.isEmpty()) {
+                    if (existing.isNotEmpty()) dao.clearAllLocalCards()
+                } else {
+                    val liveNames = cards.map { it.name }.toSet()
+                    existing.keys.filter { it !in liveNames }.forEach { staleName ->
+                        dao.deleteLocalCardByName(staleName)
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -359,81 +360,11 @@ class MikrotikRepository(
 
     private val lastKnownUserTelemetry = java.util.concurrent.ConcurrentHashMap<String, UserKnownTelemetry>()
 
-    private fun buildRouterOkHttpClient(): OkHttpClient {
-        val builder = OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
-        try {
-            val tmf = javax.net.ssl.TrustManagerFactory.getInstance(
-                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
-            )
-            tmf.init(null as java.security.KeyStore?)
-            val defaultTm = tmf.trustManagers
-                .filterIsInstance<javax.net.ssl.X509TrustManager>()
-                .firstOrNull()
-            if (defaultTm != null) {
-                val localAwareTm = object : javax.net.ssl.X509ExtendedTrustManager() {
-                    private fun isPrivatePeer(socket: java.net.Socket?): Boolean {
-                        val addr = socket?.inetAddress?.hostAddress.orEmpty()
-                        return RouterConnectionParser.isPrivateOrLocalIpv4(addr)
-                    }
-
-                    override fun checkClientTrusted(
-                        chain: Array<java.security.cert.X509Certificate>?,
-                        authType: String?
-                    ) = defaultTm.checkClientTrusted(chain, authType)
-
-                    override fun checkClientTrusted(
-                        chain: Array<java.security.cert.X509Certificate>?,
-                        authType: String?,
-                        socket: java.net.Socket?
-                    ) = defaultTm.checkClientTrusted(chain, authType)
-
-                    override fun checkClientTrusted(
-                        chain: Array<java.security.cert.X509Certificate>?,
-                        authType: String?,
-                        engine: javax.net.ssl.SSLEngine?
-                    ) = defaultTm.checkClientTrusted(chain, authType)
-
-                    override fun checkServerTrusted(
-                        chain: Array<java.security.cert.X509Certificate>?,
-                        authType: String?
-                    ) = defaultTm.checkServerTrusted(chain, authType)
-
-                    override fun checkServerTrusted(
-                        chain: Array<java.security.cert.X509Certificate>?,
-                        authType: String?,
-                        socket: java.net.Socket?
-                    ) {
-                        if (isPrivatePeer(socket)) return
-                        defaultTm.checkServerTrusted(chain, authType)
-                    }
-
-                    override fun checkServerTrusted(
-                        chain: Array<java.security.cert.X509Certificate>?,
-                        authType: String?,
-                        engine: javax.net.ssl.SSLEngine?
-                    ) {
-                        val host = engine?.peerHost.orEmpty()
-                        if (RouterConnectionParser.isPrivateOrLocalIpv4(host)) return
-                        defaultTm.checkServerTrusted(chain, authType)
-                    }
-
-                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> =
-                        defaultTm.acceptedIssuers
-                }
-                val sslCtx = javax.net.ssl.SSLContext.getInstance("TLS")
-                sslCtx.init(null, arrayOf<javax.net.ssl.TrustManager>(localAwareTm), java.security.SecureRandom())
-                builder.sslSocketFactory(sslCtx.socketFactory, localAwareTm)
-                builder.hostnameVerifier { hostname, session ->
-                    RouterConnectionParser.isPrivateOrLocalIpv4(hostname) ||
-                        javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(hostname, session)
-                }
-            }
-        } catch (_: Exception) {}
-        return builder.build()
-    }
+    private fun buildRouterOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .build() // Keep the system trust store and default hostname verifier, including on LAN.
 
     private fun encSeg(value: String): String {
         return try {
@@ -494,6 +425,10 @@ class MikrotikRepository(
     private val customAddedNodes = java.util.concurrent.CopyOnWriteArrayList<com.example.data.model.NetworkNode>()
     private val deletedNodeIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val deletedNodeKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Only a verified live connection may run queued router mutations. */
+    fun connectedRouterKey(): String = activeConfig?.takeUnless { it.isDemoMode }
+        ?.ipAddress?.trim()?.lowercase().orEmpty()
 
     private fun currentRouterIp(): String {
         return activeConfig?.ipAddress?.trim().orEmpty().ifBlank { activeRouterIp }
@@ -1588,10 +1523,13 @@ class MikrotikRepository(
                 val socketCandidates = mutableListOf<EndpointCandidate>()
                 val restCandidates = mutableListOf<EndpointCandidate>()
                 fun addSocketCandidate(port: Int, useTls: Boolean) {
+                    // Explicit TLS must never silently fall back to sending credentials in cleartext.
+                    if (cleanConfig.useHttps && !useTls) return
                     val c = EndpointCandidate(CandidateProto.SOCKET_API, port, useTls)
                     if (c !in socketCandidates) socketCandidates.add(c)
                 }
                 fun addRestCandidate(port: Int, useHttps: Boolean) {
+                    if (cleanConfig.useHttps && !useHttps) return
                     val c = EndpointCandidate(CandidateProto.REST_HTTP, port, useHttps)
                     if (c !in restCandidates) restCandidates.add(c)
                 }
@@ -2040,7 +1978,7 @@ class MikrotikRepository(
         var refused = false
         var lastErrorMsg: String? = null
 
-        for ((idx, candidate) in apiCandidates.withIndex()) {
+        for ((idx, candidate) in apiCandidates.filter { !cleanConfig.useHttps || it.useHttps }.withIndex()) {
             val candidateTimeout = if (idx == 0) connectTimeoutMs else minOf(connectTimeoutMs, 2000)
             val socketResult = routerOsApiClient.connectAndLogin(
                 host = cleanConfig.ipAddress,
@@ -2139,8 +2077,10 @@ class MikrotikRepository(
                     add(originalPort to (cleanConfig.useHttps || originalPort == 443 || originalPort == 8443))
                 }
                 add(443 to true)
-                add(80 to false)
-                add(8080 to false)
+                if (!cleanConfig.useHttps) {
+                    add(80 to false)
+                    add(8080 to false)
+                }
             }.distinct()
             tryRestJsonDirect(restCandidates)?.let { return it }
         }
@@ -5511,7 +5451,7 @@ class MikrotikRepository(
                                                     targetName = card.name,
                                                     description = "فشل إضافة الكرت للراوتر (${resp.code})",
                                                     status = "FAILED",
-                                                    details = "البيانات المرسلة: $jsonBody | الاستجابة: $errBody"
+                                                    details = "رفض الراوتر إنشاء الكرت (${resp.code}): ${com.example.data.util.SensitiveLogRedactor.redact(errBody)}"
                                                 )
                                             )
                                         }
@@ -5788,7 +5728,7 @@ class MikrotikRepository(
             currentList.add(0, sanitizedCard)
             val sorted = sortCardsByNewestFirst(currentList)
             _cards.value = sorted
-            syncCardsToRoom(listOf(sanitizedCard))
+            syncCardsToRoom(listOf(sanitizedCard), pruneMissing = false)
             notifyDataRefreshed()
 
             // Non-blocking background sync of full list
