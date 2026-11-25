@@ -124,7 +124,10 @@ jobs:
           from pathlib import Path
           lines = Path('build.log').read_text(errors='replace').splitlines() if Path('build.log').exists() else []
           matches = [line.strip() for line in lines if any(marker in line for marker in (' e: ', 'e: file:', 'error:', 'FAILED', 'FAILURE:', 'What went wrong:', 'Execution failed for task', 'There were failing tests'))]
-          for line in matches[:20]:
+          if '* What went wrong:' in lines:
+              start = lines.index('* What went wrong:')
+              matches += [line.strip() for line in lines[start + 1:start + 22] if line.strip()]
+          for line in matches[:40]:
               print('::error::' + line[:900].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
           if not matches:
               for line in lines[-15:]:
