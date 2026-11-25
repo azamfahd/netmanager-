@@ -638,5 +638,129 @@ class DirectMikrotikConnectionAndSyncTest {
             runCatching { portalServer.close() }
         }
     }
+
+    @Test
+    fun directModeConnectsOnCustomNonDefaultPortAndDiagnosesRefusalClearly() {
+        val running = AtomicBoolean(true)
+        val customApiServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        val customPort = customApiServer.localPort
+
+        Thread {
+            while (running.get()) {
+                try {
+                    val client = customApiServer.accept()
+                    Thread {
+                        client.use { sock ->
+                            sock.soTimeout = 3000
+                            val inp = sock.getInputStream()
+                            val out = sock.getOutputStream()
+                            while (running.get() && !sock.isClosed) {
+                                val sentence = readRosSentence(inp)
+                                if (sentence.isEmpty()) break
+                                when (sentence.first()) {
+                                    "/login" -> writeRosSentence(out, listOf("!done"))
+                                    "/system/identity/print" -> {
+                                        writeRosSentence(out, listOf("!re", "=name=CustomPortCore"))
+                                        writeRosSentence(out, listOf("!done"))
+                                    }
+                                    "/system/resource/print" -> {
+                                        writeRosSentence(out, listOf("!re", "=uptime=2h", "=version=7.14", "=board-name=RB750Gr3"))
+                                        writeRosSentence(out, listOf("!done"))
+                                    }
+                                    else -> writeRosSentence(out, listOf("!done"))
+                                }
+                            }
+                        }
+                    }.start()
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }.apply { isDaemon = true; start() }
+
+        val closedSocket = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        val closedPort = closedSocket.localPort
+        closedSocket.close()
+
+        try {
+            val repo = MikrotikRepository(appDao = null)
+            runBlocking {
+                // 1. Custom non-8728 API port configured from Advanced Options succeeds cleanly in direct mode
+                val successOutcome = repo.verifyAndConnectSmart(
+                    RouterConnectionConfig(
+                        name = "شبكة النور",
+                        ipAddress = "127.0.0.1",
+                        port = customPort,
+                        username = "admin",
+                        password = "secret",
+                        useHttps = false,
+                        autoDetectProtocol = true,
+                        directApiOnly = true,
+                        preferWebPortal = false
+                    )
+                )
+                assertTrue(
+                    "Expected MikroTikSuccess on custom API port $customPort, got $successOutcome",
+                    successOutcome is MikrotikRepository.VerifyConnectOutcome.MikroTikSuccess
+                )
+                assertEquals(customPort, (successOutcome as MikrotikRepository.VerifyConnectOutcome.MikroTikSuccess).resolvedConfig.port)
+                assertEquals("شبكة النور", successOutcome.resolvedConfig.name)
+                assertTrue(repo.resourceState.value.boardName.contains("CustomPortCore"))
+
+                // 2. Closed port with autoDetectProtocol=false produces clear refusal guidance mentioning الخيارات المتقدمة
+                val failOutcome = repo.verifyAndConnectSmart(
+                    RouterConnectionConfig(
+                        name = "راوتر مغلق",
+                        ipAddress = "127.0.0.1",
+                        port = closedPort,
+                        username = "admin",
+                        password = "secret",
+                        useHttps = false,
+                        autoDetectProtocol = false,
+                        directApiOnly = true,
+                        preferWebPortal = false
+                    )
+                )
+                assertTrue("Expected Failure on closed port $closedPort, got $failOutcome", failOutcome is MikrotikRepository.VerifyConnectOutcome.Failure)
+                val msg = (failOutcome as MikrotikRepository.VerifyConnectOutcome.Failure).message
+                assertTrue("Expected refusal guidance mentioning الخيارات المتقدمة, got: $msg", msg.contains("الخيارات المتقدمة"))
+            }
+        } finally {
+            running.set(false)
+            runCatching { customApiServer.close() }
+        }
+    }
+
+    @Test
+    fun emptyRouterSnapshotIsRejectedSoUserIsNotTrappedInOfflineMode() {
+        val emptyResource = com.example.data.model.RouterResource(
+            uptime = "0s",
+            version = "",
+            boardName = ""
+        )
+        val hasEmptyData = com.example.data.local.RouterCacheManager.hasMeaningfulRouterData(
+            resource = emptyResource,
+            cards = emptyList(),
+            profiles = emptyList(),
+            activeUsers = emptyList(),
+            servers = emptyList(),
+            nodes = emptyList(),
+            logs = emptyList()
+        )
+        org.junit.Assert.assertFalse("Empty zero-data snapshot must NOT be treated as valid offline cache", hasEmptyData)
+
+        val validResource = emptyResource.copy(uptime = "2d4h", version = "7.14")
+        val hasValidData = com.example.data.local.RouterCacheManager.hasMeaningfulRouterData(
+            resource = validResource,
+            cards = emptyList(),
+            profiles = emptyList(),
+            activeUsers = emptyList(),
+            servers = emptyList(),
+            nodes = emptyList(),
+            logs = emptyList()
+        )
+        assertTrue("Router snapshot with real uptime/version should pass guard", hasValidData)
+    }
 }
+
 

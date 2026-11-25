@@ -1924,6 +1924,7 @@ class MainViewModel(
 
         connectJob = viewModelScope.launch {
             val targetContext = context ?: appContext
+            targetContext?.let { NetworkUtils.registerContext(it) }
             _currentConfig.value = normalizedConfig
 
             val isPrivateLanOrApiTarget = normalizedConfig.directApiOnly ||
@@ -2010,7 +2011,9 @@ class MainViewModel(
                     val activeCfg = outcome.resolvedConfig
                     _currentConfig.value = activeCfg
                     val liveBoardName = repository.resourceState.value.boardName
-                    val finalRouterName = if (activeCfg.name.isNotBlank() && !activeCfg.name.startsWith("راوتر ")) {
+                    val isAutoPlaceholderName = activeCfg.name.equals("راوتر ${activeCfg.ipAddress}", ignoreCase = true) ||
+                        activeCfg.name.startsWith("راوتر MikroTik")
+                    val finalRouterName = if (activeCfg.name.isNotBlank() && !isAutoPlaceholderName) {
                         activeCfg.name
                     } else if (liveBoardName.isNotBlank() && !liveBoardName.contains("MikroTik Router")) {
                         liveBoardName
@@ -2100,7 +2103,9 @@ class MainViewModel(
                 }
 
                 is com.example.data.network.MikrotikRepository.VerifyConnectOutcome.WebPortalDetected -> {
-                    val savedName = if (normalizedConfig.name.isNotBlank() && !normalizedConfig.name.startsWith("راوتر ")) {
+                    val isAutoPlaceholderName = normalizedConfig.name.equals("راوتر ${normalizedConfig.ipAddress}", ignoreCase = true) ||
+                        normalizedConfig.name.startsWith("راوتر MikroTik")
+                    val savedName = if (normalizedConfig.name.isNotBlank() && !isAutoPlaceholderName) {
                         normalizedConfig.name
                     } else if (outcome.isAplusWifi) {
                         "سيرفر APlusWiFi (${normalizedConfig.ipAddress})"

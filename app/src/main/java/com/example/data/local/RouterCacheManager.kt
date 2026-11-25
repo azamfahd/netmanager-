@@ -47,6 +47,26 @@ object RouterCacheManager {
         return File(context.filesDir, "router_snapshot_$sanitizedIp.json")
     }
 
+    internal fun hasMeaningfulRouterData(
+        resource: RouterResource,
+        cards: List<HotspotCard>,
+        profiles: List<HotspotProfile>,
+        activeUsers: List<HotspotActiveUser>,
+        servers: List<HotspotServerInfo>,
+        nodes: List<NetworkNode>,
+        logs: List<SystemLogEntry>
+    ): Boolean {
+        val hasUptime = resource.uptime.isNotBlank() && resource.uptime != "0s"
+        return cards.isNotEmpty() ||
+            profiles.isNotEmpty() ||
+            activeUsers.isNotEmpty() ||
+            servers.isNotEmpty() ||
+            nodes.isNotEmpty() ||
+            logs.isNotEmpty() ||
+            resource.version.isNotBlank() ||
+            hasUptime
+    }
+
     @Synchronized
     fun saveSnapshot(
         context: Context,
@@ -63,6 +83,9 @@ object RouterCacheManager {
         ipBindings: List<IpBinding> = emptyList(),
         isDemo: Boolean = false
     ) {
+        if (!isDemo && !hasMeaningfulRouterData(resource, cards, profiles, activeUsers, servers, nodes, logs)) {
+            return
+        }
         try {
             val root = JSONObject().apply {
                 put("ipAddress", ipAddress)
@@ -491,6 +514,10 @@ object RouterCacheManager {
                         disabled = o.optBoolean("disabled", false)
                     )
                 )
+            }
+
+            if (!isDemoSnapshot && !hasMeaningfulRouterData(resource, cardsList, profList, activeList, serversList, nodesList, logsList)) {
+                return null
             }
 
             return RouterSnapshot(

@@ -217,7 +217,7 @@ class MikrotikRepository(
         for (url in endpoints) {
             try {
                 val req = Request.Builder().url(url).header("Authorization", credential).build()
-                httpClient.newCall(req).execute().use { resp ->
+                clientForUrl(url).newCall(req).execute().use { resp ->
                     if (resp.isSuccessful) {
                         val arr = JSONArray(resp.body?.string() ?: "[]")
                         for (i in 0 until arr.length()) {
@@ -251,7 +251,7 @@ class MikrotikRepository(
         for (url in endpoints) {
             try {
                 val req = Request.Builder().url(url).header("Authorization", credential).build()
-                httpClient.newCall(req).execute().use { resp ->
+                clientForUrl(url).newCall(req).execute().use { resp ->
                     if (resp.isSuccessful) {
                         val arr = JSONArray(resp.body?.string() ?: "[]")
                         if (arr.length() > 0) {
@@ -450,6 +450,30 @@ class MikrotikRepository(
         .readTimeout(4, TimeUnit.SECONDS)
         .callTimeout(6, TimeUnit.SECONDS)
         .build()
+
+    private fun extractHostFromUrl(url: String): String {
+        val afterScheme = url.substringAfter("://", url)
+        val authority = afterScheme.substringBefore('/')
+        return if (authority.startsWith("[")) {
+            authority.substringAfter("[").substringBefore("]")
+        } else {
+            authority.substringBefore(':')
+        }.trim()
+    }
+
+    private fun clientForHost(host: String, isProbe: Boolean = false): OkHttpClient {
+        val base = if (isProbe) probeHttpClient else httpClient
+        if (!RouterConnectionParser.isPrivateOrLocalIpv4(host)) return base
+        val lanNet = NetworkUtils.findLanNetwork() ?: return base
+        return try {
+            base.newBuilder().socketFactory(lanNet.socketFactory).build()
+        } catch (_: Exception) {
+            base
+        }
+    }
+
+    private fun clientForUrl(url: String, isProbe: Boolean = false): OkHttpClient =
+        clientForHost(extractHostFromUrl(url), isProbe)
 
     private val routerOsApiClient = RouterOsApiClient()
     @Volatile
@@ -1326,7 +1350,7 @@ class MikrotikRepository(
                         .url(url)
                         .header("User-Agent", "Mozilla/5.0 (Android) NetManager/1.0")
                         .build()
-                    probeHttpClient.newCall(req).execute().use { resp ->
+                    clientForHost(host, isProbe = true).newCall(req).execute().use { resp ->
                         val code = resp.code
                         val contentType = resp.header("Content-Type").orEmpty()
                         val bodySnippet = runCatching { resp.peekBody(8192L).string() }.getOrDefault("")
@@ -1685,7 +1709,7 @@ class MikrotikRepository(
                                             .header("Authorization", credential)
                                             .build()
 
-                                        probeHttpClient.newCall(request).execute().use { response ->
+                                        clientForHost(cleanConfig.ipAddress, isProbe = true).newCall(request).execute().use { response ->
                                             if (response.isSuccessful) {
                                                 val body = response.body?.string().orEmpty()
                                                 if (body.trimStart().startsWith("{")) {
@@ -1917,8 +1941,9 @@ class MikrotikRepository(
         isApiSocketMode = false
 
         val originalPort = cleanConfig.port
+        val isExplicitHttpPort = originalPort in listOf(80, 443, 8080, 8443)
         val primaryPort = when {
-            originalPort in listOf(80, 443, 8080) || originalPort <= 0 ->
+            isExplicitHttpPort || originalPort <= 0 ->
                 if (cleanConfig.useHttps) 8729 else 8728
             else -> originalPort
         }
@@ -1926,16 +1951,86 @@ class MikrotikRepository(
 
         val apiCandidates = mutableListOf<EndpointCandidate>()
         apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, primaryPort, primaryTls))
-        if (cleanConfig.autoDetectProtocol && primaryPort in listOf(8728, 8729)) {
-            if (primaryPort == 8728) {
-                apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, 8729, true))
-            } else {
-                apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, 8728, false))
+        if (cleanConfig.autoDetectProtocol) {
+            when (primaryPort) {
+                8728 -> apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, 8729, true))
+                8729 -> apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, 8728, false))
+                else -> {
+                    // Custom API port fallback: try alternate TLS on same custom port, then standard 8728/8729
+                    apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, primaryPort, !primaryTls))
+                    apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, 8728, false))
+                    apiCandidates.add(EndpointCandidate(CandidateProto.SOCKET_API, 8729, true))
+                }
             }
         }
 
         val isLocalTarget = RouterConnectionParser.isPrivateOrLocalIpv4(cleanConfig.ipAddress)
         val connectTimeoutMs = if (isLocalTarget) 2500 else 4000
+        val restClient = clientForHost(cleanConfig.ipAddress, isProbe = true)
+
+        suspend fun tryRestJsonDirect(candidates: List<Pair<Int, Boolean>>): VerifyConnectOutcome? {
+            val credential = Credentials.basic(cleanConfig.username, cleanConfig.password)
+            for ((rPort, rHttps) in candidates.distinct()) {
+                val scheme = if (rHttps) "https" else "http"
+                val baseUrl = "$scheme://${cleanConfig.ipAddress}:$rPort"
+                try {
+                    val req = Request.Builder()
+                        .url("$baseUrl/rest/system/resource")
+                        .header("Authorization", credential)
+                        .build()
+                    restClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val body = resp.body?.string().orEmpty()
+                            if (body.trimStart().startsWith("{")) {
+                                parseResource(body)
+                                routerOsApiClient.disconnect()
+                                isApiSocketMode = false
+                                val restConfig = cleanConfig.copy(
+                                    port = rPort,
+                                    useHttps = rHttps,
+                                    directApiOnly = true
+                                )
+                                activeConfig = restConfig
+                                var restSyncErr: Exception? = null
+                                syncMutex.withLock {
+                                    if (connectionSessionId == sessionId && activeConfig != null) {
+                                        try {
+                                            fetchLiveRouterData(baseUrl, credential)
+                                        } catch (e: Exception) {
+                                            _lastSyncError.value = e.message
+                                            restSyncErr = e
+                                        }
+                                    }
+                                }
+                                return if (restSyncErr != null) {
+                                    VerifyConnectOutcome.Failure(
+                                        message = restSyncErr?.message ?: "اتصل التطبيق بـ RouterOS REST ($rPort) لكن تعذر جلب البيانات.",
+                                        fallbackPortalUrl = null
+                                    )
+                                } else {
+                                    VerifyConnectOutcome.MikroTikSuccess(restConfig)
+                                }
+                            }
+                        } else if (resp.code == 401 || resp.code == 403) {
+                            val errBody = runCatching { resp.peekBody(2048L).string().trimStart() }.getOrDefault("")
+                            if (errBody.startsWith("{") || resp.header("WWW-Authenticate").orEmpty().contains("Basic", ignoreCase = true)) {
+                                return VerifyConnectOutcome.Failure(
+                                    message = "خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة للاتصال بـ REST API في الراوتر.",
+                                    fallbackPortalUrl = null
+                                )
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+            return null
+        }
+
+        // If user explicitly picked a web/REST port (80/443/8080/8443) in direct mode, test RouterOS v7 REST immediately
+        if (isExplicitHttpPort) {
+            val explicitRestHttps = cleanConfig.useHttps || originalPort == 443 || originalPort == 8443
+            tryRestJsonDirect(listOf(originalPort to explicitRestHttps))?.let { return it }
+        }
 
         var authErrorMsg: String? = null
         var dnsFailed = false
@@ -2041,77 +2136,34 @@ class MikrotikRepository(
         if (cleanConfig.autoDetectProtocol) {
             val restCandidates = buildList {
                 if (originalPort !in listOf(8728, 8729) && originalPort > 0) {
-                    add(originalPort to cleanConfig.useHttps)
+                    add(originalPort to (cleanConfig.useHttps || originalPort == 443 || originalPort == 8443))
                 }
-                if (originalPort == 443) add(443 to true)
-                if (originalPort == 80 || originalPort == 8080) add(originalPort to false)
                 add(443 to true)
                 add(80 to false)
+                add(8080 to false)
             }.distinct()
-            val credential = Credentials.basic(cleanConfig.username, cleanConfig.password)
-            for ((rPort, rHttps) in restCandidates) {
-                val scheme = if (rHttps) "https" else "http"
-                val baseUrl = "$scheme://${cleanConfig.ipAddress}:$rPort"
-                try {
-                    val req = Request.Builder()
-                        .url("$baseUrl/rest/system/resource")
-                        .header("Authorization", credential)
-                        .build()
-                    probeHttpClient.newCall(req).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            val body = resp.body?.string().orEmpty()
-                            if (body.trimStart().startsWith("{")) {
-                                parseResource(body)
-                                routerOsApiClient.disconnect()
-                                isApiSocketMode = false
-                                val restConfig = cleanConfig.copy(
-                                    port = rPort,
-                                    useHttps = rHttps,
-                                    directApiOnly = true
-                                )
-                                activeConfig = restConfig
-                                var restSyncErr: Exception? = null
-                                syncMutex.withLock {
-                                    if (connectionSessionId == sessionId && activeConfig != null) {
-                                        try {
-                                            fetchLiveRouterData(baseUrl, credential)
-                                        } catch (e: Exception) {
-                                            _lastSyncError.value = e.message
-                                            restSyncErr = e
-                                        }
-                                    }
-                                }
-                                return if (restSyncErr != null) {
-                                    VerifyConnectOutcome.Failure(
-                                        message = restSyncErr?.message ?: "اتصل التطبيق بـ RouterOS REST ($rPort) لكن تعذر جلب البيانات.",
-                                        fallbackPortalUrl = null
-                                    )
-                                } else {
-                                    VerifyConnectOutcome.MikroTikSuccess(restConfig)
-                                }
-                            }
-                        } else if (resp.code == 401 || resp.code == 403) {
-                            val errBody = runCatching { resp.peekBody(2048L).string().trimStart() }.getOrDefault("")
-                            if (errBody.startsWith("{") || resp.header("WWW-Authenticate").orEmpty().contains("Basic", ignoreCase = true)) {
-                                return VerifyConnectOutcome.Failure(
-                                    message = "خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة للاتصال بـ REST API في الراوتر.",
-                                    fallbackPortalUrl = null
-                                )
-                            }
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
+            tryRestJsonDirect(restCandidates)?.let { return it }
         }
 
-        val triedPorts = apiCandidates.joinToString("/") { it.port.toString() }
+        val triedPorts = apiCandidates.map { it.port }.distinct().joinToString("/")
+        val httpReachable = if (refused) NetworkUtils.testSocketConnection(cleanConfig.ipAddress, 80, 600) else false
+        val winboxReachable = if (refused) NetworkUtils.testSocketConnection(cleanConfig.ipAddress, 8291, 600) else false
         val detailedFailure = when {
-            timedOut ->
-                "انتهى وقت الاتصال المباشر (${connectTimeoutMs}ms) عبر RouterOS API (${cleanConfig.ipAddress}:$triedPorts).\n" +
-                    "تأكد أن المنفذ $primaryPort مفتوح في جدار الحماية (IP -> Firewall) وأن خدمة api مفعّلة في (IP -> Services)، أو أن جهازك متصل بنفس الشبكة."
+            refused && (winboxReachable || httpReachable) -> {
+                val openServices = buildList {
+                    if (winboxReachable) add("Winbox (8291)")
+                    if (httpReachable) add("Web (80)")
+                }.joinToString(" و ")
+                "الراوتر (${cleanConfig.ipAddress}) متصل فعلاً ومنافذ $openServices مفتوحة، لكنه رفض الاتصال على منفذ API ($triedPorts).\n" +
+                    "• إذا تم تغيير منفذ API، افتح «الخيارات المتقدمة» وأدخل رقم المنفذ الصحيح.\n" +
+                    "• أو فعّل خدمة api ($primaryPort) من Winbox عبر: IP -> Services."
+            }
             refused ->
                 "رفض الراوتر (${cleanConfig.ipAddress}) الاتصال المباشر على منفذ API ($triedPorts).\n" +
-                    "يرجى تفعيل خدمة api (8728) أو api-ssl (8729) من Winbox عبر: IP -> Services."
+                    "افتح «الخيارات المتقدمة» إذا كان المنفذ مختلفاً، أو فعّل خدمة api (8728) / api-ssl (8729) من Winbox عبر: IP -> Services."
+            timedOut ->
+                "انتهى وقت الاتصال المباشر (${connectTimeoutMs}ms) عبر RouterOS API (${cleanConfig.ipAddress}:$triedPorts).\n" +
+                    "تأكد أن المنفذ $primaryPort مفتوح في جدار الحماية (IP -> Firewall) وأن خدمة api مفعّلة في (IP -> Services)، أو جرّب تحديد المنفذ من «الخيارات المتقدمة»."
             sslErrorMsg != null -> sslErrorMsg
             !lastErrorMsg.isNullOrBlank() -> lastErrorMsg
             else ->
@@ -2376,6 +2428,7 @@ class MikrotikRepository(
 
     private suspend fun fetchLiveRouterData(baseUrl: String, credential: String) {
         withContext(Dispatchers.IO) {
+            val httpClient = clientForUrl(baseUrl, isProbe = false)
             try {
                 // Fetch system identity, routerboard and health
                 var realIdentity = ""

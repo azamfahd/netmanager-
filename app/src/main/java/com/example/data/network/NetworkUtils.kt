@@ -2,6 +2,7 @@ package com.example.data.network
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.RouteInfo
 import android.net.wifi.WifiManager
@@ -19,15 +20,60 @@ import java.util.Locale
 
 object NetworkUtils {
 
+    @Volatile
+    private var appContextRef: Context? = null
+
+    fun registerContext(context: Context) {
+        appContextRef = context.applicationContext ?: context
+    }
+
+    @Suppress("DEPRECATION")
+    fun findLanNetwork(context: Context? = appContextRef): Network? {
+        val ctx = context ?: return null
+        return try {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return null
+            val active = cm.activeNetwork
+            val activeCaps = active?.let { cm.getNetworkCapabilities(it) }
+            if (active != null && activeCaps != null &&
+                (activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+            ) {
+                return active
+            }
+            cm.allNetworks.firstOrNull { net ->
+                val caps = cm.getNetworkCapabilities(net)
+                caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun createRoutedSocket(host: String): Socket {
+        val cleanHost = RouterConnectionParser.normalizeHostInput(host).host.ifBlank { host.trim() }
+        if (RouterConnectionParser.isPrivateOrLocalIpv4(cleanHost)) {
+            val lanNet = findLanNetwork()
+            if (lanNet != null) {
+                try {
+                    return lanNet.socketFactory.createSocket()
+                } catch (_: Exception) {}
+            }
+        }
+        return Socket()
+    }
+
     fun getLocalNetworkInfo(context: Context): LocalNetworkInfo {
+        registerContext(context)
         return try {
             val connectivityManager =
                 context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val wifiManager =
                 context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
 
-            val activeNetwork = connectivityManager.activeNetwork
-            val caps = connectivityManager.getNetworkCapabilities(activeNetwork)
+            val lanNetwork = findLanNetwork(context)
+            val targetNetwork = lanNetwork ?: connectivityManager.activeNetwork
+            val caps = connectivityManager.getNetworkCapabilities(targetNetwork)
             val isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
             val isEthernet = caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
             val isCellular = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true && !isWifi && !isEthernet
@@ -38,8 +84,8 @@ object NetworkUtils {
             var ssid: String? = null
 
             // 1. Read Gateway and Device IP from LinkProperties (modern standard Android)
-            if (activeNetwork != null) {
-                val linkProperties = connectivityManager.getLinkProperties(activeNetwork)
+            if (targetNetwork != null) {
+                val linkProperties = connectivityManager.getLinkProperties(targetNetwork)
                 if (linkProperties != null) {
                     if (isLocalLan) {
                         // Check routes for default gateway (destination 0.0.0.0/0 or destination with prefix 0)
@@ -378,7 +424,7 @@ object NetworkUtils {
     suspend fun testSocketConnection(host: String, port: Int, timeoutMs: Int = 1500): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                Socket().use { socket ->
+                createRoutedSocket(host).use { socket ->
                     val socketAddress = InetSocketAddress(host, port)
                     socket.connect(socketAddress, timeoutMs)
                     true

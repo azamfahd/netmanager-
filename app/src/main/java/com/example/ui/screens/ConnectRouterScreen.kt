@@ -178,9 +178,13 @@ fun ConnectRouterScreen(
     var preferWebPlatformBrowser by remember {
         mutableStateOf(formPrefs.getBoolean("prefer_web_platform_browser", false))
     }
-    var showCustomPortOptions by remember { mutableStateOf(false) }
+    var showAdvancedSettings by remember { mutableStateOf(false) }
     var manualIp by remember { mutableStateOf(formPrefs.getString("manual_ip", "") ?: "") }
+    var autoIpOverride by remember { mutableStateOf(formPrefs.getString("auto_ip_override", "") ?: "") }
+    var autoCustomPortText by remember { mutableStateOf(formPrefs.getString("auto_custom_port_text", "") ?: "") }
+    var autoCustomUseHttps by remember { mutableStateOf(formPrefs.getBoolean("auto_custom_https", false)) }
     var manualPort by remember { mutableIntStateOf(formPrefs.getInt("manual_port", 443)) }
+    var manualPortText by remember { mutableStateOf(formPrefs.getInt("manual_port", 443).toString()) }
     var manualUseHttps by remember { mutableStateOf(formPrefs.getBoolean("manual_https", true)) }
     var manualPreferredPath by remember { mutableStateOf<String?>(formPrefs.getString("manual_path", null)) }
     var manualRouterName by remember { mutableStateOf(formPrefs.getString("manual_name", "") ?: "") }
@@ -208,6 +212,9 @@ fun ConnectRouterScreen(
         isCustomPlatformMode,
         preferWebPlatformBrowser,
         manualIp,
+        autoIpOverride,
+        autoCustomPortText,
+        autoCustomUseHttps,
         manualPort,
         manualUseHttps,
         manualPreferredPath,
@@ -221,6 +228,9 @@ fun ConnectRouterScreen(
             .putBoolean("two_mode_default_v3", true)
             .putBoolean("prefer_web_platform_browser", preferWebPlatformBrowser)
             .putString("manual_ip", manualIp)
+            .putString("auto_ip_override", autoIpOverride)
+            .putString("auto_custom_port_text", autoCustomPortText)
+            .putBoolean("auto_custom_https", autoCustomUseHttps)
             .putInt("manual_port", manualPort)
             .putBoolean("manual_https", manualUseHttps)
             .putString("manual_path", manualPreferredPath)
@@ -241,6 +251,7 @@ fun ConnectRouterScreen(
             val resolvedPort = parsed.port ?: if (parsed.useHttps == true) 443 else manualPort
             if (parsed.port != null || parsed.useHttps == true) {
                 manualPort = resolvedPort
+                manualPortText = resolvedPort.toString()
             }
             if (parsed.useHttps != null) {
                 manualUseHttps = parsed.useHttps
@@ -289,22 +300,31 @@ fun ConnectRouterScreen(
     val autoDetectedApiPort = discoveredRouter?.port?.takeIf { it in listOf(8728, 8729) } ?: 8728
     val autoDetectedApiHttps = autoDetectedApiPort == 8729
 
+    val parsedAutoCustomPort = autoCustomPortText.trim().toIntOrNull()?.takeIf { it in 1..65535 }
+    val normalizedAutoOverride = remember(autoIpOverride) { RouterConnectionParser.normalizeHostInput(autoIpOverride) }
+    val resolvedAutoIp = normalizedAutoOverride.host.ifBlank { autoDetectedIp }
+    val resolvedAutoPort = normalizedAutoOverride.explicitPort ?: parsedAutoCustomPort ?: autoDetectedApiPort
+    val resolvedAutoHttps = normalizedAutoOverride.inferredHttps ?: if (parsedAutoCustomPort != null) autoCustomUseHttps else autoDetectedApiHttps
+
     val normalizedManual = remember(manualIp) { RouterConnectionParser.normalizeHostInput(manualIp) }
     val activeIp = if (isCustomPlatformMode) {
         normalizedManual.host.ifBlank { manualIp.trim() }
     } else {
-        autoDetectedIp
+        resolvedAutoIp
     }
     val activePort = if (isCustomPlatformMode) {
         normalizedManual.explicitPort ?: manualPort
     } else {
-        autoDetectedApiPort
+        resolvedAutoPort
     }
     val activeHttps = if (isCustomPlatformMode) {
         normalizedManual.inferredHttps ?: manualUseHttps
     } else {
-        autoDetectedApiHttps
+        resolvedAutoHttps
     }
+    val hasActiveAdvancedCustomization = manualRouterName.isNotBlank() ||
+        (!isCustomPlatformMode && (parsedAutoCustomPort != null || autoIpOverride.isNotBlank() || autoCustomUseHttps)) ||
+        (isCustomPlatformMode && manualPort != 443)
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -900,6 +920,24 @@ fun ConnectRouterScreen(
                                 Spacer(modifier = Modifier.height(8.dp))
                             }
 
+                            OutlinedButton(
+                                onClick = { showAdvancedSettings = true },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("open_advanced_from_error_btn"),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            ) {
+                                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("فتح الخيارات المتقدمة (تغيير المنفذ / الاسم)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1213,7 +1251,10 @@ fun ConnectRouterScreen(
                                             manualIp = input
                                             val parsed = RouterConnectionParser.normalizeHostInput(input)
                                             manualPreferredPath = parsed.rawPath
-                                            parsed.explicitPort?.let { manualPort = it }
+                                            parsed.explicitPort?.let { p ->
+                                                manualPort = p
+                                                manualPortText = p.toString()
+                                            }
                                             parsed.inferredHttps?.let { manualUseHttps = it }
                                             if (input.contains("http://", ignoreCase = true) ||
                                                 input.contains("https://", ignoreCase = true) ||
@@ -1289,124 +1330,6 @@ fun ConnectRouterScreen(
                                             onCheckedChange = { preferWebPlatformBrowser = it },
                                             modifier = Modifier.testTag("prefer_web_browser_switch")
                                         )
-                                    }
-                                }
-
-                                // Optional Custom Port & Alias inside Option 2 (no duplicate IP field)
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Column(modifier = Modifier.padding(10.dp)) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { showCustomPortOptions = !showCustomPortOptions }
-                                                .padding(vertical = 4.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                                                Text(
-                                                    text = "تخصيص المنفذ واسم المنصة (اختياري)",
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    fontWeight = FontWeight.SemiBold
-                                                )
-                                            }
-                                            Icon(
-                                                imageVector = if (showCustomPortOptions) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                                contentDescription = null
-                                            )
-                                        }
-
-                                        AnimatedVisibility(
-                                            visible = showCustomPortOptions,
-                                            enter = fadeIn() + expandVertically(),
-                                            exit = fadeOut() + shrinkVertically()
-                                        ) {
-                                            Column(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(top = 8.dp),
-                                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .horizontalScroll(rememberScrollState()),
-                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                ) {
-                                                    listOf(
-                                                        443 to "443 (HTTPS)",
-                                                        80 to "80 (HTTP)",
-                                                        8080 to "8080 (بديل)",
-                                                        8728 to "8728 (API)",
-                                                        8729 to "8729 (SSL)"
-                                                    ).forEach { (port, label) ->
-                                                        FilterChip(
-                                                            selected = manualPort == port,
-                                                            onClick = {
-                                                                manualPort = port
-                                                                manualUseHttps = (port == 443 || port == 8729)
-                                                                if (port in listOf(8728, 8729)) {
-                                                                    preferWebPlatformBrowser = false
-                                                                }
-                                                            },
-                                                            label = { Text(label, fontSize = 11.sp) },
-                                                            modifier = Modifier.height(48.dp)
-                                                        )
-                                                    }
-                                                }
-
-                                                OutlinedTextField(
-                                                    value = manualPort.toString(),
-                                                    onValueChange = { input ->
-                                                        val p = input.filter { it.isDigit() }.toIntOrNull()
-                                                        if (p != null && p in 1..65535) {
-                                                            manualPort = p
-                                                        } else if (input.isBlank()) {
-                                                            manualPort = 443
-                                                        }
-                                                    },
-                                                    label = { Text("رقم المنفذ المخصص (Port)") },
-                                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                                    singleLine = true,
-                                                    modifier = Modifier.fillMaxWidth()
-                                                )
-
-                                                Row(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                                    ) {
-                                                        Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
-                                                        Text("اتصال مشفر (HTTPS / SSL)", style = MaterialTheme.typography.bodySmall)
-                                                    }
-                                                    Switch(
-                                                        checked = manualUseHttps,
-                                                        onCheckedChange = { manualUseHttps = it }
-                                                    )
-                                                }
-
-                                                OutlinedTextField(
-                                                    value = manualRouterName,
-                                                    onValueChange = { manualRouterName = it },
-                                                    label = { Text("اسم مستعار للمنصة أو السيرفر (اختياري)") },
-                                                    placeholder = { Text("منصة الشبكة / السيرفر البعيد") },
-                                                    singleLine = true,
-                                                    modifier = Modifier.fillMaxWidth()
-                                                )
-                                            }
-                                        }
                                     }
                                 }
                             }
@@ -1490,17 +1413,299 @@ fun ConnectRouterScreen(
                             )
                         }
 
+                        // Collapsible Unified Advanced Options (Router Name, Port, SSL, optional IP override) for BOTH modes
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+                            border = BorderStroke(
+                                width = if (hasActiveAdvancedCustomization) 1.2.dp else 0.8.dp,
+                                color = if (hasActiveAdvancedCustomization) {
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                                } else {
+                                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                                }
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .minimumInteractiveComponentSize()
+                                        .clickable { showAdvancedSettings = !showAdvancedSettings }
+                                        .testTag("advanced_settings_toggle"),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Settings,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Column {
+                                            Text(
+                                                text = "الخيارات المتقدمة (الاسم، المنفذ، التشفير)",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = if (hasActiveAdvancedCustomization) {
+                                                    val aliasInfo = manualRouterName.takeIf { it.isNotBlank() } ?: "تلقائي"
+                                                    "الاسم: $aliasInfo • المنفذ: $activePort"
+                                                } else {
+                                                    "اضغط لتعيين اسم للراوتر أو تغيير رقم المنفذ"
+                                                },
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontSize = 10.sp,
+                                                color = if (hasActiveAdvancedCustomization) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                    Icon(
+                                        imageVector = if (showAdvancedSettings) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                        contentDescription = if (showAdvancedSettings) "إخفاء الخيارات المتقدمة" else "إظهار الخيارات المتقدمة"
+                                    )
+                                }
+
+                                AnimatedVisibility(
+                                    visible = showAdvancedSettings,
+                                    enter = fadeIn() + expandVertically(),
+                                    exit = fadeOut() + shrinkVertically()
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 10.dp, bottom = 4.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        // 1. Custom Router / Network Name
+                                        OutlinedTextField(
+                                            value = manualRouterName,
+                                            onValueChange = { manualRouterName = it },
+                                            label = { Text("تعيين اسم للراوتر / الشبكة (اختياري)") },
+                                            placeholder = { Text(if (!isCustomPlatformMode) "مثال: شبكة النور أو راوتر الرئيسي" else "اسم السيرفر أو المنصة") },
+                                            leadingIcon = {
+                                                Icon(Icons.Default.Router, contentDescription = null, tint = RouterBlue)
+                                            },
+                                            singleLine = true,
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("router_alias_input")
+                                        )
+
+                                        // 2. Quick Port Chips
+                                        Text(
+                                            text = "اختيار سريع للمنفذ (Port):",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .horizontalScroll(rememberScrollState()),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            if (!isCustomPlatformMode) {
+                                                FilterChip(
+                                                    selected = autoCustomPortText.isBlank(),
+                                                    onClick = {
+                                                        autoCustomPortText = ""
+                                                        autoCustomUseHttps = false
+                                                    },
+                                                    label = { Text("تلقائي ($autoDetectedApiPort)", fontSize = 11.sp) },
+                                                    modifier = Modifier.height(48.dp)
+                                                )
+                                                listOf(
+                                                    8728 to "8728 (API)",
+                                                    8729 to "8729 (API-SSL)",
+                                                    80 to "80 (REST)",
+                                                    443 to "443 (REST SSL)",
+                                                    8080 to "8080 (بديل)"
+                                                ).forEach { (port, label) ->
+                                                    FilterChip(
+                                                        selected = parsedAutoCustomPort == port,
+                                                        onClick = {
+                                                            autoCustomPortText = port.toString()
+                                                            autoCustomUseHttps = (port == 8729 || port == 443 || port == 8443)
+                                                        },
+                                                        label = { Text(label, fontSize = 11.sp) },
+                                                        modifier = Modifier.height(48.dp)
+                                                    )
+                                                }
+                                            } else {
+                                                listOf(
+                                                    443 to "443 (HTTPS)",
+                                                    80 to "80 (HTTP)",
+                                                    8080 to "8080 (بديل)",
+                                                    8728 to "8728 (API)",
+                                                    8729 to "8729 (SSL)"
+                                                ).forEach { (port, label) ->
+                                                    FilterChip(
+                                                        selected = manualPort == port,
+                                                        onClick = {
+                                                            manualPort = port
+                                                            manualPortText = port.toString()
+                                                            manualUseHttps = (port == 443 || port == 8729)
+                                                            if (port in listOf(8728, 8729)) {
+                                                                preferWebPlatformBrowser = false
+                                                            }
+                                                        },
+                                                        label = { Text(label, fontSize = 11.sp) },
+                                                        modifier = Modifier.height(48.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        // 3. Custom Port Numeric Field
+                                        OutlinedTextField(
+                                            value = if (!isCustomPlatformMode) autoCustomPortText else manualPortText,
+                                            onValueChange = { input ->
+                                                val digits = input.filter { it.isDigit() }.take(5)
+                                                if (!isCustomPlatformMode) {
+                                                    autoCustomPortText = digits
+                                                    val p = digits.toIntOrNull()
+                                                    if (p == 8729 || p == 443 || p == 8443) {
+                                                        autoCustomUseHttps = true
+                                                    } else if (p == 8728 || p == 80) {
+                                                        autoCustomUseHttps = false
+                                                    }
+                                                } else {
+                                                    manualPortText = digits
+                                                    val p = digits.toIntOrNull()
+                                                    if (p != null && p in 1..65535) {
+                                                        manualPort = p
+                                                    }
+                                                }
+                                            },
+                                            label = { Text("تغيير رقم المنفذ المخصص (Port)") },
+                                            placeholder = { Text(if (!isCustomPlatformMode) "تلقائي ($autoDetectedApiPort) — مثال: 8728 أو 8730" else "443") },
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                            singleLine = true,
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("advanced_port_input")
+                                        )
+
+                                        // 4. Optional Router IP override in Auto MikroTik Mode only
+                                        if (!isCustomPlatformMode) {
+                                            OutlinedTextField(
+                                                value = autoIpOverride,
+                                                onValueChange = { input ->
+                                                    autoIpOverride = input
+                                                    val parsedOv = RouterConnectionParser.normalizeHostInput(input)
+                                                    parsedOv.explicitPort?.let { p ->
+                                                        autoCustomPortText = p.toString()
+                                                    }
+                                                    parsedOv.inferredHttps?.let { autoCustomUseHttps = it }
+                                                },
+                                                label = { Text("تعديل عنوان IP للراوتر (اختياري)") },
+                                                placeholder = { Text("تلقائي ($autoDetectedIp)") },
+                                                supportingText = {
+                                                    Text(
+                                                        text = "اتركه فارغاً لاستخدام IP الشبكة المكتشف تلقائياً، أو أدخل IP الإدارة إذا كان مختلفاً",
+                                                        fontSize = 10.sp
+                                                    )
+                                                },
+                                                singleLine = true,
+                                                shape = RoundedCornerShape(12.dp),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .testTag("advanced_ip_override_input")
+                                            )
+                                        }
+
+                                        // 5. SSL / TLS Switch + Reset Button
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .minimumInteractiveComponentSize()
+                                                .clickable {
+                                                    if (!isCustomPlatformMode) {
+                                                        autoCustomUseHttps = !autoCustomUseHttps
+                                                    } else {
+                                                        manualUseHttps = !manualUseHttps
+                                                    }
+                                                },
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp), tint = RouterBlue)
+                                                Text("اتصال مشفر (SSL / TLS / HTTPS)", style = MaterialTheme.typography.bodySmall)
+                                            }
+                                            Switch(
+                                                checked = if (!isCustomPlatformMode) resolvedAutoHttps else manualUseHttps,
+                                                onCheckedChange = { checked ->
+                                                    if (!isCustomPlatformMode) {
+                                                        autoCustomUseHttps = checked
+                                                        if (autoCustomPortText.isBlank()) {
+                                                            autoCustomPortText = if (checked) "8729" else "8728"
+                                                        }
+                                                    } else {
+                                                        manualUseHttps = checked
+                                                    }
+                                                },
+                                                modifier = Modifier.testTag("advanced_https_switch")
+                                            )
+                                        }
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.End
+                                        ) {
+                                            TextButton(
+                                                onClick = {
+                                                    manualRouterName = ""
+                                                    if (!isCustomPlatformMode) {
+                                                        autoCustomPortText = ""
+                                                        autoCustomUseHttps = false
+                                                        autoIpOverride = ""
+                                                    } else {
+                                                        manualPort = 443
+                                                        manualPortText = "443"
+                                                        manualUseHttps = true
+                                                    }
+                                                    Toast.makeText(context, "تمت إعادة الخيارات المتقدمة للافتراضي", Toast.LENGTH_SHORT).show()
+                                                },
+                                                modifier = Modifier
+                                                    .minimumInteractiveComponentSize()
+                                                    .testTag("reset_advanced_btn")
+                                            ) {
+                                                Text("إعادة ضبط للافتراضي", fontSize = 12.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Primary Login CTA Button
                         Button(
                             onClick = {
                                 if (!isCustomPlatformMode) {
+                                    val targetIp = resolvedAutoIp.trim()
+                                    val resolvedName = manualRouterName.trim().ifBlank { "راوتر $targetIp" }
                                     val config = RouterConnectionConfig(
-                                        name = "راوتر $autoDetectedIp",
-                                        ipAddress = autoDetectedIp.trim(),
-                                        port = autoDetectedApiPort,
+                                        name = resolvedName,
+                                        ipAddress = targetIp,
+                                        port = resolvedAutoPort,
                                         username = username.trim(),
                                         password = password,
-                                        useHttps = autoDetectedApiHttps,
+                                        useHttps = resolvedAutoHttps,
                                         autoDetectProtocol = true,
                                         preferredPath = null,
                                         isDemoMode = false,
@@ -1656,21 +1861,30 @@ fun ConnectRouterScreen(
                                             .clickable {
                                                 username = router.username
                                                 if (router.password.isNotBlank()) password = router.password
+                                                val isDefaultPlaceholderName = router.name.equals("راوتر ${router.ipAddress}", ignoreCase = true) ||
+                                                    router.name.startsWith("راوتر MikroTik")
+                                                if (!isDefaultPlaceholderName) {
+                                                    manualRouterName = router.name
+                                                }
                                                 if (isKnownCloudPortal) {
                                                     isCustomPlatformMode = true
                                                     preferWebPlatformBrowser = true
                                                     manualIp = router.ipAddress
                                                     manualPort = router.port
+                                                    manualPortText = router.port.toString()
                                                     manualUseHttps = router.useHttps
                                                 } else if (autoDetectedIp.isNotBlank() && router.ipAddress.equals(autoDetectedIp, ignoreCase = true)) {
                                                     isCustomPlatformMode = false
                                                     preferWebPlatformBrowser = false
+                                                    autoCustomPortText = if (router.port != 8728 && router.port > 0) router.port.toString() else ""
+                                                    autoCustomUseHttps = router.useHttps
                                                 } else {
                                                     isCustomPlatformMode = true
                                                     preferWebPlatformBrowser = false
                                                     manualIp = router.ipAddress
                                                     val normalizedPort = if (router.port in listOf(80, 443, 8080)) 8728 else router.port
                                                     manualPort = normalizedPort
+                                                    manualPortText = normalizedPort.toString()
                                                     manualUseHttps = (normalizedPort == 8729)
                                                 }
                                                 Toast.makeText(context, "تم تحديد بيانات ${router.name}", Toast.LENGTH_SHORT).show()
@@ -1729,7 +1943,7 @@ fun ConnectRouterScreen(
                                                     onClick = {
                                                         username = router.username
                                                         if (router.password.isNotBlank()) password = router.password
-                                                        val targetPort = if (!isKnownCloudPortal && router.port in listOf(80, 443, 8080)) 8728 else router.port
+                                                        val targetPort = if (router.port > 0) router.port else 8728
                                                         val config = RouterConnectionConfig(
                                                             id = router.id,
                                                             name = router.name,
@@ -1737,7 +1951,7 @@ fun ConnectRouterScreen(
                                                             port = targetPort,
                                                             username = router.username,
                                                             password = router.password,
-                                                            useHttps = if (!isKnownCloudPortal) targetPort == 8729 else router.useHttps,
+                                                            useHttps = router.useHttps,
                                                             autoDetectProtocol = true,
                                                             isDemoMode = false,
                                                             directApiOnly = !isKnownCloudPortal,

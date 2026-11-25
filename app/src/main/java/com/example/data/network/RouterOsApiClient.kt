@@ -128,7 +128,7 @@ class RouterOsApiClient {
     ): Socket {
         val effectiveConnectTimeout = connectTimeoutMs.coerceIn(500, 15000)
         val effectiveHandshakeTimeout = handshakeTimeoutMs.coerceIn(1000, 10000)
-        val tcpSocket = Socket()
+        val tcpSocket = NetworkUtils.createRoutedSocket(host)
         tcpSocket.tcpNoDelay = true
         tcpSocket.keepAlive = true
         tcpSocket.connect(resolveSocketAddress(host, port), effectiveConnectTimeout)
