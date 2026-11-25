@@ -45,7 +45,8 @@ data class RouterConnectionConfig(
     val isDemoMode: Boolean = false,
     val autoDetectProtocol: Boolean = true,
     val preferredPath: String? = null,
-    val directApiOnly: Boolean = false
+    val directApiOnly: Boolean = false,
+    val preferWebPortal: Boolean = false
 )
 
 sealed class ConnectionState {

@@ -151,6 +151,17 @@ object WebPortalCacheManager {
     }
 
     @Synchronized
+    fun clearMeta(context: Context, hostOrUrl: String) {
+        if (hostOrUrl.isBlank()) return
+        try {
+            val dir = File(File(context.filesDir, DIR_NAME), extractHostKey(hostOrUrl))
+            if (dir.exists()) {
+                dir.deleteRecursively()
+            }
+        } catch (_: Exception) {}
+    }
+
+    @Synchronized
     fun getLatestCachedPortal(context: Context): CachedPortalMeta? {
         return try {
             val root = File(context.filesDir, DIR_NAME)

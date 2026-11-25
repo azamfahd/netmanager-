@@ -1499,7 +1499,7 @@ class MikrotikRepository(
                     appDao?.deleteUnscopedLegacyNodes()
                 } catch (_: Exception) {}
 
-                // Explicit Direct RouterOS API Mode: bypasses all cloud/web portal inspection and REST fallbacks
+                // Explicit Direct RouterOS API Mode (Auto MikroTik Mode): bypasses all cloud/web portal inspection and browser redirects
                 if (cleanConfig.directApiOnly) {
                     return@withContext connectDirectViaRouterOsApiInternal(cleanConfig, sessionId)
                 }
@@ -1511,32 +1511,50 @@ class MikrotikRepository(
                         !effectivePath.startsWith("/rest", ignoreCase = true))) &&
                     cleanConfig.port !in listOf(8728, 8729)
 
-                // Fast instant path for known cloud SaaS portals (e.g., APlusWiFi or explicit HTTPS web URLs with paths)
-                if (isExplicitCloudWebUrl) {
+                // Fast path when user explicitly picks Custom Domain / Platform Browser mode or known cloud SaaS portals
+                if (cleanConfig.preferWebPortal || isExplicitCloudWebUrl) {
                     routerOsApiClient.disconnect()
                     isApiSocketMode = false
+                    val preferredWebPort = if (cleanConfig.port in listOf(8728, 8729)) {
+                        if (cleanConfig.useHttps) 443 else 80
+                    } else {
+                        cleanConfig.port
+                    }
+                    val preferredWebHttps = parsedHost.inferredHttps ?: (preferredWebPort == 443 || (cleanConfig.useHttps && preferredWebPort != 80))
                     val directInspection = inspectWebEndpoint(
                         host = cleanConfig.ipAddress,
                         openPorts = emptyList(),
-                        preferredPort = if (cleanConfig.port in listOf(8728, 8729)) 443 else cleanConfig.port,
-                        preferredHttps = parsedHost.inferredHttps ?: (cleanConfig.port != 80),
+                        preferredPort = preferredWebPort,
+                        preferredHttps = preferredWebHttps,
                         preferredPath = cleanConfig.preferredPath
                     )
                     buildWebPortalOutcome(directInspection, cleanConfig)?.let {
                         return@withContext it
                     }
-                    if (isAplusDomain) {
+                    if (isAplusDomain || cleanConfig.preferWebPortal) {
                         val cleanPath = effectivePath?.trim()?.takeIf { it.isNotBlank() && it != "/" }?.let {
                             if (it.startsWith("/")) it else "/$it"
                         }.orEmpty()
+                        val scheme = if (preferredWebHttps) "https" else "http"
+                        val defaultPort = (preferredWebHttps && preferredWebPort == 443) || (!preferredWebHttps && preferredWebPort == 80)
+                        val origin = if (defaultPort || preferredWebPort <= 0) {
+                            "$scheme://${cleanConfig.ipAddress}"
+                        } else {
+                            "$scheme://${cleanConfig.ipAddress}:$preferredWebPort"
+                        }
+                        val fullUrl = "$origin${if (cleanPath.isNotBlank()) cleanPath else "/"}"
                         return@withContext VerifyConnectOutcome.WebPortalDetected(
-                            url = "https://${cleanConfig.ipAddress}$cleanPath",
+                            url = fullUrl,
                             serverName = cleanConfig.name.ifBlank { cleanConfig.ipAddress },
-                            isAplusWifi = true,
-                            description = "تم التعرف على السيرفر (${cleanConfig.ipAddress}) كـ لوحة تحكم APlusWiFi السحابية.",
-                            port = 443,
-                            useHttps = true,
-                            targetPathUrl = cleanPath.takeIf { it.isNotBlank() }?.let { "https://${cleanConfig.ipAddress}$it" },
+                            isAplusWifi = isAplusDomain,
+                            description = if (isAplusDomain) {
+                                "تم التعرف على السيرفر (${cleanConfig.ipAddress}) كـ لوحة تحكم APlusWiFi السحابية."
+                            } else {
+                                "تم فتح عنوان المنصة (${cleanConfig.ipAddress}) عبر المتصفح المدمج."
+                            },
+                            port = if (preferredWebPort > 0) preferredWebPort else if (preferredWebHttps) 443 else 80,
+                            useHttps = preferredWebHttps,
+                            targetPathUrl = cleanPath.takeIf { it.isNotBlank() }?.let { "$origin$it" },
                             isMikroTikWebFig = false
                         )
                     }
@@ -1581,7 +1599,7 @@ class MikrotikRepository(
                 }
 
                 val isLocalTarget = RouterConnectionParser.isPrivateOrLocalIpv4(cleanConfig.ipAddress)
-                val socketTimeoutMs = if (isLocalTarget) 1600 else 2800
+                val socketTimeoutMs = if (isLocalTarget) 2400 else 3800
 
                 val authRejectedRef = java.util.concurrent.atomic.AtomicReference<String?>(null)
                 val lastSslRef = java.util.concurrent.atomic.AtomicReference<String?>(null)
@@ -1628,7 +1646,15 @@ class MikrotikRepository(
                                     break
                                 }
                                 val err = throwable?.message.orEmpty()
-                                if (err.contains("بيانات الدخول") || err.contains("المصادقة") || err.contains("كلمة المرور")) {
+                                val timedOut = throwable is java.net.SocketTimeoutException ||
+                                    err.contains("timed out", ignoreCase = true) ||
+                                    err.contains("انتهى وقت", ignoreCase = true)
+                                if (!timedOut &&
+                                    (err.contains("بيانات الدخول") ||
+                                        err.contains("المصادقة") ||
+                                        err.contains("كلمة المرور") ||
+                                        err.contains("invalid user", ignoreCase = true))
+                                ) {
                                     authRejectedRef.compareAndSet(null, err)
                                     restJob?.cancel()
                                     webJob?.cancel()
@@ -1637,11 +1663,8 @@ class MikrotikRepository(
                                 if (err.contains("SSL", ignoreCase = true)) {
                                     lastSslRef.compareAndSet(null, err)
                                 }
-                                // If 8728 timed out (dropped by firewall), skip waiting another full timeout for 8729 unless TLS was specifically requested
-                                val timedOut = throwable is java.net.SocketTimeoutException ||
-                                    err.contains("timed out", ignoreCase = true) ||
-                                    err.contains("انتهى وقت", ignoreCase = true)
-                                if (timedOut && idx == 0 && !cleanConfig.useHttps && cleanConfig.port != 8729) {
+                                // Only skip 8729 if plain 8728 timed out AND autoDetectProtocol was disabled
+                                if (timedOut && idx == 0 && !cleanConfig.autoDetectProtocol && !cleanConfig.useHttps && cleanConfig.port != 8729) {
                                     break
                                 }
                             }
@@ -1720,9 +1743,12 @@ class MikrotikRepository(
                         )
                         if (inspected !is WebEndpointInspection.None) {
                             webInspectionRef.compareAndSet(null, inspected)
-                            // If a Cloud Web Portal (non-WebFig) responded fast while socketJob is hanging on dropped 8728/8729,
-                            // give socketJob at most 1100ms total from start before short-circuiting straight to the portal.
-                            if (inspected is WebEndpointInspection.CloudWebPortal && !winnerClaimed.get()) {
+                            // Never cancel MikroTik API socket attempts for local IPs or API ports (Hotspot login pages often respond HTTP 200 on port 80!)
+                            val canShortCircuitSocket = !isLocalTarget &&
+                                cleanConfig.port !in listOf(8728, 8729) &&
+                                inspected is WebEndpointInspection.CloudWebPortal &&
+                                !winnerClaimed.get()
+                            if (canShortCircuitSocket) {
                                 val elapsed = System.currentTimeMillis() - raceStartMs
                                 val remainingGrace = (1100L - elapsed).coerceAtLeast(0L)
                                 if (remainingGrace > 0L) delay(remainingGrace)
@@ -1796,7 +1822,8 @@ class MikrotikRepository(
                     return@withContext VerifyConnectOutcome.Failure(rejectedAuth)
                 }
 
-                // Use the WebEndpointInspection already collected in parallel (zero redundant second HTTP roundtrip)
+                // Custom Server / Domain / Platform Mode fallback (directApiOnly == false):
+                // Open WebPortal when API & REST did not succeed and a web platform or explicit HTTP/HTTPS portal responded.
                 val webInspection = webInspectionRef.get() ?: inspectWebEndpoint(
                     host = cleanConfig.ipAddress,
                     openPorts = emptyList(),
@@ -1804,9 +1831,21 @@ class MikrotikRepository(
                     preferredHttps = cleanConfig.useHttps,
                     preferredPath = cleanConfig.preferredPath
                 )
-                buildWebPortalOutcome(webInspection, cleanConfig)?.let { portalOutcome ->
+                val isExplicitWebTarget = parsedHost.rawScheme in listOf("http", "https") ||
+                    cleanConfig.port in listOf(80, 443, 8080) ||
+                    !cleanConfig.autoDetectProtocol
+                val shouldOpenPortalOutcome = when (webInspection) {
+                    is WebEndpointInspection.CloudWebPortal ->
+                        cleanConfig.port !in listOf(8728, 8729)
+                    is WebEndpointInspection.MikroTikWebFig ->
+                        cleanConfig.port !in listOf(8728, 8729) && isExplicitWebTarget
+                    WebEndpointInspection.None -> false
+                }
+                val portalOutcome = buildWebPortalOutcome(webInspection, cleanConfig)
+                if (shouldOpenPortalOutcome && portalOutcome != null) {
                     return@withContext portalOutcome
                 }
+                val fallbackPortalUrl = (portalOutcome as? VerifyConnectOutcome.WebPortalDetected)?.url
 
                 val lastSslMsg = lastSslRef.get()
                 val extraSslNote = if (lastSslMsg != null) "\n($lastSslMsg)" else ""
@@ -1815,7 +1854,7 @@ class MikrotikRepository(
                 } else {
                     "تعذر الاتصال بالسيرفر أو الراوتر (${cleanConfig.ipAddress}).$extraSslNote\nتأكد من اتصال جهازك بنفس شبكة الراوتر أو بالإنترنت، ومن صحة العنوان وبيانات الدخول."
                 }
-                return@withContext VerifyConnectOutcome.Failure(errorMsg)
+                return@withContext VerifyConnectOutcome.Failure(errorMsg, fallbackPortalUrl = fallbackPortalUrl)
             } catch (e: Exception) {
                 VerifyConnectOutcome.Failure("فشل الاتصال: ${e.localizedMessage ?: e.message}")
             }
@@ -1877,10 +1916,11 @@ class MikrotikRepository(
         routerOsApiClient.disconnect()
         isApiSocketMode = false
 
+        val originalPort = cleanConfig.port
         val primaryPort = when {
-            cleanConfig.port in listOf(80, 443, 8080) || cleanConfig.port <= 0 ->
+            originalPort in listOf(80, 443, 8080) || originalPort <= 0 ->
                 if (cleanConfig.useHttps) 8729 else 8728
-            else -> cleanConfig.port
+            else -> originalPort
         }
         val primaryTls = primaryPort == 8729 || (cleanConfig.useHttps && primaryPort != 8728)
 
@@ -1895,7 +1935,7 @@ class MikrotikRepository(
         }
 
         val isLocalTarget = RouterConnectionParser.isPrivateOrLocalIpv4(cleanConfig.ipAddress)
-        val connectTimeoutMs = if (isLocalTarget) 1600 else 2800
+        val connectTimeoutMs = if (isLocalTarget) 2500 else 4000
 
         var authErrorMsg: String? = null
         var dnsFailed = false
@@ -1906,12 +1946,13 @@ class MikrotikRepository(
         var lastErrorMsg: String? = null
 
         for ((idx, candidate) in apiCandidates.withIndex()) {
+            val candidateTimeout = if (idx == 0) connectTimeoutMs else minOf(connectTimeoutMs, 2000)
             val socketResult = routerOsApiClient.connectAndLogin(
                 host = cleanConfig.ipAddress,
                 port = candidate.port,
                 username = cleanConfig.username,
                 password = cleanConfig.password,
-                timeoutMs = connectTimeoutMs,
+                timeoutMs = candidateTimeout,
                 useTls = candidate.useHttps || candidate.port == 8729
             )
 
@@ -1948,10 +1989,14 @@ class MikrotikRepository(
             val errMsg = throwable?.message.orEmpty()
             lastErrorMsg = errMsg.ifBlank { lastErrorMsg }
 
-            if (errMsg.contains("بيانات الدخول") ||
-                errMsg.contains("المصادقة") ||
-                errMsg.contains("كلمة المرور") ||
-                errMsg.contains("invalid user", ignoreCase = true)
+            val isTimeout = throwable is java.net.SocketTimeoutException ||
+                errMsg.contains("timed out", ignoreCase = true) ||
+                errMsg.contains("انتهى وقت", ignoreCase = true)
+            if (!isTimeout &&
+                (errMsg.contains("بيانات الدخول") ||
+                    errMsg.contains("المصادقة") ||
+                    errMsg.contains("كلمة المرور") ||
+                    errMsg.contains("invalid user", ignoreCase = true))
             ) {
                 authErrorMsg = errMsg
                 break
@@ -1970,13 +2015,9 @@ class MikrotikRepository(
             if (throwable is java.net.ConnectException || errMsg.contains("رفض الراوتر")) {
                 refused = true
             }
-            val isTimeout = throwable is java.net.SocketTimeoutException ||
-                errMsg.contains("timed out", ignoreCase = true) ||
-                errMsg.contains("انتهى وقت", ignoreCase = true)
             if (isTimeout) {
                 timedOut = true
-                // If primary plain API port timed out cleanly (firewall drop), avoid waiting a full second timeout on 8729 unless TLS was requested
-                if (idx == 0 && !cleanConfig.useHttps && candidate.port != 8729) {
+                if (idx == 0 && !cleanConfig.autoDetectProtocol && !cleanConfig.useHttps && candidate.port != 8729) {
                     break
                 }
             }
@@ -1993,6 +2034,74 @@ class MikrotikRepository(
         }
         if (noRouteMsg != null) {
             return VerifyConnectOutcome.Failure(message = noRouteMsg, fallbackPortalUrl = null)
+        }
+
+        // Native RouterOS v7 REST API JSON fallback inside direct mode when autoDetectProtocol=true:
+        // connects inside the app UI (MikroTikSuccess), strictly rejects HTML/WebFig/cloud portal pages, never opens browser.
+        if (cleanConfig.autoDetectProtocol) {
+            val restCandidates = buildList {
+                if (originalPort !in listOf(8728, 8729) && originalPort > 0) {
+                    add(originalPort to cleanConfig.useHttps)
+                }
+                if (originalPort == 443) add(443 to true)
+                if (originalPort == 80 || originalPort == 8080) add(originalPort to false)
+                add(443 to true)
+                add(80 to false)
+            }.distinct()
+            val credential = Credentials.basic(cleanConfig.username, cleanConfig.password)
+            for ((rPort, rHttps) in restCandidates) {
+                val scheme = if (rHttps) "https" else "http"
+                val baseUrl = "$scheme://${cleanConfig.ipAddress}:$rPort"
+                try {
+                    val req = Request.Builder()
+                        .url("$baseUrl/rest/system/resource")
+                        .header("Authorization", credential)
+                        .build()
+                    probeHttpClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val body = resp.body?.string().orEmpty()
+                            if (body.trimStart().startsWith("{")) {
+                                parseResource(body)
+                                routerOsApiClient.disconnect()
+                                isApiSocketMode = false
+                                val restConfig = cleanConfig.copy(
+                                    port = rPort,
+                                    useHttps = rHttps,
+                                    directApiOnly = true
+                                )
+                                activeConfig = restConfig
+                                var restSyncErr: Exception? = null
+                                syncMutex.withLock {
+                                    if (connectionSessionId == sessionId && activeConfig != null) {
+                                        try {
+                                            fetchLiveRouterData(baseUrl, credential)
+                                        } catch (e: Exception) {
+                                            _lastSyncError.value = e.message
+                                            restSyncErr = e
+                                        }
+                                    }
+                                }
+                                return if (restSyncErr != null) {
+                                    VerifyConnectOutcome.Failure(
+                                        message = restSyncErr?.message ?: "اتصل التطبيق بـ RouterOS REST ($rPort) لكن تعذر جلب البيانات.",
+                                        fallbackPortalUrl = null
+                                    )
+                                } else {
+                                    VerifyConnectOutcome.MikroTikSuccess(restConfig)
+                                }
+                            }
+                        } else if (resp.code == 401 || resp.code == 403) {
+                            val errBody = runCatching { resp.peekBody(2048L).string().trimStart() }.getOrDefault("")
+                            if (errBody.startsWith("{") || resp.header("WWW-Authenticate").orEmpty().contains("Basic", ignoreCase = true)) {
+                                return VerifyConnectOutcome.Failure(
+                                    message = "خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة للاتصال بـ REST API في الراوتر.",
+                                    fallbackPortalUrl = null
+                                )
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
         }
 
         val triedPorts = apiCandidates.joinToString("/") { it.port.toString() }
@@ -2084,10 +2193,67 @@ class MikrotikRepository(
                 _adminUsers.value = admins
             }
 
-            // Fetch Active Users (High priority for network management)
+            // Fetch DHCP leases & hosts early to enrich both Active Users and Topology (parity with REST mode)
+            val dhcpLeases = routerOsApiClient.getDhcpLeases().getOrDefault(emptyList())
+            val bridgeHosts = routerOsApiClient.getBridgeHosts().getOrDefault(emptyList())
+            val hotspotHosts = routerOsApiClient.getHotspotHosts().getOrDefault(emptyList())
+
+            val macToHostName = mutableMapOf<String, String>()
+            val ipToHostName = mutableMapOf<String, String>()
+            dhcpLeases.forEach { lease ->
+                val mac = (lease["mac-address"] ?: "").uppercase().trim()
+                val ip = (lease["address"] ?: "").trim()
+                val host = (lease["host-name"] ?: "").ifBlank { lease["comment"] ?: "" }.trim()
+                if (mac.isNotBlank() && host.isNotBlank()) macToHostName[mac] = host
+                if (ip.isNotBlank() && host.isNotBlank()) ipToHostName[ip] = host
+            }
+
+            val socketMacToInterface = mutableMapOf<String, String>()
+            val macToServer = mutableMapOf<String, String>()
+            bridgeHosts.forEach { hostMap ->
+                val mac = (hostMap["mac-address"] ?: "").uppercase().trim()
+                val onIf = hostMap["on-interface"] ?: hostMap["interface"] ?: ""
+                if (mac.isNotBlank() && onIf.isNotBlank()) {
+                    socketMacToInterface[mac] = onIf
+                }
+            }
+            hotspotHosts.forEach { hostMap ->
+                val mac = (hostMap["mac-address"] ?: "").uppercase().trim()
+                val onIf = hostMap["interface"] ?: hostMap["bridge-port"] ?: ""
+                val server = (hostMap["server"] ?: "").trim()
+                val comment = (hostMap["comment"] ?: "").trim()
+                if (mac.isNotBlank() && onIf.isNotBlank()) {
+                    socketMacToInterface[mac] = onIf
+                }
+                if (mac.isNotBlank() && server.isNotBlank()) {
+                    macToServer[mac] = server
+                }
+                if (mac.isNotBlank() && comment.isNotBlank() && !macToHostName.containsKey(mac)) {
+                    macToHostName[mac] = comment
+                }
+            }
+
+            // Fetch Active Users (High priority for network management) & enrich host/device metadata
             val activeResult = routerOsApiClient.getActiveHotspotUsers()
             if (activeResult.isSuccess) {
-                _activeUsers.value = activeResult.getOrThrow()
+                val enrichedActive = activeResult.getOrThrow().map { act ->
+                    val normMac = act.macAddress.uppercase().trim()
+                    val resolvedHost = act.hostName.ifBlank {
+                        macToHostName[normMac] ?: ipToHostName[act.address] ?: act.comment
+                    }
+                    val resolvedNode = socketMacToInterface[normMac] ?: act.nodeName.ifBlank { "السيرفر الرئيسي" }
+                    val resolvedServer = macToServer[normMac] ?: act.serverName.ifBlank { "hotspot1" }
+                    val device = com.example.data.util.DeviceDetector.detectDevice(normMac, resolvedHost, act.user)
+                    val detectedModel = "${device.brand} ${device.modelName}".trim()
+                    act.copy(
+                        macAddress = normMac.ifBlank { act.macAddress },
+                        hostName = resolvedHost,
+                        serverName = resolvedServer,
+                        nodeName = resolvedNode,
+                        deviceModel = act.deviceModel.ifBlank { detectedModel }
+                    )
+                }
+                _activeUsers.value = enrichedActive
             }
 
             // PHASE 2: Bulk Data & Topology
@@ -2123,7 +2289,8 @@ class MikrotikRepository(
                     }
                 }
 
-                val sortedCards = sortCardsByNewestFirst(combinedCards.distinctBy { it.name })
+                val enrichedCards = enrichCardsWithProfilePrices(combinedCards.distinctBy { it.name }, _profiles.value)
+                val sortedCards = sortCardsByNewestFirst(enrichedCards)
                 _cards.value = sortedCards
                 syncCardsToRoom(sortedCards)
             }
@@ -2148,8 +2315,6 @@ class MikrotikRepository(
 
             // Update topology whenever interface stats were successfully retrieved (even if empty)
             if (interfaceStatsRes.isSuccess) {
-                val bridgeHosts = routerOsApiClient.getBridgeHosts().getOrDefault(emptyList())
-                val hotspotHosts = routerOsApiClient.getHotspotHosts().getOrDefault(emptyList())
                 val wirelessRegs = routerOsApiClient.getWirelessRegistrations().getOrDefault(emptyList())
                 val ipAddressesList = routerOsApiClient.getRouterAddresses().getOrDefault(emptyList())
                 val wirelessList = routerOsApiClient.getWirelessInterfaces().getOrDefault(emptyList())
@@ -2160,22 +2325,6 @@ class MikrotikRepository(
                     val mac = rn["mac-address"].orEmpty()
                     if (mac.isNotBlank() && neighborsList.none { it["mac-address"].equals(mac, ignoreCase = true) }) {
                         neighborsList.add(rn)
-                    }
-                }
-
-                val socketMacToInterface = mutableMapOf<String, String>()
-                bridgeHosts.forEach { hostMap ->
-                    val mac = (hostMap["mac-address"] ?: "").uppercase().trim()
-                    val onIf = hostMap["on-interface"] ?: hostMap["interface"] ?: ""
-                    if (mac.isNotBlank() && onIf.isNotBlank()) {
-                        socketMacToInterface[mac] = onIf
-                    }
-                }
-                hotspotHosts.forEach { hostMap ->
-                    val mac = (hostMap["mac-address"] ?: "").uppercase().trim()
-                    val onIf = hostMap["interface"] ?: hostMap["bridge-port"] ?: ""
-                    if (mac.isNotBlank() && onIf.isNotBlank()) {
-                        socketMacToInterface[mac] = onIf
                     }
                 }
 
@@ -2794,6 +2943,11 @@ class MikrotikRepository(
                         }
                     }
                     _profiles.value = profList
+                    val resolvedCards = enrichCardsWithProfilePrices(_cards.value, profList)
+                    if (resolvedCards != _cards.value) {
+                        _cards.value = resolvedCards
+                        syncCardsToRoom(resolvedCards)
+                    }
                 }
 
                 // Fetch ip bindings
@@ -3012,6 +3166,32 @@ class MikrotikRepository(
                 }
             } catch (e: Exception) {
                 throw e
+            }
+        }
+    }
+
+    private fun enrichCardsWithProfilePrices(
+        cards: List<HotspotCard>,
+        profiles: List<HotspotProfile>
+    ): List<HotspotCard> {
+        if (cards.isEmpty() || profiles.isEmpty()) return cards
+        val priceByProfile = mutableMapOf<String, String>()
+        profiles.forEach { prof ->
+            val cleanName = prof.name.trim().lowercase()
+            val resolvedPrice = prof.price.takeIf { it.isNotBlank() && it != "غير محدد" }
+                ?: prof.priceNumber.takeIf { it > 0.0 }?.let { "${it.toInt()} ر.ي" }
+            if (cleanName.isNotBlank() && !resolvedPrice.isNullOrBlank()) {
+                priceByProfile[cleanName] = resolvedPrice
+            }
+        }
+        if (priceByProfile.isEmpty()) return cards
+        return cards.map { card ->
+            val needsPrice = card.price.isBlank() || card.price == "غير محدد"
+            if (!needsPrice) {
+                card
+            } else {
+                val profPrice = priceByProfile[card.profile.trim().lowercase()]
+                if (!profPrice.isNullOrBlank()) card.copy(price = profPrice) else card
             }
         }
     }
@@ -4037,7 +4217,9 @@ class MikrotikRepository(
                             }
                         } catch (_: Exception) {}
                     }
-                    val sortedCards = sortCardsByNewestFirst(distinctCards)
+                    val sortedCards = sortCardsByNewestFirst(
+                        enrichCardsWithProfilePrices(distinctCards, _profiles.value)
+                    )
                     _cards.value = sortedCards
                     syncCardsToRoom(sortedCards)
                     notifyDataRefreshed()

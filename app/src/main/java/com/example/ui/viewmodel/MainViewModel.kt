@@ -1926,18 +1926,23 @@ class MainViewModel(
             val targetContext = context ?: appContext
             _currentConfig.value = normalizedConfig
 
+            val isPrivateLanOrApiTarget = normalizedConfig.directApiOnly ||
+                com.example.data.network.RouterConnectionParser.isPrivateOrLocalIpv4(normalizedConfig.ipAddress) ||
+                normalizedConfig.port in listOf(8728, 8729)
+
             val cachedPortalMeta = if (!normalizedConfig.isDemoMode && targetContext != null && normalizedConfig.ipAddress.isNotBlank()) {
                 com.example.data.local.WebPortalCacheManager.loadMeta(targetContext, normalizedConfig.ipAddress)
             } else {
                 null
             }
 
-            // Immediate offline launch for saved remote/domain Web Portals when device has no internet (never bypasses explicit directApiOnly)
+            // Immediate offline launch ONLY for non-API remote cloud portals (e.g. APlusWiFi) when device has no internet
             val isRemoteDomain = !com.example.data.network.RouterConnectionParser.isIpv4(normalizedConfig.ipAddress)
-            if (!normalizedConfig.directApiOnly &&
+            if (!isPrivateLanOrApiTarget &&
                 isRemoteDomain &&
                 cachedPortalMeta != null &&
                 cachedPortalMeta.hasValidArchive &&
+                !cachedPortalMeta.isMikroTikWebFig &&
                 targetContext != null &&
                 !NetworkUtils.isNetworkOnline(targetContext)
             ) {
@@ -1960,8 +1965,12 @@ class MainViewModel(
 
             var hasLoadedFromCache = false
             var cachedSnapshotTimestamp = 0L
-            // 1. FAST INSTANT LOGIN FROM CACHE (دخول سريع فوري من الكاش):
-            if (!normalizedConfig.isDemoMode && targetContext != null && normalizedConfig.ipAddress.isNotBlank()) {
+            // 1. FAST INSTANT LOGIN FROM CACHE (دخول سريع فوري من الكاش للميكروتك):
+            if (!normalizedConfig.isDemoMode &&
+                !normalizedConfig.preferWebPortal &&
+                targetContext != null &&
+                normalizedConfig.ipAddress.isNotBlank()
+            ) {
                 val cachedSnapshot = com.example.data.local.RouterCacheManager.loadSnapshot(targetContext, normalizedConfig.ipAddress)
                 if (cachedSnapshot != null) {
                     repository.restoreFromSnapshot(cachedSnapshot)
@@ -1982,10 +1991,13 @@ class MainViewModel(
             }
 
             if (!hasLoadedFromCache) {
-                val verifyingMessage = if (normalizedConfig.directApiOnly) {
-                    "جاري الاتصال المباشر عبر RouterOS API (${normalizedConfig.ipAddress}:${normalizedConfig.port})..."
-                } else {
-                    "جاري الاتصال المباشر بالسيرفر (${normalizedConfig.ipAddress})..."
+                val verifyingMessage = when {
+                    normalizedConfig.directApiOnly ->
+                        "جاري الاتصال المباشر بالميكروتك (${normalizedConfig.ipAddress}) وجلب بيانات النظام..."
+                    normalizedConfig.preferWebPortal ->
+                        "جاري الاتصال بالمنصة (${normalizedConfig.ipAddress}) وفتح المتصفح..."
+                    else ->
+                        "جاري الاتصال بالسيرفر (${normalizedConfig.ipAddress})..."
                 }
                 _connectionState.value = ConnectionState.Verifying(
                     verifyingMessage,
@@ -2052,8 +2064,10 @@ class MainViewModel(
                         )
                         database.appDao().insertSavedRouter(routerEntity)
 
-                        // Persist new cache snapshot
+                        // Clear any accidental stale WebPortal cache entry for this router and persist native cache snapshot
                         if (targetContext != null) {
+                            com.example.data.local.WebPortalCacheManager.clearMeta(targetContext, activeCfg.ipAddress)
+                            _latestCachedPortal.value = com.example.data.local.WebPortalCacheManager.getLatestCachedPortal(targetContext)
                             val snapshot = repository.getCurrentSnapshot(activeCfg.ipAddress, finalRouterName)
                             com.example.data.local.RouterCacheManager.saveSnapshot(
                                 context = targetContext,
@@ -2182,7 +2196,7 @@ class MainViewModel(
                             offlineReason = "تعذر الاتصال المباشر: $error"
                         )
                         startAutoRefresh()
-                    } else if (!normalizedConfig.directApiOnly && cachedPortalMeta != null) {
+                    } else if (!isPrivateLanOrApiTarget && cachedPortalMeta != null && !cachedPortalMeta.isMikroTikWebFig) {
                         _toastEvent.emit("🟠 تعذر الاتصال المباشر — تم فتح آخر نسخة محفوظة من لوحة التحكم (وضع الأوفلاين).")
                         _connectionState.value = ConnectionState.WebPortal(
                             serverName = cachedPortalMeta.serverName.ifBlank { normalizedConfig.ipAddress },

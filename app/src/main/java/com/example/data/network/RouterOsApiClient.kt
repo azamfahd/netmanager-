@@ -19,9 +19,14 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.UnknownHostException
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 import kotlin.random.Random
 
 enum class CardTargetSystem {
@@ -101,6 +106,19 @@ class RouterOsApiClient {
         return InetSocketAddress(clean, port)
     }
 
+    private val routerSslSocketFactory: SSLSocketFactory by lazy {
+        val trustAll = arrayOf<TrustManager>(
+            object : X509TrustManager {
+                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+                override fun checkClientTrusted(chain: Array<X509Certificate>?, authType: String?) {}
+                override fun checkServerTrusted(chain: Array<X509Certificate>?, authType: String?) {}
+            }
+        )
+        SSLContext.getInstance("TLS").apply {
+            init(null, trustAll, SecureRandom())
+        }.socketFactory
+    }
+
     private fun createRouterSocket(
         host: String,
         port: Int,
@@ -119,8 +137,7 @@ class RouterOsApiClient {
         if (!useTls) {
             return tcpSocket
         }
-        val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-        val sslSocket = factory.createSocket(tcpSocket, host, port, true) as SSLSocket
+        val sslSocket = routerSslSocketFactory.createSocket(tcpSocket, host, port, true) as SSLSocket
         try {
             val supported = sslSocket.supportedCipherSuites
             val enabled = sslSocket.enabledCipherSuites.toMutableList()
@@ -133,6 +150,92 @@ class RouterOsApiClient {
         sslSocket.soTimeout = effectiveHandshakeTimeout
         sslSocket.startHandshake()
         return sslSocket
+    }
+
+    private fun readLoginSentencesUntilDone(inS: InputStream): List<List<String>> {
+        val sentences = mutableListOf<List<String>>()
+        while (true) {
+            val sentence = readSingleSentenceFromStream(inS)
+            if (sentence.isEmpty()) break
+            sentences.add(sentence)
+            val first = sentence.firstOrNull() ?: ""
+            if (first == "!done" || first == "!fatal") break
+        }
+        return sentences
+    }
+
+    private fun performLoginHandshake(
+        sock: Socket,
+        inS: InputStream,
+        outS: OutputStream,
+        cleanUser: String,
+        password: String
+    ): Pair<Boolean, String?> {
+        // 1. Attempt modern RouterOS (v6.43+ and v7) plain /login
+        writeSentenceToStream(outS, listOf("/login", "=name=$cleanUser", "=password=$password"))
+        val firstReply = readLoginSentencesUntilDone(inS)
+        if (firstReply.isEmpty()) {
+            return false to "لم يستجب الراوتر على منفذ API"
+        }
+
+        if (firstReply.any { it.firstOrNull() == "!fatal" }) {
+            val fatalMsg = firstReply.firstOrNull { it.firstOrNull() == "!fatal" }
+                ?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                ?: firstReply.firstOrNull { it.firstOrNull() == "!fatal" }?.drop(1)?.firstOrNull()
+            return false to (fatalMsg ?: "أغلق راوتر ميكروتك جلسة الدخول")
+        }
+
+        val firstTrap = firstReply.firstOrNull { it.firstOrNull() == "!trap" }
+        val firstDone = firstReply.lastOrNull { it.firstOrNull() == "!done" }
+        val firstChallenge = firstReply.flatten().firstOrNull { it.startsWith("=ret=") }
+
+        if (firstTrap == null && firstDone != null && firstChallenge == null) {
+            runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
+            return true to null
+        }
+
+        var challengeParam = firstChallenge
+        var trapMsg = firstTrap?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+
+        // 2. Pre-6.43 legacy RouterOS: initial /login =name= =password= triggers !trap; bare /login returns =ret=<challenge>
+        if (firstTrap != null && firstDone != null) {
+            try {
+                writeSentenceToStream(outS, listOf("/login"))
+                val bareReply = readLoginSentencesUntilDone(inS)
+                val bareChallenge = bareReply.flatten().firstOrNull { it.startsWith("=ret=") }
+                if (bareChallenge != null && bareReply.none { it.firstOrNull() == "!trap" || it.firstOrNull() == "!fatal" }) {
+                    challengeParam = bareChallenge
+                }
+            } catch (_: Exception) {
+                // Keep original trapMsg if bare /login probe failed
+            }
+        }
+
+        // 3. Complete MD5 challenge-response if =ret= was issued
+        if (challengeParam != null) {
+            val challengeHex = challengeParam.removePrefix("=ret=").trim()
+            if (challengeHex.length >= 2 && challengeHex.length % 2 == 0) {
+                val challengeBytes = hexStringToByteArray(challengeHex)
+                val md5 = MessageDigest.getInstance("MD5")
+                md5.update(0.toByte())
+                md5.update(password.toByteArray(Charsets.UTF_8))
+                md5.update(challengeBytes)
+                val digestHex = byteArrayToHexString(md5.digest())
+                val responseHash = "00$digestHex"
+
+                writeSentenceToStream(outS, listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
+                val resp2 = readLoginSentencesUntilDone(inS)
+                val trap2 = resp2.firstOrNull { it.firstOrNull() == "!trap" }
+                val fatal2 = resp2.firstOrNull { it.firstOrNull() == "!fatal" }
+                if (trap2 == null && fatal2 == null && resp2.any { it.firstOrNull() == "!done" }) {
+                    runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
+                    return true to null
+                }
+                trapMsg = trap2?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: trapMsg
+            }
+        }
+
+        return false to trapMsg
     }
 
     suspend fun connectAndLogin(
@@ -176,46 +279,16 @@ class RouterOsApiClient {
                     outStream = sock.getOutputStream()
 
                     phase = "LOGIN_HANDSHAKE"
-                    // Attempt RouterOS v6.43+ and v7 login
-                    writeSentenceLocked(listOf("/login", "=name=$cleanUser", "=password=$password"))
-                    var response = readSingleSentenceLocked()
-
-                    if (response.isEmpty()) {
-                        closeSocketOnlyLocked()
-                        return@synchronized Result.failure(Exception("لم يستجب الراوتر على منفذ API ($port)"))
-                    }
-
-                    val replyType = response.firstOrNull() ?: ""
-
-                    // Success
-                    if (replyType == "!done" && response.none { it.startsWith("=ret=") }) {
-                        runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
+                    val (ok, trapMsg) = performLoginHandshake(
+                        sock = sock,
+                        inS = sock.getInputStream(),
+                        outS = sock.getOutputStream(),
+                        cleanUser = cleanUser,
+                        password = password
+                    )
+                    if (ok) {
                         return@synchronized Result.success(true)
                     }
-
-                    // Old RouterOS pre-6.43 challenge-response
-                    val challengeParam = response.firstOrNull { it.startsWith("=ret=") }
-                    if (replyType == "!done" && challengeParam != null) {
-                        val challengeHex = challengeParam.removePrefix("=ret=")
-                        val challengeBytes = hexStringToByteArray(challengeHex)
-                        val md5 = MessageDigest.getInstance("MD5")
-                        md5.update(0.toByte())
-                        md5.update(password.toByteArray(Charsets.UTF_8))
-                        md5.update(challengeBytes)
-                        val digestHex = byteArrayToHexString(md5.digest())
-                        val responseHash = "00$digestHex"
-
-                        writeSentenceLocked(listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
-                        response = readSingleSentenceLocked()
-                        if (response.firstOrNull() == "!done") {
-                            runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
-                            return@synchronized Result.success(true)
-                        }
-                    }
-
-                    // Authentication Failure / Trap
-                    val trapMsg = response.firstOrNull { it.startsWith("=message=") }
-                        ?.removePrefix("=message=")
 
                     val userFriendlyError = if (trapMsg != null && (trapMsg.contains("cannot log in", ignoreCase = true) || trapMsg.contains("invalid", ignoreCase = true) || trapMsg.contains("password", ignoreCase = true))) {
                         "خطأ في بيانات الدخول: اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من كتابة اسم المستخدم وكلمة المرور الخاصة بحساب إدارة راوتر ميكروتك بدقة."
@@ -292,7 +365,9 @@ class RouterOsApiClient {
                     )
                     Result.success(res)
                 } else {
-                    Result.failure(Exception("لم يُرجع الراوتر بيانات النظام"))
+                    val trapMsg = sentences.firstOrNull { it.firstOrNull() == "!trap" }
+                        ?.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
+                    Result.failure(Exception(trapMsg?.let { "تعذر قراءة بيانات النظام: $it" } ?: "لم يُرجع الراوتر بيانات النظام"))
                 }
             } catch (e: Exception) {
                 Result.failure(e)
@@ -308,7 +383,7 @@ class RouterOsApiClient {
                 }
                 val sentences = executeQueryWithProplist(
                     command = "/ip/hotspot/active/print",
-                    proplist = ".id,user,address,mac-address,uptime,bytes-in,bytes-out,login-by,session-time-left,comment"
+                    proplist = ".id,user,address,mac-address,uptime,bytes-in,bytes-out,login-by,session-time-left,comment,server"
                 )
                 val list = mutableListOf<HotspotActiveUser>()
                 for (s in sentences) {
@@ -325,7 +400,8 @@ class RouterOsApiClient {
                                 bytesOut = map["bytes-out"]?.toLongOrNull() ?: 0L,
                                 loginBy = map["login-by"] ?: "http",
                                 sessionTimeLeft = map["session-time-left"] ?: "",
-                                comment = map["comment"] ?: ""
+                                comment = map["comment"] ?: "",
+                                serverName = map["server"]?.ifBlank { "hotspot1" } ?: "hotspot1"
                             )
                         )
                     }
@@ -2855,32 +2931,7 @@ class RouterOsApiClient {
         cleanUser: String,
         password: String
     ): Boolean {
-        writeSentenceToStream(outS, listOf("/login", "=name=$cleanUser", "=password=$password"))
-        val response = readSingleSentenceFromStream(inS)
-        val replyType = response.firstOrNull() ?: ""
-        if (replyType == "!done" && response.none { it.startsWith("=ret=") }) {
-            runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
-            return true
-        }
-        val challengeParam = response.firstOrNull { it.startsWith("=ret=") }
-        if (replyType == "!done" && challengeParam != null) {
-            val challengeHex = challengeParam.removePrefix("=ret=")
-            val challengeBytes = hexStringToByteArray(challengeHex)
-            val md5 = MessageDigest.getInstance("MD5")
-            md5.update(0.toByte())
-            md5.update(password.toByteArray(Charsets.UTF_8))
-            md5.update(challengeBytes)
-            val digestHex = byteArrayToHexString(md5.digest())
-            val responseHash = "00$digestHex"
-
-            writeSentenceToStream(outS, listOf("/login", "=name=$cleanUser", "=response=$responseHash"))
-            val resp2 = readSingleSentenceFromStream(inS)
-            if (resp2.firstOrNull() == "!done") {
-                runCatching { sock.soTimeout = TRANSACTION_SO_TIMEOUT_MS }
-                return true
-            }
-        }
-        return false
+        return performLoginHandshake(sock, inS, outS, cleanUser, password).first
     }
 
     private fun reconnectInternalLocked(): Boolean {

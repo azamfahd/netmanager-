@@ -25,48 +25,34 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SignalCellularAlt
-import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material.icons.filled.SystemUpdate
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.CloudOff
-import com.example.data.local.CachedPortalMeta
-import com.example.data.local.WebPortalCacheManager
-import com.example.data.model.UpdateCheckState
-import com.example.data.network.NetworkUtils
-import com.example.data.network.RouterConnectionParser
-import com.example.ui.components.AppUpdateDialog
-import com.example.ui.components.UpdateBanner
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -92,6 +78,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -111,15 +98,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.data.local.SavedRouterEntity
+import com.example.data.local.CachedPortalMeta
+import com.example.data.local.RouterCacheManager
+import com.example.data.local.RouterCacheSummary
+import com.example.data.local.WebPortalCacheManager
 import com.example.data.model.ConnectionState
 import com.example.data.model.RouterConnectionConfig
+import com.example.data.model.UpdateCheckState
+import com.example.data.network.NetworkUtils
+import com.example.data.network.RouterConnectionParser
+import com.example.ui.components.AppUpdateDialog
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StatusType
-import com.example.ui.theme.NetworkCyan
+import com.example.ui.components.UpdateBanner
 import com.example.ui.theme.RouterBlue
 import com.example.ui.theme.StatusActiveGreen
 import com.example.ui.viewmodel.MainViewModel
@@ -152,30 +147,66 @@ fun ConnectRouterScreen(
         context.getSharedPreferences("netmanager_connect_form_prefs", Context.MODE_PRIVATE)
     }
 
-    // User credentials (supports router usernames and cloud portal emails)
+    // Credentials (remembered cleanly across launches)
+    var rememberCredentials by remember {
+        mutableStateOf(formPrefs.getBoolean("remember_credentials", true))
+    }
     var username by remember { mutableStateOf(formPrefs.getString("username", "admin") ?: "admin") }
-    var password by remember { mutableStateOf("") }
+    var password by remember {
+        mutableStateOf(
+            if (formPrefs.getBoolean("remember_credentials", true)) {
+                formPrefs.getString("saved_password", "") ?: ""
+            } else {
+                ""
+            }
+        )
+    }
     var isPasswordVisible by remember { mutableStateOf(false) }
-    var rememberCredentials by remember { mutableStateOf(true) }
 
-    // Smart Mode Toggle: Auto LAN vs Direct RouterOS API vs Custom Domain / Cloud Server
-    var useManualNetworkSettings by remember {
-        mutableStateOf(formPrefs.getBoolean("use_manual_mode", false))
+    // Two clean modes ONLY:
+    // 1) false (default): Auto MikroTik Network Connection -> connects natively into our app (NEVER opens browser)
+    // 2) true: Custom Server / Domain / Platform -> custom IP, domain, URL, or subscribed intermediary web platform
+    var isCustomPlatformMode by remember {
+        val migratedV3 = formPrefs.getBoolean("two_mode_default_v3", false)
+        val initialCustom = if (!migratedV3) {
+            false
+        } else {
+            formPrefs.getBoolean("use_custom_platform_mode_v3", false)
+        }
+        mutableStateOf(initialCustom)
     }
-    var useDirectApiMode by remember {
-        mutableStateOf(formPrefs.getBoolean("use_direct_api", false))
+    var preferWebPlatformBrowser by remember {
+        mutableStateOf(formPrefs.getBoolean("prefer_web_platform_browser", false))
     }
-    var showAdvancedSettings by remember { mutableStateOf(false) }
+    var showCustomPortOptions by remember { mutableStateOf(false) }
     var manualIp by remember { mutableStateOf(formPrefs.getString("manual_ip", "") ?: "") }
-    var manualPort by remember { mutableIntStateOf(formPrefs.getInt("manual_port", 8728)) }
-    var manualUseHttps by remember { mutableStateOf(formPrefs.getBoolean("manual_https", false)) }
+    var manualPort by remember { mutableIntStateOf(formPrefs.getInt("manual_port", 443)) }
+    var manualUseHttps by remember { mutableStateOf(formPrefs.getBoolean("manual_https", true)) }
     var manualPreferredPath by remember { mutableStateOf<String?>(formPrefs.getString("manual_path", null)) }
     var manualRouterName by remember { mutableStateOf(formPrefs.getString("manual_name", "") ?: "") }
 
+    // Pre-fill saved username/password if blank on launch
+    LaunchedEffect(savedRouters) {
+        val latestRouter = savedRouters.firstOrNull()
+        if (latestRouter != null && rememberCredentials && password.isBlank() && latestRouter.password.isNotBlank()) {
+            val match = savedRouters.firstOrNull {
+                username.isBlank() || it.username.equals(username, ignoreCase = true)
+            } ?: latestRouter
+            if (username.isBlank() || username == "admin") {
+                username = match.username
+            }
+            if (match.password.isNotBlank()) {
+                password = match.password
+            }
+        }
+    }
+
     LaunchedEffect(
         username,
-        useManualNetworkSettings,
-        useDirectApiMode,
+        password,
+        rememberCredentials,
+        isCustomPlatformMode,
+        preferWebPlatformBrowser,
         manualIp,
         manualPort,
         manualUseHttps,
@@ -184,8 +215,11 @@ fun ConnectRouterScreen(
     ) {
         formPrefs.edit()
             .putString("username", username)
-            .putBoolean("use_manual_mode", useManualNetworkSettings)
-            .putBoolean("use_direct_api", useDirectApiMode)
+            .putBoolean("remember_credentials", rememberCredentials)
+            .putString("saved_password", if (rememberCredentials) password else "")
+            .putBoolean("use_custom_platform_mode_v3", isCustomPlatformMode)
+            .putBoolean("two_mode_default_v3", true)
+            .putBoolean("prefer_web_platform_browser", preferWebPlatformBrowser)
             .putString("manual_ip", manualIp)
             .putInt("manual_port", manualPort)
             .putBoolean("manual_https", manualUseHttps)
@@ -203,19 +237,19 @@ fun ConnectRouterScreen(
         parsed.host?.let { extractedHost ->
             manualIp = extractedHost
             manualPreferredPath = parsed.path
-            if (parsed.port in listOf(8728, 8729)) {
-                useDirectApiMode = true
-                useManualNetworkSettings = false
-            } else {
-                useDirectApiMode = false
-                useManualNetworkSettings = true
-            }
+            isCustomPlatformMode = true
             val resolvedPort = parsed.port ?: if (parsed.useHttps == true) 443 else manualPort
             if (parsed.port != null || parsed.useHttps == true) {
                 manualPort = resolvedPort
             }
             if (parsed.useHttps != null) {
                 manualUseHttps = parsed.useHttps
+            }
+            val isWebScheme = rawText.contains("http://", ignoreCase = true) ||
+                rawText.contains("https://", ignoreCase = true) ||
+                extractedHost.contains("apluswifi.com", ignoreCase = true)
+            if (isWebScheme && parsed.port !in listOf(8728, 8729)) {
+                preferWebPlatformBrowser = true
             }
             viewModel.probeCustomHost(extractedHost, parsed.port, showToast = false)
         }
@@ -237,7 +271,6 @@ fun ConnectRouterScreen(
         return true
     }
 
-    // Listen to ViewModel toast events
     LaunchedEffect(Unit) {
         viewModel.toastEvent.collectLatest { message ->
             Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
@@ -245,40 +278,32 @@ fun ConnectRouterScreen(
         }
     }
 
-    // Auto-detect network and cached snapshots on launch
     LaunchedEffect(Unit) {
         viewModel.checkLocalNetwork(context)
         viewModel.refreshCachedSnapshot(context)
     }
 
-    // Default auto-detected values from current network (no fake 192.168.88.1 on cellular)
     val autoDetectedIp = discoveredRouter?.ip?.ifBlank { null }
         ?: localNetwork.gatewayIp?.ifBlank { null }
         ?: ""
-    val autoDetectedPort = discoveredRouter?.port ?: 8728
-    val autoDetectedHttps = discoveredRouter?.useHttps ?: false
-    val normalizedManual = remember(manualIp) { RouterConnectionParser.normalizeHostInput(manualIp) }
-    val isCustomHostMode = useManualNetworkSettings || useDirectApiMode
+    val autoDetectedApiPort = discoveredRouter?.port?.takeIf { it in listOf(8728, 8729) } ?: 8728
+    val autoDetectedApiHttps = autoDetectedApiPort == 8729
 
-    // Active Host / Port / TLS resolution per selected connection mode
-    val activeIp = if (isCustomHostMode && normalizedManual.host.isNotBlank()) {
-        normalizedManual.host
-    } else if (isCustomHostMode && manualIp.isNotBlank()) {
-        manualIp.trim()
+    val normalizedManual = remember(manualIp) { RouterConnectionParser.normalizeHostInput(manualIp) }
+    val activeIp = if (isCustomPlatformMode) {
+        normalizedManual.host.ifBlank { manualIp.trim() }
     } else {
         autoDetectedIp
     }
-    val activePort = when {
-        useDirectApiMode -> normalizedManual.explicitPort
-            ?: if (manualPort in listOf(80, 443, 8080)) 8728 else manualPort
-        useManualNetworkSettings -> normalizedManual.explicitPort ?: manualPort
-        else -> autoDetectedPort
+    val activePort = if (isCustomPlatformMode) {
+        normalizedManual.explicitPort ?: manualPort
+    } else {
+        autoDetectedApiPort
     }
-    val activeHttps = when {
-        useDirectApiMode -> normalizedManual.inferredHttps
-            ?: (activePort == 8729 || (manualUseHttps && activePort != 8728))
-        useManualNetworkSettings -> normalizedManual.inferredHttps ?: manualUseHttps
-        else -> autoDetectedHttps
+    val activeHttps = if (isCustomPlatformMode) {
+        normalizedManual.inferredHttps ?: manualUseHttps
+    } else {
+        autoDetectedApiHttps
     }
 
     Scaffold(
@@ -289,11 +314,11 @@ fun ConnectRouterScreen(
                 title = {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(38.dp)
                                 .clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.primaryContainer),
                             contentAlignment = Alignment.Center
@@ -311,10 +336,10 @@ fun ConnectRouterScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = when {
-                                    useDirectApiMode -> "اتصال مباشر عبر RouterOS API (بدون وسيط)"
-                                    useManualNetworkSettings -> "إدخال يدوي مخصص (اختياري)"
-                                    else -> "التعرف التلقائي الذكي على الشبكة"
+                                text = if (!isCustomPlatformMode) {
+                                    "الاتصال التلقائي بالراوتر • داخل النظام"
+                                } else {
+                                    "دومين / منصة مخصصة (IP أو وسيط)"
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -323,13 +348,12 @@ fun ConnectRouterScreen(
                     }
                 },
                 actions = {
-                    // Top Refresh Button: actively searches, re-probes, and fetches router data from connected network
                     IconButton(
-                        onClick = {
-                            viewModel.refreshDiscovery(context, showToast = true)
-                        },
+                        onClick = { viewModel.refreshDiscovery(context, showToast = true) },
                         enabled = !isDiscovering,
-                        modifier = Modifier.testTag("refresh_discovery_btn")
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("refresh_discovery_btn")
                     ) {
                         if (isDiscovering) {
                             CircularProgressIndicator(
@@ -340,7 +364,7 @@ fun ConnectRouterScreen(
                         } else {
                             Icon(
                                 imageVector = Icons.Default.Refresh,
-                                contentDescription = "تحديث وفحص بيانات الراوتر والشبكة",
+                                contentDescription = "فحص وتحديث الشبكة",
                                 tint = MaterialTheme.colorScheme.primary
                             )
                         }
@@ -349,7 +373,9 @@ fun ConnectRouterScreen(
                     if (updateCheckState is UpdateCheckState.UpdateAvailable) {
                         IconButton(
                             onClick = { showUpdateDialog = true },
-                            modifier = Modifier.testTag("btn_connect_screen_update_badge")
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("btn_connect_screen_update_badge")
                         ) {
                             BadgedBox(badge = {
                                 Badge(containerColor = MaterialTheme.colorScheme.error) {
@@ -376,11 +402,10 @@ fun ConnectRouterScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            item { Spacer(modifier = Modifier.height(4.dp)) }
+            item { Spacer(modifier = Modifier.height(2.dp)) }
 
-            // Update Notification Banner (إذا كان هناك إصدار جديد على GitHub)
             if (showUpdateBanner && updateCheckState is UpdateCheckState.UpdateAvailable) {
                 val updateState = updateCheckState as UpdateCheckState.UpdateAvailable
                 item {
@@ -395,7 +420,7 @@ fun ConnectRouterScreen(
                 }
             }
 
-            // Persistent Offline Cache Access Banner (تصفح البيانات المحفوظة محلياً)
+            // Cached Offline Router Snapshot Banner
             if (latestSnapshot != null) {
                 item {
                     val snapshot = latestSnapshot!!
@@ -405,66 +430,67 @@ fun ConnectRouterScreen(
                         border = BorderStroke(1.2.dp, StatusActiveGreen.copy(alpha = 0.45f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    modifier = Modifier.weight(1f)
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(StatusActiveGreen),
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(34.dp)
-                                            .clip(CircleShape)
-                                            .background(StatusActiveGreen),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Bolt,
-                                            contentDescription = null,
-                                            tint = Color.White,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                    Column {
-                                        Text(
-                                            text = "بيانات الشبكة والكروت محفوظة محلياً",
-                                            fontWeight = FontWeight.Bold,
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = StatusActiveGreen
-                                        )
-                                        Text(
-                                            text = "${snapshot.routerName.ifBlank { "راوتر MikroTik" }} (${snapshot.ipAddress}) • ${snapshot.cards.size} كرت • ${snapshot.profiles.size} باقات",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.Bolt,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
                                 }
+                                Column {
+                                    Text(
+                                        text = "بيانات الراوتر محفوظة محلياً",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = StatusActiveGreen
+                                    )
+                                    Text(
+                                        text = "${snapshot.routerName.ifBlank { "راوتر MikroTik" }} (${snapshot.ipAddress}) • ${snapshot.cards.size} كرت",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
 
-                                Button(
-                                    onClick = {
-                                        viewModel.enterOfflineMode(snapshot.ipAddress, context)
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = StatusActiveGreen),
-                                    shape = RoundedCornerShape(10.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                                ) {
-                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("فتح البيانات الآن", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                }
+                            Button(
+                                onClick = { viewModel.enterOfflineMode(snapshot.ipAddress, context) },
+                                colors = ButtonDefaults.buttonColors(containerColor = StatusActiveGreen),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("فتح الآن", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             }
                         }
                     }
                 }
             }
 
-            // Offline Web Portal Cache Access Card (للدخول أوفلاين إلى لوحات الدومين المحفوظة مثل APlusWiFi)
-            if (latestCachedPortal != null) {
+            // Offline Web Portal Cache Banner (only for explicit saved web platforms)
+            if (latestCachedPortal != null && !latestCachedPortal!!.isMikroTikWebFig) {
                 item {
                     val cachedPortal = latestCachedPortal!!
                     val isOnlineNow = NetworkUtils.isNetworkOnline(context)
@@ -476,156 +502,134 @@ fun ConnectRouterScreen(
                             .fillMaxWidth()
                             .testTag("offline_portal_cache_banner")
                     ) {
-                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    modifier = Modifier.weight(1f)
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFFE65100)),
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(34.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(0xFFE65100)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = if (isOnlineNow) Icons.Default.Language else Icons.Default.CloudOff,
-                                            contentDescription = null,
-                                            tint = Color.White,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                    Column {
-                                        Text(
-                                            text = if (isOnlineNow) "نسخة لوحة الويب محفوظة للتصفح المؤقت" else "تنبيه: بدون إنترنت • النسخة المحفوظة جاهزة",
-                                            fontWeight = FontWeight.Bold,
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = Color(0xFF6D3500)
-                                        )
-                                        val timeText = if (cachedPortal.lastSavedTime > 0L) {
-                                            " • ${WebPortalCacheManager.formatSavedTimeAr(cachedPortal.lastSavedTime)}"
-                                        } else ""
-                                        Text(
-                                            text = "${cachedPortal.serverName} (${cachedPortal.host})$timeText",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = Color(0xFF7A3E00)
-                                        )
-                                        val latestAction = cachedPortal.recentActions.firstOrNull()
-                                        if (!latestAction.isNullOrBlank()) {
-                                            Text(
-                                                text = "آخر حركة: $latestAction",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontSize = 10.sp,
-                                                color = Color(0xFF8D4E00)
-                                            )
-                                        }
-                                    }
+                                    Icon(
+                                        imageVector = if (isOnlineNow) Icons.Default.Language else Icons.Default.CloudOff,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
                                 }
+                                Column {
+                                    Text(
+                                        text = if (isOnlineNow) "منصة ويب محفوظة محلياً" else "بدون إنترنت • نسخة المنصة جاهزة",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = Color(0xFF6D3500)
+                                    )
+                                    Text(
+                                        text = "${cachedPortal.serverName} (${cachedPortal.host})",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF7A3E00),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
 
-                                Button(
-                                    onClick = {
-                                        viewModel.enterOfflineMode(cachedPortal.host, context)
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE65100)),
-                                    shape = RoundedCornerShape(10.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                    modifier = Modifier.testTag("open_offline_portal_btn")
-                                ) {
-                                    Icon(Icons.Default.CloudOff, contentDescription = null, modifier = Modifier.size(15.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("تصفح أوفلاين", fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                                }
+                            Button(
+                                onClick = { viewModel.enterOfflineMode(cachedPortal.host, context) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE65100)),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("open_offline_portal_btn")
+                            ) {
+                                Icon(Icons.Default.CloudOff, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("تصفح", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                             }
                         }
                     }
                 }
             }
 
-            // 1. Hero Router & Network Detection Card (Compact & Elegant)
+            // 1. Network Status Hero Card (Clean, Focused, Zero Clutter)
             item {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("auto_discovered_router_card"),
-                    shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = when {
-                                useDirectApiMode -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)
-                                useManualNetworkSettings -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                                else -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f)
-                            }
-                        ),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (!isCustomPlatformMode) {
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+                        } else {
+                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.68f)
+                        }
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(CircleShape)
+                                        .background(if (!isCustomPlatformMode) StatusActiveGreen else RouterBlue),
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(28.dp)
-                                            .clip(CircleShape)
-                                            .background(
-                                                when {
-                                                    useDirectApiMode -> StatusActiveGreen
-                                                    useManualNetworkSettings -> MaterialTheme.colorScheme.secondary
-                                                    else -> MaterialTheme.colorScheme.primary
-                                                }
-                                            ),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = when {
-                                                useDirectApiMode -> Icons.Default.Bolt
-                                                useManualNetworkSettings -> Icons.Default.Tune
-                                                else -> Icons.Default.AutoAwesome
-                                            },
-                                            contentDescription = null,
-                                            tint = Color.White,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-                                    Column {
-                                        Text(
-                                            text = when {
-                                                useDirectApiMode -> "اتصال مباشر عبر RouterOS API"
-                                                useManualNetworkSettings -> "وضع السيرفر / الدومين المخصص"
-                                                else -> "التعرف التلقائي على الراوتر"
-                                            },
-                                            fontWeight = FontWeight.Bold,
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontSize = 13.sp,
-                                            color = when {
-                                                useDirectApiMode -> MaterialTheme.colorScheme.onSecondaryContainer
-                                                useManualNetworkSettings -> MaterialTheme.colorScheme.onSurfaceVariant
-                                                else -> MaterialTheme.colorScheme.onPrimaryContainer
-                                            }
-                                        )
-                                        val serverKindLabel = discoveredRouter?.detectedServerKind?.takeIf { it.isNotBlank() && !useDirectApiMode }
-                                        Text(
-                                            text = serverKindLabel ?: when {
-                                                useDirectApiMode -> "مباشر على منفذ API ($activePort) بدون وسيط سحابي"
-                                                useManualNetworkSettings -> "يدعم IP محلي، دومين، أو لوحة سحابية"
-                                                else -> "الافتراضي: تم الجلب من شبكتك"
-                                            },
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontSize = 10.sp,
-                                            color = MaterialTheme.colorScheme.outline
-                                        )
-                                    }
+                                    Icon(
+                                        imageVector = if (!isCustomPlatformMode) Icons.Default.Router else Icons.Default.Language,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(17.dp)
+                                    )
                                 }
+                                Column {
+                                    Text(
+                                        text = if (!isCustomPlatformMode) {
+                                            "التعرف التلقائي على الميكروتك"
+                                        } else {
+                                            "سيرفر / دومين أو منصة مخصصة"
+                                        },
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = if (!isCustomPlatformMode) {
+                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.onSecondaryContainer
+                                        }
+                                    )
+                                    Text(
+                                        text = if (!isCustomPlatformMode) {
+                                            "يجلب جميع البيانات إلى النظام مباشرةً بدون متصفح"
+                                        } else {
+                                            "للدخول عبر IP أو دومين أو المنصة المشترك بها"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
 
                             if (isDiscovering) {
                                 Row(
@@ -647,12 +651,22 @@ fun ConnectRouterScreen(
                             } else {
                                 StatusPill(
                                     text = when {
-                                        discoveredRouter?.isCloudWebPortal == true -> "لوحة سحابية / ويب"
-                                        discoveredRouter?.isReachable == true -> "سيرفر مستجيب"
-                                        else -> "تم التعرف"
+                                        !isCustomPlatformMode && autoDetectedIp.isNotBlank() && discoveredRouter?.isReachable == true ->
+                                            "راوتر جاهز"
+                                        !isCustomPlatformMode && autoDetectedIp.isNotBlank() ->
+                                            "تم رصد الشبكة"
+                                        !isCustomPlatformMode ->
+                                            "بانتظار الواي فاي"
+                                        activeIp.isNotBlank() && discoveredRouter?.isCloudWebPortal == true ->
+                                            "منصة / لوحة ويب"
+                                        activeIp.isNotBlank() && discoveredRouter?.isReachable == true ->
+                                            "سيرفر مستجيب"
+                                        else ->
+                                            "إدخال مخصص"
                                     },
                                     type = when {
-                                        discoveredRouter?.isCloudWebPortal == true -> StatusType.INFO
+                                        !isCustomPlatformMode && autoDetectedIp.isNotBlank() -> StatusType.SUCCESS
+                                        !isCustomPlatformMode -> StatusType.WARNING
                                         discoveredRouter?.isReachable == true -> StatusType.SUCCESS
                                         else -> StatusType.INFO
                                     }
@@ -660,9 +674,8 @@ fun ConnectRouterScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
-                        // Compact Display of Active Target Host/IP and Port
                         Surface(
                             color = MaterialTheme.colorScheme.surface,
                             shape = RoundedCornerShape(10.dp),
@@ -671,46 +684,49 @@ fun ConnectRouterScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "عنوان الراوتر / السيرفر:",
+                                        text = if (!isCustomPlatformMode) "عنوان الراوتر المكتشف:" else "السيرفر / المنصة المحددة:",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                     Text(
-                                        text = activeIp.ifBlank { "غير محدد — أدخل IP السيرفر أو الدومين" },
+                                        text = activeIp.ifBlank {
+                                            if (!isCustomPlatformMode) {
+                                                "اتصل بشبكة واي فاي الراوتر أو اختر «دومين / منصة مخصصة»"
+                                            } else {
+                                                "أدخل IP أو الدومين في الحقل بالأسفل"
+                                            }
+                                        },
                                         style = MaterialTheme.typography.titleMedium,
                                         fontFamily = if (activeIp.isNotBlank()) FontFamily.Monospace else FontFamily.Default,
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = if (activeIp.isNotBlank()) 14.sp else 12.sp,
+                                        fontSize = if (activeIp.isNotBlank()) 14.sp else 11.sp,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
 
-                                Column(horizontalAlignment = Alignment.End) {
-                                    Text(
-                                        text = "البروتوكول / المنفذ:",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontSize = 10.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(7.dp)
-                                                .clip(CircleShape)
-                                                .background(StatusActiveGreen)
+                                if (activeIp.isNotBlank()) {
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text(
+                                            text = "المسار:",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                         Text(
-                                            text = "$activePort (${discoveredRouter?.serviceType ?: if (activePort == 8728) "API" else if (activePort == 8729) "API-SSL" else "REST/Web"})",
+                                            text = if (!isCustomPlatformMode) {
+                                                "API ($activePort)"
+                                            } else if (preferWebPlatformBrowser) {
+                                                "متصفح المنصة"
+                                            } else {
+                                                "منفذ $activePort"
+                                            },
                                             style = MaterialTheme.typography.labelMedium,
                                             fontFamily = FontFamily.Monospace,
                                             fontWeight = FontWeight.Bold,
@@ -722,66 +738,8 @@ fun ConnectRouterScreen(
                             }
                         }
 
-                        // Open Ports Quick Chips (التعرف الذكي على جميع المنافذ المفتوحة)
-                        val openPorts = discoveredRouter?.openPorts.orEmpty()
-                        if (openPorts.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "المنافذ المفتوحة:",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                openPorts.forEach { p ->
-                                    val isSelected = activePort == p
-                                    val portLabel = when (p) {
-                                        8728 -> "8728 API"
-                                        8729 -> "8729 SSL"
-                                        8291 -> "8291 Winbox"
-                                        80 -> "80 HTTP"
-                                        443 -> "443 HTTPS"
-                                        8080 -> "8080 Alt"
-                                        else -> "$p"
-                                    }
-                                    Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-                                        border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
-                                        onClick = {
-                                            if (manualIp.isBlank()) manualIp = autoDetectedIp
-                                            manualPort = p
-                                            manualUseHttps = (p == 443 || p == 8729)
-                                            if (p == 8728 || p == 8729) {
-                                                useDirectApiMode = true
-                                                useManualNetworkSettings = false
-                                            } else {
-                                                useDirectApiMode = false
-                                                useManualNetworkSettings = true
-                                            }
-                                        }
-                                    ) {
-                                        Text(
-                                            text = portLabel,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                        Spacer(modifier = Modifier.height(8.dp))
 
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        // Wi-Fi Connection Info & Device IP
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -816,7 +774,7 @@ fun ConnectRouterScreen(
                 }
             }
 
-            // Connection Progress / Error Banners
+            // Connection Progress & Error Cards
             item {
                 AnimatedVisibility(visible = connectionState is ConnectionState.Verifying) {
                     val verifying = connectionState as? ConnectionState.Verifying
@@ -880,7 +838,7 @@ fun ConnectRouterScreen(
                                     )
                                 }
                                 Text(
-                                    text = "تنبيه: تعذر تسجيل الدخول إلى الراوتر",
+                                    text = "تعذر تسجيل الدخول والاتصال",
                                     fontWeight = FontWeight.Bold,
                                     style = MaterialTheme.typography.titleSmall,
                                     color = MaterialTheme.colorScheme.onErrorContainer
@@ -889,9 +847,8 @@ fun ConnectRouterScreen(
 
                             Spacer(modifier = Modifier.height(10.dp))
 
-                            // Exact Error message
                             Surface(
-                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
                                 shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
@@ -906,16 +863,12 @@ fun ConnectRouterScreen(
 
                             Spacer(modifier = Modifier.height(10.dp))
 
-                            // Helpful Troubleshooting Tips
                             Text(
-                                text = "💡 نصائح وإرشادات للحل السريع:",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onErrorContainer
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "• تأكد من كتابة اسم المستخدم (أو البريد الإلكتروني في لوحات التحكم السحابية) وكلمة المرور بشكل صحيح.\n• عند استخدام عنوان محلي، تأكد أن الهاتف متصل بنفس شبكة الواي فاي للراوتر.\n• عند استخدام دومين خارجي أو سيرفر سحابي، تأكد من توفر اتصال بالإنترنت وصحة اسم النطاق (Domain) أو تفعيل خدمة API/API-SSL/www.",
+                                text = if (!isCustomPlatformMode) {
+                                    "• تأكد من اتصال الهاتف بنفس شبكة الواي فاي للراوتر، وصحة اسم المستخدم وكلمة المرور، وتفعيل خدمة API في الراوتر (IP -> Services)."
+                                } else {
+                                    "• تأكد من صحة عنوان الدومين أو الـ IP واسم المستخدم وكلمة المرور وتوفر الاتصال بالشبكة أو الإنترنت."
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f),
                                 lineHeight = 18.sp
@@ -923,7 +876,8 @@ fun ConnectRouterScreen(
 
                             Spacer(modifier = Modifier.height(12.dp))
 
-                            if (!fallbackWebPortalUrl.isNullOrBlank()) {
+                            // Web portal fallback is strictly limited to Custom Domain / Platform mode (NEVER Auto MikroTik mode)
+                            if (isCustomPlatformMode && !fallbackWebPortalUrl.isNullOrBlank()) {
                                 Button(
                                     onClick = {
                                         viewModel.openWebPortal(
@@ -941,41 +895,9 @@ fun ConnectRouterScreen(
                                 ) {
                                     Icon(Icons.Default.Language, contentDescription = null, modifier = Modifier.size(18.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("فتح لوحة التحكم عبر الويب (المتصفح الداخلي)", fontWeight = FontWeight.Bold)
+                                    Text("فتح المنصة عبر المتصفح المدمج", fontWeight = FontWeight.Bold)
                                 }
                                 Spacer(modifier = Modifier.height(8.dp))
-                            }
-
-                            if (activePort != 8728 || !useDirectApiMode) {
-                                Button(
-                                    onClick = {
-                                        useDirectApiMode = true
-                                        useManualNetworkSettings = false
-                                        manualPort = 8728
-                                        manualUseHttps = false
-                                        val cleanHost = RouterConnectionParser.normalizeHostInput(activeIp).host.ifBlank { activeIp.trim() }
-                                        val config = RouterConnectionConfig(
-                                            name = if (manualRouterName.isNotBlank()) manualRouterName else "راوتر $cleanHost",
-                                            ipAddress = cleanHost,
-                                            port = 8728,
-                                            username = username.trim(),
-                                            password = password,
-                                            useHttps = false,
-                                            autoDetectProtocol = true,
-                                            isDemoMode = false,
-                                            directApiOnly = true
-                                        )
-                                        viewModel.connectToRouter(config, saveToFavorites = rememberCredentials, context = context)
-                                    },
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(48.dp)
-                                        .testTag("retry_direct_api_button")
-                                ) {
-                                    Text("اتصال مباشر عبر منفذ MikroTik API الرسمي (8728)")
-                                }
-                                Spacer(modifier = Modifier.height(6.dp))
                             }
 
                             Row(
@@ -985,7 +907,9 @@ fun ConnectRouterScreen(
                                 OutlinedButton(
                                     onClick = { viewModel.refreshDiscovery(context, showToast = true) },
                                     shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .minimumInteractiveComponentSize(),
                                     colors = ButtonDefaults.outlinedButtonColors(
                                         contentColor = MaterialTheme.colorScheme.onErrorContainer
                                     )
@@ -1008,7 +932,9 @@ fun ConnectRouterScreen(
                                         viewModel.connectToRouter(demoConfig, saveToFavorites = false)
                                     },
                                     shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .minimumInteractiveComponentSize(),
                                     colors = ButtonDefaults.outlinedButtonColors(
                                         contentColor = MaterialTheme.colorScheme.onErrorContainer
                                     )
@@ -1019,24 +945,30 @@ fun ConnectRouterScreen(
                                 }
                             }
 
-                            if (latestSnapshot != null || latestCachedPortal != null) {
-                                Spacer(modifier = Modifier.height(6.dp))
+                            if (latestSnapshot != null || (isCustomPlatformMode && latestCachedPortal != null)) {
+                                Spacer(modifier = Modifier.height(8.dp))
                                 Button(
                                     onClick = {
-                                        val offlineTarget = latestSnapshot?.ipAddress ?: latestCachedPortal?.host
+                                        val offlineTarget = if (isCustomPlatformMode && latestCachedPortal != null && latestSnapshot == null) {
+                                            latestCachedPortal?.host
+                                        } else {
+                                            latestSnapshot?.ipAddress ?: latestCachedPortal?.host
+                                        }
                                         viewModel.enterOfflineMode(offlineTarget, context)
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = StatusActiveGreen),
                                     shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .minimumInteractiveComponentSize()
                                 ) {
                                     Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
                                         text = if (latestSnapshot != null) {
-                                            "فتح البيانات المحفوظة محلياً (وضع الأوفلاين)"
+                                            "فتح البيانات المحفوظة محلياً (أوفلاين)"
                                         } else {
-                                            "فتح نسخة لوحة الويب المحفوظة (وضع الأوفلاين)"
+                                            "فتح نسخة المنصة المحفوظة (أوفلاين)"
                                         },
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 12.sp
@@ -1048,296 +980,17 @@ fun ConnectRouterScreen(
                 }
             }
 
-            // 2. Saved Routers History / Quick Reconnect List (المحفوظات للدخول السريع)
-            if (savedRouters.isNotEmpty()) {
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                        ),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Dns,
-                                        contentDescription = null,
-                                        tint = RouterBlue,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text(
-                                        text = "الراوترات السابقة في المحفوظات (${savedRouters.size})",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                                Text(
-                                    text = "دخول فوري بنقرة واحدة",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-
-                            savedRouters.forEach { router ->
-                                var cacheSummary by remember(router.ipAddress) { mutableStateOf<com.example.data.local.RouterCacheSummary?>(null) }
-                                var portalCacheMeta by remember(router.ipAddress) { mutableStateOf<CachedPortalMeta?>(null) }
-                                LaunchedEffect(router.ipAddress) {
-                                    cacheSummary = com.example.data.local.RouterCacheManager.getCacheSummary(context, router.ipAddress)
-                                    portalCacheMeta = WebPortalCacheManager.loadMeta(context, router.ipAddress)
-                                }
-                                val hasAnyCache = cacheSummary != null || (portalCacheMeta != null)
-
-                                Surface(
-                                    shape = RoundedCornerShape(14.dp),
-                                    color = MaterialTheme.colorScheme.surface,
-                                    border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                username = router.username
-                                                if (router.password.isNotBlank()) password = router.password
-                                                manualIp = router.ipAddress
-                                                manualPort = router.port
-                                                manualUseHttps = router.useHttps
-                                                if (router.port in listOf(8728, 8729)) {
-                                                    useDirectApiMode = true
-                                                    useManualNetworkSettings = false
-                                                } else {
-                                                    useDirectApiMode = false
-                                                    useManualNetworkSettings = true
-                                                }
-                                                Toast.makeText(context, "تم تحديد بيانات راوتر ${router.name}", Toast.LENGTH_SHORT).show()
-                                            }
-                                            .padding(12.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                                modifier = Modifier.weight(1f)
-                                            ) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(38.dp)
-                                                        .clip(CircleShape)
-                                                        .background(RouterBlue.copy(alpha = 0.12f)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Icon(
-                                                        imageVector = if (portalCacheMeta != null && cacheSummary == null) Icons.Default.Language else Icons.Default.Router,
-                                                        contentDescription = null,
-                                                        tint = RouterBlue,
-                                                        modifier = Modifier.size(20.dp)
-                                                    )
-                                                }
-                                                Column {
-                                                    Text(
-                                                        text = router.name,
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        fontWeight = FontWeight.Bold
-                                                    )
-                                                    Text(
-                                                        text = "${router.ipAddress}:${router.port} • المستخدم: ${router.username}",
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                        fontFamily = FontFamily.Monospace
-                                                    )
-                                                }
-                                            }
-
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                            ) {
-                                                if (portalCacheMeta != null && cacheSummary == null) {
-                                                    OutlinedButton(
-                                                        onClick = { viewModel.enterOfflineMode(router.ipAddress, context) },
-                                                        shape = RoundedCornerShape(8.dp),
-                                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                                        modifier = Modifier.height(34.dp)
-                                                    ) {
-                                                        Icon(Icons.Default.CloudOff, contentDescription = null, modifier = Modifier.size(13.dp))
-                                                        Spacer(modifier = Modifier.width(3.dp))
-                                                        Text("أوفلاين", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                                    }
-                                                }
-
-                                                Button(
-                                                    onClick = {
-                                                        username = router.username
-                                                        if (router.password.isNotBlank()) password = router.password
-                                                        val config = RouterConnectionConfig(
-                                                            id = router.id,
-                                                            name = router.name,
-                                                            ipAddress = router.ipAddress,
-                                                            port = router.port,
-                                                            username = router.username,
-                                                            password = router.password,
-                                                            useHttps = router.useHttps,
-                                                            isDemoMode = false
-                                                        )
-                                                        viewModel.connectToRouter(config, saveToFavorites = true, context = context)
-                                                    },
-                                                    shape = RoundedCornerShape(8.dp),
-                                                    colors = ButtonDefaults.buttonColors(
-                                                        containerColor = if (hasAnyCache) StatusActiveGreen else RouterBlue
-                                                    ),
-                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                                    modifier = Modifier.height(34.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = if (hasAnyCache) Icons.Default.Bolt else Icons.Default.Login,
-                                                        contentDescription = null,
-                                                        modifier = Modifier.size(14.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text(
-                                                        text = if (hasAnyCache) "⚡ دخول فوري" else "دخول سريع",
-                                                        fontSize = 11.sp,
-                                                        fontWeight = FontWeight.Bold
-                                                    )
-                                                }
-
-                                                IconButton(
-                                                    onClick = { viewModel.deleteSavedRouter(router.id) },
-                                                    modifier = Modifier.size(32.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Delete,
-                                                        contentDescription = "حذف الراوتر من المحفوظات",
-                                                        tint = MaterialTheme.colorScheme.error,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
-
-                                        // Local cache details banner
-                                        if (cacheSummary != null) {
-                                            Surface(
-                                                color = StatusActiveGreen.copy(alpha = 0.08f),
-                                                shape = RoundedCornerShape(8.dp),
-                                                border = BorderStroke(0.6.dp, StatusActiveGreen.copy(alpha = 0.3f)),
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(horizontal = 8.dp, vertical = 5.dp),
-                                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.Speed,
-                                                            contentDescription = null,
-                                                            tint = StatusActiveGreen,
-                                                            modifier = Modifier.size(12.dp)
-                                                        )
-                                                        Text(
-                                                            text = "كاش محلي: ${cacheSummary?.cardsCount} كرت • ${cacheSummary?.profilesCount} باقات • مزامنة تلقائية",
-                                                            fontSize = 10.sp,
-                                                            fontWeight = FontWeight.SemiBold,
-                                                            color = StatusActiveGreen
-                                                        )
-                                                    }
-                                                    Text(
-                                                        text = cacheSummary?.formattedTime ?: "",
-                                                        fontSize = 9.sp,
-                                                        color = MaterialTheme.colorScheme.outline
-                                                    )
-                                                }
-                                            }
-                                        } else if (portalCacheMeta != null) {
-                                            val meta = portalCacheMeta!!
-                                            Surface(
-                                                color = Color(0xFFFFF3E0),
-                                                shape = RoundedCornerShape(8.dp),
-                                                border = BorderStroke(0.6.dp, Color(0xFFFB8C00)),
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(horizontal = 8.dp, vertical = 5.dp),
-                                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                                        modifier = Modifier.weight(1f)
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.CloudOff,
-                                                            contentDescription = null,
-                                                            tint = Color(0xFFE65100),
-                                                            modifier = Modifier.size(12.dp)
-                                                        )
-                                                        val latestAction = meta.recentActions.firstOrNull()
-                                                        Text(
-                                                            text = when {
-                                                                !latestAction.isNullOrBlank() -> "آخر حركة: $latestAction"
-                                                                meta.hasValidArchive -> "نسخة ويب محفوظة محلياً • جاهز للتصفح أوفلاين"
-                                                                else -> "مسجل كلوحة ويب • سيتم الحفظ التلقائي عند الفتح"
-                                                            },
-                                                            fontSize = 10.sp,
-                                                            fontWeight = FontWeight.SemiBold,
-                                                            color = Color(0xFF6D3500)
-                                                        )
-                                                    }
-                                                    if (meta.lastSavedTime > 0L) {
-                                                        Text(
-                                                            text = WebPortalCacheManager.formatSavedTimeAr(meta.lastSavedTime),
-                                                            fontSize = 9.sp,
-                                                            color = Color(0xFF8D4E00)
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 3. Main Smart Login Form: Supports Local IP Discovery + Remote Domains + Cloud AC + WhatsApp Smart Paste
+            // 2. Main Clean Login Card: Strictly 2 Clear Modes
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(18.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    ),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                 ) {
                     Column(
                         modifier = Modifier.padding(18.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1346,107 +999,209 @@ fun ConnectRouterScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "تسجيل الدخول والاتصال الذكي",
+                                    text = "تسجيل الدخول",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = when {
-                                        useDirectApiMode -> "اتصال مباشر عبر RouterOS API ($activePort) • بدون وسيط سحابي"
-                                        useManualNetworkSettings -> "متوافق مع الدومينات (APlusWiFi/DDNS)، IP، أو الروابط"
-                                        else -> "العنوان التلقائي: $activeIp"
+                                    text = if (!isCustomPlatformMode) {
+                                        "اتصال تلقائي بالميكروتك وجلب كل شيء للنظام"
+                                    } else {
+                                        "الاتصال عبر IP مخصص، دومين، أو منصة خارجية"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
 
-                            OutlinedButton(
-                                onClick = {
-                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                    val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-                                    if (clipText.isBlank() || !applySmartPaste(clipText, showFeedback = true)) {
-                                        scope.launch {
-                                            snackbarHostState.showSnackbar("انسخ بيانات السيرفر أو رسالة الواتساب أولاً ثم اضغط لصق ذكي")
+                            if (isCustomPlatformMode) {
+                                OutlinedButton(
+                                    onClick = {
+                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                        val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                                        if (clipText.isBlank() || !applySmartPaste(clipText, showFeedback = true)) {
+                                            scope.launch {
+                                                snackbarHostState.showSnackbar("انسخ بيانات السيرفر أو الدومين أولاً ثم اضغط لصق ذكي")
+                                            }
                                         }
-                                    }
-                                },
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                modifier = Modifier
-                                    .height(48.dp)
-                                    .testTag("smart_paste_button")
-                            ) {
-                                Icon(Icons.Default.ContentPaste, contentDescription = "لصق ذكي من الحافظة", modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("لصق ذكي", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("smart_paste_button")
+                                ) {
+                                    Icon(Icons.Default.ContentPaste, contentDescription = "لصق ذكي من الحافظة", modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("لصق ذكي", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                }
                             }
                         }
 
-                        // Connection Mode Quick Chips (Auto LAN / Direct RouterOS API / Custom Cloud & Domain)
+                        // Strictly Two Clear Connection Options (Zero Redundant IP-Direct Chip)
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            FilterChip(
-                                selected = !useManualNetworkSettings && !useDirectApiMode,
+                            Surface(
                                 onClick = {
-                                    useManualNetworkSettings = false
-                                    useDirectApiMode = false
+                                    isCustomPlatformMode = false
                                     viewModel.refreshDiscovery(context, showToast = false)
                                 },
-                                label = { Text("تلقائي من الشبكة", fontSize = 12.sp) },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Wifi, contentDescription = null, modifier = Modifier.size(16.dp))
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (!isCustomPlatformMode) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
                                 },
-                                modifier = Modifier
-                                    .height(48.dp)
-                                    .testTag("mode_auto_chip")
-                            )
-                            FilterChip(
-                                selected = useDirectApiMode,
-                                onClick = {
-                                    useDirectApiMode = true
-                                    useManualNetworkSettings = false
-                                    if (manualIp.isBlank()) manualIp = autoDetectedIp
-                                    if (manualPort in listOf(80, 443, 8080)) {
-                                        manualPort = 8728
-                                        manualUseHttps = false
+                                border = BorderStroke(
+                                    width = if (!isCustomPlatformMode) 1.5.dp else 1.dp,
+                                    color = if (!isCustomPlatformMode) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.outlineVariant
                                     }
-                                },
-                                label = { Text("اتصال مباشر (API)", fontSize = 12.sp) },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
-                                },
+                                ),
                                 modifier = Modifier
-                                    .height(48.dp)
-                                    .testTag("mode_direct_api_chip")
-                            )
-                            FilterChip(
-                                selected = useManualNetworkSettings && !useDirectApiMode,
-                                onClick = {
-                                    useDirectApiMode = false
-                                    useManualNetworkSettings = true
+                                    .weight(1f)
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("mode_auto_chip")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Router,
+                                        contentDescription = null,
+                                        tint = if (!isCustomPlatformMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text(
+                                        text = "اتصال تلقائي بالميكروتك",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (!isCustomPlatformMode) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "في النظام • بدون متصفح",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                onClick = { isCustomPlatformMode = true },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isCustomPlatformMode) {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
                                 },
-                                label = { Text("دومين / سيرفر مخصص", fontSize = 12.sp) },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Language, contentDescription = null, modifier = Modifier.size(16.dp))
-                                },
+                                border = BorderStroke(
+                                    width = if (isCustomPlatformMode) 1.5.dp else 1.dp,
+                                    color = if (isCustomPlatformMode) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.outlineVariant
+                                    }
+                                ),
                                 modifier = Modifier
-                                    .height(48.dp)
+                                    .weight(1f)
+                                    .minimumInteractiveComponentSize()
                                     .testTag("mode_custom_server_chip")
-                            )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Language,
+                                        contentDescription = null,
+                                        tint = if (isCustomPlatformMode) RouterBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text(
+                                        text = "دومين / منصة مخصصة",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isCustomPlatformMode) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "عبر IP أو دومين أو وسيط",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
                         }
 
-                        // Target Host / IP Input & Direct API Port Selector
+                        // Auto Mode Helper Notice when no Wi-Fi router gateway is detected yet
                         AnimatedVisibility(
-                            visible = isCustomHostMode,
+                            visible = !isCustomPlatformMode && autoDetectedIp.isBlank(),
                             enter = fadeIn() + expandVertically(),
                             exit = fadeOut() + shrinkVertically()
                         ) {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = "لم يتم العثور على راوتر ميكروتك في الشبكة الحالية. تأكد من اتصالك بشبكة الواي فاي للراوتر أو اختر «دومين / منصة مخصصة».",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = { viewModel.refreshDiscovery(context, showToast = true) },
+                                            enabled = !isDiscovering,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .minimumInteractiveComponentSize()
+                                        ) {
+                                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("فحص الشبكة", fontSize = 12.sp)
+                                        }
+                                        TextButton(
+                                            onClick = { isCustomPlatformMode = true },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .minimumInteractiveComponentSize()
+                                        ) {
+                                            Text("دخول عبر IP / دومين", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Custom Server / Domain / Platform Host Input (Visible ONLY in Option 2)
+                        AnimatedVisibility(
+                            visible = isCustomPlatformMode,
+                            enter = fadeIn() + expandVertically(),
+                            exit = fadeOut() + shrinkVertically()
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 OutlinedTextField(
                                     value = manualIp,
                                     onValueChange = { input ->
@@ -1460,32 +1215,20 @@ fun ConnectRouterScreen(
                                             manualPreferredPath = parsed.rawPath
                                             parsed.explicitPort?.let { manualPort = it }
                                             parsed.inferredHttps?.let { manualUseHttps = it }
+                                            if (input.contains("http://", ignoreCase = true) ||
+                                                input.contains("https://", ignoreCase = true) ||
+                                                parsed.host.contains("apluswifi.com", ignoreCase = true)
+                                            ) {
+                                                if (parsed.explicitPort !in listOf(8728, 8729)) {
+                                                    preferWebPlatformBrowser = true
+                                                }
+                                            }
                                         }
                                     },
-                                    label = {
-                                        Text(
-                                            if (useDirectApiMode) {
-                                                "عنوان IP أو مضيف راوتر ميكروتك (Direct API)"
-                                            } else {
-                                                "عنوان الراوتر أو السيرفر (IP أو دومين أو رابط)"
-                                            }
-                                        )
-                                    },
-                                    placeholder = {
-                                        Text(
-                                            if (useDirectApiMode) {
-                                                "مثال: 192.168.88.1 أو $autoDetectedIp"
-                                            } else {
-                                                "مثال: 192.168.88.1 أو myrouter.example.com"
-                                            }
-                                        )
-                                    },
+                                    label = { Text("عنوان السيرفر أو المنصة (IP أو دومين أو رابط)") },
+                                    placeholder = { Text("مثال: panel.apluswifi.com أو 192.168.1.50") },
                                     leadingIcon = {
-                                        Icon(
-                                            imageVector = if (useDirectApiMode) Icons.Default.Router else Icons.Default.Language,
-                                            contentDescription = null,
-                                            tint = if (useDirectApiMode) StatusActiveGreen else RouterBlue
-                                        )
+                                        Icon(Icons.Default.Language, contentDescription = null, tint = RouterBlue)
                                     },
                                     trailingIcon = {
                                         IconButton(
@@ -1493,19 +1236,16 @@ fun ConnectRouterScreen(
                                                 val target = manualIp.ifBlank { activeIp }
                                                 viewModel.probeCustomHost(target, normalizedManual.explicitPort, showToast = true)
                                             },
-                                            modifier = Modifier.testTag("probe_custom_host_btn")
+                                            modifier = Modifier
+                                                .minimumInteractiveComponentSize()
+                                                .testTag("probe_custom_host_btn")
                                         ) {
                                             Icon(Icons.Default.Search, contentDescription = "فحص السيرفر والمنافذ")
                                         }
                                     },
                                     supportingText = {
-                                        val kind = discoveredRouter?.detectedServerKind?.takeIf { it.isNotBlank() && !useDirectApiMode }
                                         Text(
-                                            text = kind ?: if (useDirectApiMode) {
-                                                "اتصال مباشر عبر RouterOS API ($activePort) بدون أي وسيط سحابي أو متصفح ويب"
-                                            } else {
-                                                "يقبل الدومين، الرابط الكامل، IP:Port، أو لصق رسالة واتساب مباشرة"
-                                            },
+                                            text = "أدخل الدومين أو عنوان IP الخاص بالمنصة المشترك بها أو السيرفر المخصص",
                                             fontSize = 11.sp
                                         )
                                     },
@@ -1516,48 +1256,163 @@ fun ConnectRouterScreen(
                                     singleLine = true
                                 )
 
-                                if (useDirectApiMode) {
+                                // Option to open target directly as subscribed web platform browser
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { preferWebPlatformBrowser = !preferWebPlatformBrowser }
+                                ) {
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(
-                                            text = "منفذ API:",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "فتح كمنصة / متصفح ويب مشترك بها",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = "فعّله لجلب المنصة والمتصفح حتى عند إدخال IP أو دومين مخصص",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = preferWebPlatformBrowser,
+                                            onCheckedChange = { preferWebPlatformBrowser = it },
+                                            modifier = Modifier.testTag("prefer_web_browser_switch")
                                         )
-                                        FilterChip(
-                                            selected = activePort == 8728,
-                                            onClick = {
-                                                manualPort = 8728
-                                                manualUseHttps = false
-                                            },
-                                            label = { Text("8728 (API عادي)", fontSize = 11.sp) },
+                                    }
+                                }
+
+                                // Optional Custom Port & Alias inside Option 2 (no duplicate IP field)
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Row(
                                             modifier = Modifier
-                                                .height(48.dp)
-                                                .testTag("direct_api_port_8728")
-                                        )
-                                        FilterChip(
-                                            selected = activePort == 8729,
-                                            onClick = {
-                                                manualPort = 8729
-                                                manualUseHttps = true
-                                            },
-                                            label = { Text("8729 (API-SSL مشفر)", fontSize = 11.sp) },
-                                            modifier = Modifier
-                                                .height(48.dp)
-                                                .testTag("direct_api_port_8729")
-                                        )
+                                                .fillMaxWidth()
+                                                .clickable { showCustomPortOptions = !showCustomPortOptions }
+                                                .padding(vertical = 4.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                                Text(
+                                                    text = "تخصيص المنفذ واسم المنصة (اختياري)",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                            Icon(
+                                                imageVector = if (showCustomPortOptions) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                                contentDescription = null
+                                            )
+                                        }
+
+                                        AnimatedVisibility(
+                                            visible = showCustomPortOptions,
+                                            enter = fadeIn() + expandVertically(),
+                                            exit = fadeOut() + shrinkVertically()
+                                        ) {
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(top = 8.dp),
+                                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .horizontalScroll(rememberScrollState()),
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    listOf(
+                                                        443 to "443 (HTTPS)",
+                                                        80 to "80 (HTTP)",
+                                                        8080 to "8080 (بديل)",
+                                                        8728 to "8728 (API)",
+                                                        8729 to "8729 (SSL)"
+                                                    ).forEach { (port, label) ->
+                                                        FilterChip(
+                                                            selected = manualPort == port,
+                                                            onClick = {
+                                                                manualPort = port
+                                                                manualUseHttps = (port == 443 || port == 8729)
+                                                                if (port in listOf(8728, 8729)) {
+                                                                    preferWebPlatformBrowser = false
+                                                                }
+                                                            },
+                                                            label = { Text(label, fontSize = 11.sp) },
+                                                            modifier = Modifier.height(48.dp)
+                                                        )
+                                                    }
+                                                }
+
+                                                OutlinedTextField(
+                                                    value = manualPort.toString(),
+                                                    onValueChange = { input ->
+                                                        val p = input.filter { it.isDigit() }.toIntOrNull()
+                                                        if (p != null && p in 1..65535) {
+                                                            manualPort = p
+                                                        } else if (input.isBlank()) {
+                                                            manualPort = 443
+                                                        }
+                                                    },
+                                                    label = { Text("رقم المنفذ المخصص (Port)") },
+                                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                                    singleLine = true,
+                                                    modifier = Modifier.fillMaxWidth()
+                                                )
+
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                    ) {
+                                                        Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                        Text("اتصال مشفر (HTTPS / SSL)", style = MaterialTheme.typography.bodySmall)
+                                                    }
+                                                    Switch(
+                                                        checked = manualUseHttps,
+                                                        onCheckedChange = { manualUseHttps = it }
+                                                    )
+                                                }
+
+                                                OutlinedTextField(
+                                                    value = manualRouterName,
+                                                    onValueChange = { manualRouterName = it },
+                                                    label = { Text("اسم مستعار للمنصة أو السيرفر (اختياري)") },
+                                                    placeholder = { Text("منصة الشبكة / السيرفر البعيد") },
+                                                    singleLine = true,
+                                                    modifier = Modifier.fillMaxWidth()
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        // 1. Username or Email
+                        // Username Input
                         OutlinedTextField(
                             value = username,
                             onValueChange = { input ->
@@ -1569,12 +1424,20 @@ fun ConnectRouterScreen(
                                     username = input
                                 }
                             },
-                            label = { Text("اسم المستخدم أو البريد الإلكتروني") },
-                            placeholder = { Text("admin أو user@example.com") },
+                            label = {
+                                Text(
+                                    if (!isCustomPlatformMode) "اسم المستخدم للراوتر" else "اسم المستخدم أو البريد الإلكتروني"
+                                )
+                            },
+                            placeholder = {
+                                Text(if (!isCustomPlatformMode) "admin" else "admin أو user@example.com")
+                            },
                             leadingIcon = {
                                 Icon(Icons.Default.Person, contentDescription = null, tint = RouterBlue)
                             },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = if (isCustomPlatformMode) KeyboardType.Email else KeyboardType.Text
+                            ),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("router_user_input"),
@@ -1582,7 +1445,7 @@ fun ConnectRouterScreen(
                             singleLine = true
                         )
 
-                        // 2. Password
+                        // Password Input
                         OutlinedTextField(
                             value = password,
                             onValueChange = { password = it },
@@ -1591,7 +1454,10 @@ fun ConnectRouterScreen(
                                 Icon(Icons.Default.Lock, contentDescription = null, tint = RouterBlue)
                             },
                             trailingIcon = {
-                                IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
+                                IconButton(
+                                    onClick = { isPasswordVisible = !isPasswordVisible },
+                                    modifier = Modifier.minimumInteractiveComponentSize()
+                                ) {
                                     Icon(
                                         imageVector = if (isPasswordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
                                         contentDescription = "إظهار كلمة المرور"
@@ -1611,6 +1477,7 @@ fun ConnectRouterScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .minimumInteractiveComponentSize()
                                 .clickable { rememberCredentials = !rememberCredentials }
                         ) {
                             Checkbox(
@@ -1618,37 +1485,51 @@ fun ConnectRouterScreen(
                                 onCheckedChange = { rememberCredentials = it }
                             )
                             Text(
-                                text = "تذكر بيانات السيرفر والراوتر للاتصال التلقائي",
+                                text = "تذكر بيانات الدخول للاتصال التلقائي",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
 
-                        // Big Primary Login Button
+                        // Primary Login CTA Button
                         Button(
                             onClick = {
-                                val rawOrActive = if (isCustomHostMode && manualIp.isNotBlank()) manualIp.trim() else activeIp
-                                val parsedTarget = RouterConnectionParser.normalizeHostInput(rawOrActive)
-                                val cleanHost = parsedTarget.host.ifBlank { activeIp.trim() }
-                                val resolvedPort = parsedTarget.explicitPort ?: activePort
-                                val resolvedHttps = parsedTarget.inferredHttps ?: activeHttps
-                                val resolvedPath = if (useDirectApiMode) {
-                                    null
+                                if (!isCustomPlatformMode) {
+                                    val config = RouterConnectionConfig(
+                                        name = "راوتر $autoDetectedIp",
+                                        ipAddress = autoDetectedIp.trim(),
+                                        port = autoDetectedApiPort,
+                                        username = username.trim(),
+                                        password = password,
+                                        useHttps = autoDetectedApiHttps,
+                                        autoDetectProtocol = true,
+                                        preferredPath = null,
+                                        isDemoMode = false,
+                                        directApiOnly = true,
+                                        preferWebPortal = false
+                                    )
+                                    viewModel.connectToRouter(config, saveToFavorites = rememberCredentials, context = context)
                                 } else {
-                                    parsedTarget.rawPath ?: if (useManualNetworkSettings) manualPreferredPath else null
+                                    val rawTarget = manualIp.trim()
+                                    val parsedTarget = RouterConnectionParser.normalizeHostInput(rawTarget)
+                                    val cleanHost = parsedTarget.host.ifBlank { activeIp.trim() }
+                                    val resolvedPort = parsedTarget.explicitPort ?: manualPort
+                                    val resolvedHttps = parsedTarget.inferredHttps ?: manualUseHttps
+                                    val resolvedPath = parsedTarget.rawPath ?: manualPreferredPath
+                                    val config = RouterConnectionConfig(
+                                        name = if (manualRouterName.isNotBlank()) manualRouterName else cleanHost,
+                                        ipAddress = cleanHost,
+                                        port = resolvedPort,
+                                        username = username.trim(),
+                                        password = password,
+                                        useHttps = resolvedHttps,
+                                        autoDetectProtocol = parsedTarget.explicitPort == null && !preferWebPlatformBrowser,
+                                        preferredPath = resolvedPath,
+                                        isDemoMode = false,
+                                        directApiOnly = false,
+                                        preferWebPortal = preferWebPlatformBrowser
+                                    )
+                                    viewModel.connectToRouter(config, saveToFavorites = rememberCredentials, context = context)
                                 }
-                                val config = RouterConnectionConfig(
-                                    name = if (manualRouterName.isNotBlank()) manualRouterName else "راوتر $cleanHost",
-                                    ipAddress = cleanHost,
-                                    port = resolvedPort,
-                                    username = username.trim(),
-                                    password = password,
-                                    useHttps = resolvedHttps,
-                                    autoDetectProtocol = true,
-                                    preferredPath = resolvedPath,
-                                    isDemoMode = false,
-                                    directApiOnly = useDirectApiMode
-                                )
-                                viewModel.connectToRouter(config, saveToFavorites = rememberCredentials, context = context)
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1658,19 +1539,23 @@ fun ConnectRouterScreen(
                             enabled = connectionState !is ConnectionState.Verifying && username.isNotBlank() && activeIp.isNotBlank()
                         ) {
                             Icon(
-                                imageVector = if (useDirectApiMode) Icons.Default.Bolt else Icons.Default.Login,
+                                imageVector = if (!isCustomPlatformMode) Icons.Default.Bolt else Icons.Default.Login,
                                 contentDescription = null,
                                 modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = if (useDirectApiMode) "اتصال مباشر عبر API الآن" else "اتصال ذكي وتسجيل الدخول",
+                                text = if (!isCustomPlatformMode) {
+                                    "اتصال تلقائي وجلب بيانات الميكروتك"
+                                } else {
+                                    "اتصال بالسيرفر / المنصة الآن"
+                                },
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
+                                fontSize = 15.sp
                             )
                         }
 
-                        // Demo Mode Button for instant test
+                        // Demo Mode Button
                         OutlinedButton(
                             onClick = {
                                 val demoConfig = RouterConnectionConfig(
@@ -1708,314 +1593,274 @@ fun ConnectRouterScreen(
                 }
             }
 
-            // 3. Collapsible Advanced Settings: Optional manual configuration toggle
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                    )
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { showAdvancedSettings = !showAdvancedSettings },
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+            // 3. Single Unified Saved Routers / Platforms Quick Reconnect Card
+            if (savedRouters.isNotEmpty()) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Column {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Dns,
+                                        contentDescription = null,
+                                        tint = RouterBlue,
+                                        modifier = Modifier.size(18.dp)
+                                    )
                                     Text(
-                                        text = "إعدادات متقدمة وتخصيص بيانات الشبكة",
-                                        style = MaterialTheme.typography.bodyMedium,
+                                        text = "السيرفرات والراوترات المحفوظة (${savedRouters.size})",
+                                        style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.Bold
                                     )
-                                    Text(
-                                        text = when {
-                                            useDirectApiMode -> "وضع الاتصال المباشر RouterOS API مفعل ($activePort)"
-                                            useManualNetworkSettings -> "تم تفعيل التخصيص اليدوي الاختياري"
-                                            else -> "الافتراضي: التعرف التلقائي مفعل"
-                                        },
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (isCustomHostMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
                                 }
+                                Text(
+                                    text = "دخول فوري بنقرة",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
                             }
-                            Icon(
-                                imageVector = if (showAdvancedSettings) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                contentDescription = null
-                            )
-                        }
 
-                        AnimatedVisibility(
-                            visible = showAdvancedSettings,
-                            enter = fadeIn() + expandVertically(),
-                            exit = fadeOut() + shrinkVertically()
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 14.dp),
-                                verticalArrangement = Arrangement.spacedBy(14.dp)
-                            ) {
-                                // Toggle Option: Manual Network Data (Optional)
+                            savedRouters.forEach { router ->
+                                var cacheSummary by remember(router.ipAddress) { mutableStateOf<RouterCacheSummary?>(null) }
+                                var portalCacheMeta by remember(router.ipAddress) { mutableStateOf<CachedPortalMeta?>(null) }
+                                LaunchedEffect(router.ipAddress) {
+                                    cacheSummary = RouterCacheManager.getCacheSummary(context, router.ipAddress)
+                                    portalCacheMeta = WebPortalCacheManager.loadMeta(context, router.ipAddress)
+                                }
+                                val isKnownCloudPortal = (portalCacheMeta != null && cacheSummary == null && !portalCacheMeta!!.isMikroTikWebFig) ||
+                                    router.ipAddress.contains("apluswifi.com", ignoreCase = true)
+                                val hasAnyCache = cacheSummary != null || (portalCacheMeta != null && isKnownCloudPortal)
+
                                 Surface(
+                                    shape = RoundedCornerShape(14.dp),
                                     color = MaterialTheme.colorScheme.surface,
-                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Row(
+                                    Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(14.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
+                                            .clickable {
+                                                username = router.username
+                                                if (router.password.isNotBlank()) password = router.password
+                                                if (isKnownCloudPortal) {
+                                                    isCustomPlatformMode = true
+                                                    preferWebPlatformBrowser = true
+                                                    manualIp = router.ipAddress
+                                                    manualPort = router.port
+                                                    manualUseHttps = router.useHttps
+                                                } else if (autoDetectedIp.isNotBlank() && router.ipAddress.equals(autoDetectedIp, ignoreCase = true)) {
+                                                    isCustomPlatformMode = false
+                                                    preferWebPlatformBrowser = false
+                                                } else {
+                                                    isCustomPlatformMode = true
+                                                    preferWebPlatformBrowser = false
+                                                    manualIp = router.ipAddress
+                                                    val normalizedPort = if (router.port in listOf(80, 443, 8080)) 8728 else router.port
+                                                    manualPort = normalizedPort
+                                                    manualUseHttps = (normalizedPort == 8729)
+                                                }
+                                                Toast.makeText(context, "تم تحديد بيانات ${router.name}", Toast.LENGTH_SHORT).show()
+                                            }
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
                                             Row(
                                                 verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                modifier = Modifier.weight(1f)
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Tune,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(18.dp),
-                                                    tint = MaterialTheme.colorScheme.primary
-                                                )
-                                                Text(
-                                                    text = "إدخال بيانات الشبكة يدوياً (اختياري)",
-                                                    fontWeight = FontWeight.Bold,
-                                                    style = MaterialTheme.typography.bodyMedium
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = "الافتراضي هو التعرف التلقائي على الراوتر من الشبكة المتصل بها. فعّل هذا الخيار فقط إذا أردت إدخال IP أو منفذ مخصص بنفسك.",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-
-                                        Spacer(modifier = Modifier.width(8.dp))
-
-                                        Switch(
-                                            checked = isCustomHostMode,
-                                            onCheckedChange = { isCustom ->
-                                                if (isCustom) {
-                                                    if (!useDirectApiMode) useManualNetworkSettings = true
-                                                    if (manualIp.isBlank()) {
-                                                        manualIp = autoDetectedIp
-                                                        manualPort = if (useDirectApiMode) 8728 else autoDetectedPort
-                                                        manualUseHttps = if (useDirectApiMode) false else autoDetectedHttps
-                                                    }
-                                                } else {
-                                                    useManualNetworkSettings = false
-                                                    useDirectApiMode = false
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(38.dp)
+                                                        .clip(CircleShape)
+                                                        .background(RouterBlue.copy(alpha = 0.12f)),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (isKnownCloudPortal) Icons.Default.Language else Icons.Default.Router,
+                                                        contentDescription = null,
+                                                        tint = RouterBlue,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                                Column {
+                                                    Text(
+                                                        text = router.name,
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.Bold,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        text = "${router.ipAddress} • ${router.username}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
                                                 }
                                             }
-                                        )
-                                    }
-                                }
 
-                                // If Default Automatic Mode is active
-                                if (!isCustomHostMode) {
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Column(modifier = Modifier.padding(12.dp)) {
                                             Row(
                                                 verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.CheckCircle,
-                                                    contentDescription = null,
-                                                    tint = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.size(16.dp)
-                                                )
-                                                Text(
-                                                    text = "نمط التعرف التلقائي نشط (الافتراضي)",
-                                                    fontWeight = FontWeight.Bold,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Text(
-                                                text = "يتم استخدام بيانات الشبكة والراوتر المكتشفة تلقائياً: عنوان IP هو ($autoDetectedIp) والمنفذ ($autoDetectedPort). لا حاجة لأي إعدادات إضافية.",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f)
-                                            )
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            OutlinedButton(
-                                                onClick = { viewModel.refreshDiscovery(context, showToast = true) },
-                                                enabled = !isDiscovering,
-                                                shape = RoundedCornerShape(8.dp),
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text("إعادة فحص واكتشاف الشبكة والراوتر الآن")
+                                                Button(
+                                                    onClick = {
+                                                        username = router.username
+                                                        if (router.password.isNotBlank()) password = router.password
+                                                        val targetPort = if (!isKnownCloudPortal && router.port in listOf(80, 443, 8080)) 8728 else router.port
+                                                        val config = RouterConnectionConfig(
+                                                            id = router.id,
+                                                            name = router.name,
+                                                            ipAddress = router.ipAddress,
+                                                            port = targetPort,
+                                                            username = router.username,
+                                                            password = router.password,
+                                                            useHttps = if (!isKnownCloudPortal) targetPort == 8729 else router.useHttps,
+                                                            autoDetectProtocol = true,
+                                                            isDemoMode = false,
+                                                            directApiOnly = !isKnownCloudPortal,
+                                                            preferWebPortal = isKnownCloudPortal
+                                                        )
+                                                        viewModel.connectToRouter(config, saveToFavorites = true, context = context)
+                                                    },
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = if (hasAnyCache) StatusActiveGreen else RouterBlue
+                                                    ),
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    modifier = Modifier.height(36.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (hasAnyCache) Icons.Default.Bolt else Icons.Default.Login,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text(
+                                                        text = if (isKnownCloudPortal) "فتح المنصة" else if (hasAnyCache) "⚡ دخول" else "اتصال",
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+
+                                                IconButton(
+                                                    onClick = { viewModel.deleteSavedRouter(router.id) },
+                                                    modifier = Modifier.minimumInteractiveComponentSize()
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Delete,
+                                                        contentDescription = "حذف من المحفوظات",
+                                                        tint = MaterialTheme.colorScheme.error,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
                                             }
                                         }
-                                    }
-                                } else {
-                                    // Manual Settings Form (When optional manual mode is enabled)
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.surface,
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Column(
-                                            modifier = Modifier.padding(14.dp),
-                                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                                        ) {
-                                            Text(
-                                                text = "بيانات الشبكة والراوتر المخصصة:",
-                                                fontWeight = FontWeight.Bold,
-                                                style = MaterialTheme.typography.bodyMedium
-                                            )
 
-                                            OutlinedTextField(
-                                                value = manualIp,
-                                                onValueChange = { input ->
-                                                    if (input.contains('\n')) {
-                                                        if (!applySmartPaste(input, showFeedback = true)) {
-                                                            manualIp = input
-                                                        }
-                                                    } else {
-                                                        manualIp = input
-                                                    }
-                                                },
-                                                label = { Text("عنوان الراوتر أو السيرفر (IP أو دومين أو رابط)") },
-                                                placeholder = { Text(autoDetectedIp) },
-                                                leadingIcon = {
-                                                    Icon(Icons.Default.Dns, contentDescription = null)
-                                                },
-                                                singleLine = true,
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .testTag("advanced_router_host_input")
-                                            )
-
-                                            Column {
-                                                Text(
-                                                    text = "المنفذ المخصص (Port):",
-                                                    style = MaterialTheme.typography.labelSmall
-                                                )
-                                                Spacer(modifier = Modifier.height(6.dp))
+                                        if (cacheSummary != null) {
+                                            Surface(
+                                                color = StatusActiveGreen.copy(alpha = 0.08f),
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = BorderStroke(0.6.dp, StatusActiveGreen.copy(alpha = 0.3f)),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
                                                 Row(
                                                     modifier = Modifier
                                                         .fillMaxWidth()
-                                                        .horizontalScroll(rememberScrollState()),
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    listOf(
-                                                        8728 to "8728 (API)",
-                                                        8729 to "8729 (SSL)",
-                                                        80 to "80 (HTTP)",
-                                                        443 to "443 (HTTPS)",
-                                                        8080 to "8080 (بديل)"
-                                                    ).forEach { (port, label) ->
-                                                        FilterChip(
-                                                            selected = manualPort == port,
-                                                            onClick = {
-                                                                manualPort = port
-                                                                manualUseHttps = (port == 443 || port == 8729)
-                                                            },
-                                                            label = { Text(label, fontSize = 12.sp) },
-                                                            modifier = Modifier.height(48.dp)
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Speed,
+                                                            contentDescription = null,
+                                                            tint = StatusActiveGreen,
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                        Text(
+                                                            text = "كاش النظام: ${cacheSummary?.cardsCount} كرت • ${cacheSummary?.profilesCount} باقة",
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            color = StatusActiveGreen
                                                         )
                                                     }
+                                                    Text(
+                                                        text = cacheSummary?.formattedTime ?: "",
+                                                        fontSize = 9.sp,
+                                                        color = MaterialTheme.colorScheme.outline
+                                                    )
                                                 }
-                                                Spacer(modifier = Modifier.height(6.dp))
-                                                OutlinedTextField(
-                                                    value = manualPort.toString(),
-                                                    onValueChange = { input ->
-                                                        val p = input.filter { it.isDigit() }.toIntOrNull()
-                                                        if (p != null && p in 1..65535) {
-                                                            manualPort = p
-                                                        } else if (input.isBlank()) {
-                                                            manualPort = 8728
-                                                        }
-                                                    },
-                                                    label = { Text("أو كتابة رقم منفذ مخصص (Custom Port)") },
-                                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                                    singleLine = true,
-                                                    modifier = Modifier.fillMaxWidth()
-                                                )
                                             }
-
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.SpaceBetween,
-                                                verticalAlignment = Alignment.CenterVertically
+                                        } else if (isKnownCloudPortal && portalCacheMeta != null) {
+                                            val meta = portalCacheMeta!!
+                                            Surface(
+                                                color = Color(0xFFFFF3E0),
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = BorderStroke(0.6.dp, Color(0xFFFB8C00)),
+                                                modifier = Modifier.fillMaxWidth()
                                             ) {
                                                 Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
-                                                    Text("استخدام اتصال آمن (HTTPS / SSL)")
-                                                }
-                                                Switch(
-                                                    checked = manualUseHttps,
-                                                    onCheckedChange = { manualUseHttps = it }
-                                                )
-                                            }
-
-                                            OutlinedTextField(
-                                                value = manualRouterName,
-                                                onValueChange = { manualRouterName = it },
-                                                label = { Text("اسم مستعار للراوتر (اختياري)") },
-                                                placeholder = { Text("راوتر الشبكة الرئيسية") },
-                                                singleLine = true,
-                                                modifier = Modifier.fillMaxWidth()
-                                            )
-
-                                            // Action Buttons for Manual Mode
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                            ) {
-                                                OutlinedButton(
-                                                    onClick = {
-                                                        manualIp = autoDetectedIp
-                                                        manualPort = autoDetectedPort
-                                                        manualUseHttps = autoDetectedHttps
-                                                    },
-                                                    shape = RoundedCornerShape(8.dp),
-                                                    modifier = Modifier.weight(1f)
-                                                ) {
-                                                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text("نسخ المكتشف تلقائياً", fontSize = 12.sp)
-                                                }
-
-                                                TextButton(
-                                                    onClick = {
-                                                        useManualNetworkSettings = false
-                                                        useDirectApiMode = false
-                                                    },
-                                                    shape = RoundedCornerShape(8.dp),
-                                                    modifier = Modifier.weight(1f)
-                                                ) {
-                                                    Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(16.dp))
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text("العودة للتعرف التلقائي", fontSize = 12.sp)
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                        modifier = Modifier.weight(1f)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.CloudOff,
+                                                            contentDescription = null,
+                                                            tint = Color(0xFFE65100),
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                        Text(
+                                                            text = if (meta.hasValidArchive) {
+                                                                "منصة ويب محفوظة للتصفح أوفلاين"
+                                                            } else {
+                                                                "منصة ويب خارجية"
+                                                            },
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            color = Color(0xFF6D3500)
+                                                        )
+                                                    }
+                                                    if (meta.lastSavedTime > 0L) {
+                                                        Text(
+                                                            text = WebPortalCacheManager.formatSavedTimeAr(meta.lastSavedTime),
+                                                            fontSize = 9.sp,
+                                                            color = Color(0xFF8D4E00)
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }
@@ -2027,42 +1872,7 @@ fun ConnectRouterScreen(
                 }
             }
 
-            // 4. Saved Routers (الراوترات المحفوظة)
-            if (savedRouters.isNotEmpty()) {
-                item {
-                    Text(
-                        text = "الراوترات المحفوظة:",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                items(savedRouters, key = { it.id }) { router ->
-                    SavedRouterItem(
-                        router = router,
-                        onConnect = {
-                            val config = RouterConnectionConfig(
-                                id = router.id,
-                                name = router.name,
-                                ipAddress = router.ipAddress,
-                                port = router.port,
-                                username = router.username,
-                                password = router.password,
-                                useHttps = router.useHttps,
-                                isDemoMode = false
-                            )
-                            viewModel.connectToRouter(config, saveToFavorites = false, context = context)
-                        },
-                        onDelete = {
-                            viewModel.deleteSavedRouter(router.id)
-                        }
-                    )
-                }
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(24.dp))
-            }
+            item { Spacer(modifier = Modifier.height(24.dp)) }
         }
     }
 
@@ -2086,153 +1896,6 @@ fun ConnectRouterScreen(
                 onDismiss = { showUpdateDialog = false },
                 onPauseDownload = { viewModel.cancelDownloadUpdate() }
             )
-        }
-    }
-}
-
-@Composable
-fun SavedRouterItem(
-    router: SavedRouterEntity,
-    onConnect: () -> Unit,
-    onDelete: () -> Unit
-) {
-    val context = LocalContext.current
-    var cacheSummary by remember(router.ipAddress) { mutableStateOf<com.example.data.local.RouterCacheSummary?>(null) }
-    var portalMeta by remember(router.ipAddress) { mutableStateOf<CachedPortalMeta?>(null) }
-    LaunchedEffect(router.ipAddress) {
-        cacheSummary = com.example.data.local.RouterCacheManager.getCacheSummary(context, router.ipAddress)
-        portalMeta = WebPortalCacheManager.loadMeta(context, router.ipAddress)
-    }
-    val hasAnyCache = cacheSummary != null || portalMeta != null
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (portalMeta != null && cacheSummary == null) Icons.Default.Language else Icons.Default.Router,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Column {
-                        Text(
-                            text = router.name,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "${router.ipAddress}:${router.port} (${router.username})",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Button(
-                        onClick = onConnect,
-                        shape = RoundedCornerShape(8.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (hasAnyCache) StatusActiveGreen else MaterialTheme.colorScheme.primary
-                        ),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                        modifier = Modifier.height(34.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (hasAnyCache) Icons.Default.Bolt else Icons.Default.Login,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(if (hasAnyCache) "⚡ دخول فوري" else "اتصال", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
-                    IconButton(onClick = onDelete) {
-                        Icon(
-                            imageVector = Icons.Default.Delete,
-                            contentDescription = "حذف الراوتر",
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
-            }
-
-            if (cacheSummary != null) {
-                Surface(
-                    color = StatusActiveGreen.copy(alpha = 0.08f),
-                    shape = RoundedCornerShape(6.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "⚡ كاش محلي: ${cacheSummary?.cardsCount} كرت • ${cacheSummary?.profilesCount} باقات",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = StatusActiveGreen
-                        )
-                        Text(
-                            text = cacheSummary?.formattedTime ?: "",
-                            fontSize = 9.sp,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
-                }
-            } else if (portalMeta != null && portalMeta?.hasValidArchive == true) {
-                Surface(
-                    color = Color(0xFFFFF3E0),
-                    shape = RoundedCornerShape(6.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "🟠 نسخة ويب محفوظة للتصفح بدون إنترنت",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFF6D3500)
-                        )
-                        Text(
-                            text = WebPortalCacheManager.formatSavedTimeAr(portalMeta?.lastSavedTime ?: 0L),
-                            fontSize = 9.sp,
-                            color = Color(0xFF8D4E00)
-                        )
-                    }
-                }
-            }
         }
     }
 }
