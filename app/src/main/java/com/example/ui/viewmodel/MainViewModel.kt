@@ -1964,47 +1964,18 @@ class MainViewModel(
                 return@launch
             }
 
-            var hasLoadedFromCache = false
-            var cachedSnapshotTimestamp = 0L
-            // 1. FAST INSTANT LOGIN FROM CACHE (دخول سريع فوري من الكاش للميكروتك):
-            if (!normalizedConfig.isDemoMode &&
-                !normalizedConfig.preferWebPortal &&
-                targetContext != null &&
-                normalizedConfig.ipAddress.isNotBlank()
-            ) {
-                val cachedSnapshot = com.example.data.local.RouterCacheManager.loadSnapshot(targetContext, normalizedConfig.ipAddress)
-                if (cachedSnapshot != null) {
-                    repository.restoreFromSnapshot(cachedSnapshot)
-                    hasLoadedFromCache = true
-                    cachedSnapshotTimestamp = cachedSnapshot.timestamp
-                    val cachedRouterName = cachedSnapshot.routerName.ifBlank { normalizedConfig.name.ifBlank { "راوتر MikroTik" } }
-                    _connectionState.value = ConnectionState.Connected(
-                        routerName = cachedRouterName,
-                        ipAddress = normalizedConfig.ipAddress,
-                        isDemo = false,
-                        isSyncing = true,
-                        isFromCache = true,
-                        isOffline = false,
-                        lastSyncTime = cachedSnapshotTimestamp
-                    )
-                    _toastEvent.emit("⚡ تم فتح بيانات الراوتر المخزنة فورياً! جاري مزامنة التحديثات...")
-                }
+            val verifyingMessage = when {
+                normalizedConfig.directApiOnly ->
+                    "جاري الاتصال المباشر بالميكروتك (${normalizedConfig.ipAddress}) وجلب بيانات النظام..."
+                normalizedConfig.preferWebPortal ->
+                    "جاري الاتصال بالمنصة (${normalizedConfig.ipAddress}) وفتح المتصفح..."
+                else ->
+                    "جاري الاتصال بالسيرفر (${normalizedConfig.ipAddress})..."
             }
-
-            if (!hasLoadedFromCache) {
-                val verifyingMessage = when {
-                    normalizedConfig.directApiOnly ->
-                        "جاري الاتصال المباشر بالميكروتك (${normalizedConfig.ipAddress}) وجلب بيانات النظام..."
-                    normalizedConfig.preferWebPortal ->
-                        "جاري الاتصال بالمنصة (${normalizedConfig.ipAddress}) وفتح المتصفح..."
-                    else ->
-                        "جاري الاتصال بالسيرفر (${normalizedConfig.ipAddress})..."
-                }
-                _connectionState.value = ConnectionState.Verifying(
-                    verifyingMessage,
-                    0.65f
-                )
-            }
+            _connectionState.value = ConnectionState.Verifying(
+                verifyingMessage,
+                0.65f
+            )
 
             when (val outcome = repository.verifyAndConnectSmart(normalizedConfig)) {
                 is com.example.data.network.MikrotikRepository.VerifyConnectOutcome.MikroTikSuccess -> {
@@ -2046,10 +2017,8 @@ class MainViewModel(
 
                     if (activeCfg.isDemoMode) {
                         _toastEvent.emit("تم الدخول في وضع العرض التفاعلي")
-                    } else if (hasLoadedFromCache) {
-                        _toastEvent.emit("✅ تم مزامنة أحدث بيانات الراوتر بنجاح!")
                     } else {
-                        _toastEvent.emit("تم الاتصال بالراوتر بنجاح (المنفذ ${activeCfg.port})!")
+                        _toastEvent.emit("✅ تم الاتصال بالراوتر وجلب البيانات بنجاح (المنفذ ${activeCfg.port})!")
                     }
 
                     // Auto-save or update router in saved list using resolved working port/protocol
@@ -2188,20 +2157,7 @@ class MainViewModel(
                         description = "تعذر الاتصال المباشر: $error",
                         status = "FAILED"
                     )
-                    if (hasLoadedFromCache) {
-                        _toastEvent.emit("تنبيه: تعذر الاتصال المباشر ($error). أنت تتصفح البيانات المحفوظة محلياً بأمان.")
-                        _connectionState.value = ConnectionState.Connected(
-                            routerName = normalizedConfig.name.ifBlank { "راوتر MikroTik (محفوظ)" },
-                            ipAddress = normalizedConfig.ipAddress,
-                            isDemo = false,
-                            isSyncing = false,
-                            isFromCache = true,
-                            isOffline = true,
-                            lastSyncTime = cachedSnapshotTimestamp,
-                            offlineReason = "تعذر الاتصال المباشر: $error"
-                        )
-                        startAutoRefresh()
-                    } else if (!isPrivateLanOrApiTarget && cachedPortalMeta != null && !cachedPortalMeta.isMikroTikWebFig) {
+                    if (!isPrivateLanOrApiTarget && cachedPortalMeta != null && !cachedPortalMeta.isMikroTikWebFig) {
                         _toastEvent.emit("🟠 تعذر الاتصال المباشر — تم فتح آخر نسخة محفوظة من لوحة التحكم (وضع الأوفلاين).")
                         _connectionState.value = ConnectionState.WebPortal(
                             serverName = cachedPortalMeta.serverName.ifBlank { normalizedConfig.ipAddress },

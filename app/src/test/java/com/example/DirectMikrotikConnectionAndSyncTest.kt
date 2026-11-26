@@ -760,6 +760,202 @@ class DirectMikrotikConnectionAndSyncTest {
             logs = emptyList()
         )
         assertTrue("Router snapshot with real uptime/version should pass guard", hasValidData)
+
+        val syntheticOnlyNode = com.example.data.model.NetworkNode(
+            id = "node_main_server",
+            name = "MikroTik",
+            ipAddress = "172.17.14.1",
+            macAddress = "",
+            interfaceName = "all",
+            model = "RouterOS",
+            role = "السيرفر الرئيسي",
+            isOnline = true
+        )
+        val hasSyntheticOnly = com.example.data.local.RouterCacheManager.hasMeaningfulRouterData(
+            resource = emptyResource,
+            cards = emptyList(),
+            profiles = emptyList(),
+            activeUsers = emptyList(),
+            servers = emptyList(),
+            nodes = listOf(syntheticOnlyNode),
+            logs = emptyList()
+        )
+        org.junit.Assert.assertFalse(
+            "Snapshot with only synthetic node_main_server and zero router telemetry must be rejected",
+            hasSyntheticOnly
+        )
+    }
+
+    @Test
+    fun socketSyncFailsInsteadOfReturningZerosWhenCoreQueriesFail() {
+        val running = AtomicBoolean(true)
+        val mockApiServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        val apiPort = mockApiServer.localPort
+
+        Thread {
+            while (running.get()) {
+                try {
+                    val client = mockApiServer.accept()
+                    Thread {
+                        client.use { sock ->
+                            sock.soTimeout = 3000
+                            val inp = sock.getInputStream()
+                            val out = sock.getOutputStream()
+                            while (running.get() && !sock.isClosed) {
+                                val sentence = readRosSentence(inp)
+                                if (sentence.isEmpty()) break
+                                when (sentence.first()) {
+                                    "/login" -> writeRosSentence(out, listOf("!done"))
+                                    "/system/resource/print",
+                                    "/ip/hotspot/user/profile/print",
+                                    "/user-manager/profile/print",
+                                    "/tool/user-manager/profile/print",
+                                    "/ip/hotspot/user/print",
+                                    "/user-manager/user/print",
+                                    "/tool/user-manager/user/print" -> {
+                                        writeRosSentence(out, listOf("!trap", "=message=not enough permissions"))
+                                        writeRosSentence(out, listOf("!done"))
+                                    }
+                                    else -> writeRosSentence(out, listOf("!done"))
+                                }
+                            }
+                        }
+                    }.start()
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }.apply { isDaemon = true; start() }
+
+        try {
+            val repo = MikrotikRepository(appDao = null)
+            runBlocking {
+                val outcome = repo.verifyAndConnectSmart(
+                    RouterConnectionConfig(
+                        name = "راوتر بصلاحيات مقيدة",
+                        ipAddress = "127.0.0.1",
+                        port = apiPort,
+                        username = "readonly",
+                        password = "secret",
+                        useHttps = false,
+                        autoDetectProtocol = false,
+                        directApiOnly = true,
+                        preferWebPortal = false
+                    )
+                )
+                assertTrue(
+                    "Expected Failure when core resource/cards/profiles all fail, got $outcome",
+                    outcome is MikrotikRepository.VerifyConnectOutcome.Failure
+                )
+            }
+        } finally {
+            running.set(false)
+            runCatching { mockApiServer.close() }
+        }
+    }
+
+    @Test
+    fun routerOsApiClientRejectsNonApiHugeWordLengthFast() {
+        val running = AtomicBoolean(true)
+        val bogusServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        val bogusPort = bogusServer.localPort
+
+        Thread {
+            while (running.get()) {
+                try {
+                    val client = bogusServer.accept()
+                    Thread {
+                        client.use { sock ->
+                            // Send a 4-byte length prefix decoding to >250MB (0xFF 0x7F 0xFF 0xFF)
+                            sock.getOutputStream().write(byteArrayOf(0xFF.toByte(), 0x7F.toByte(), 0xFF.toByte(), 0xFF.toByte()))
+                            sock.getOutputStream().flush()
+                        }
+                    }.start()
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }.apply { isDaemon = true; start() }
+
+        try {
+            val client = RouterOsApiClient()
+            runBlocking {
+                val result = client.connectAndLogin(
+                    host = "127.0.0.1",
+                    port = bogusPort,
+                    username = "admin",
+                    password = "123",
+                    timeoutMs = 1500,
+                    useTls = false
+                )
+                assertTrue("Expected failure on non-API huge frame prefix", result.isFailure)
+            }
+        } finally {
+            running.set(false)
+            runCatching { bogusServer.close() }
+        }
+    }
+
+    @Test
+    fun directModeRestAuthFailureReportsClearCredentialsError() {
+        val running = AtomicBoolean(true)
+        val restServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        val restPort = restServer.localPort
+
+        Thread {
+            while (running.get()) {
+                try {
+                    val s = restServer.accept()
+                    Thread {
+                        s.use { sock ->
+                            sock.soTimeout = 1500
+                            val inp = sock.getInputStream()
+                            val firstByte = inp.read()
+                            if (firstByte == -1 || (firstByte != 'G'.code && firstByte != 'P'.code && firstByte != 'H'.code)) {
+                                return@use
+                            }
+                            val reader = inp.bufferedReader()
+                            reader.readLine()
+                            while (true) {
+                                val line = reader.readLine() ?: break
+                                if (line.isEmpty()) break
+                            }
+                            val errBody = """{"error":401,"message":"Unauthorized"}"""
+                            val resp = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"RouterOS\"\r\nContent-Type: application/json\r\nContent-Length: ${errBody.toByteArray().size}\r\nConnection: close\r\n\r\n$errBody"
+                            sock.getOutputStream().write(resp.toByteArray())
+                            sock.getOutputStream().flush()
+                        }
+                    }.start()
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }.apply { isDaemon = true; start() }
+
+        try {
+            val repo = MikrotikRepository(appDao = null)
+            runBlocking {
+                val outcome = repo.verifyAndConnectSmart(
+                    RouterConnectionConfig(
+                        name = "راوتر 127.0.0.1",
+                        ipAddress = "127.0.0.1",
+                        port = restPort,
+                        username = "admin",
+                        password = "wrong",
+                        useHttps = false,
+                        autoDetectProtocol = true,
+                        directApiOnly = true,
+                        preferWebPortal = false
+                    )
+                )
+                assertTrue("Expected Failure on REST 401, got $outcome", outcome is MikrotikRepository.VerifyConnectOutcome.Failure)
+                val msg = (outcome as MikrotikRepository.VerifyConnectOutcome.Failure).message
+                assertTrue("Expected credential error in Arabic, got: $msg", msg.contains("بيانات الدخول"))
+            }
+        } finally {
+            running.set(false)
+            runCatching { restServer.close() }
+        }
     }
 }
 

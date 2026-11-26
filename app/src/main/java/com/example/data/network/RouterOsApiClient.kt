@@ -44,7 +44,8 @@ data class ResolvedCardTarget(
 class RouterOsApiClient {
 
     companion object {
-        private const val TRANSACTION_SO_TIMEOUT_MS = 15_000
+        private const val TRANSACTION_SO_TIMEOUT_MS = 35_000
+        private const val MAX_WORD_LENGTH_BYTES = 16 * 1024 * 1024
     }
 
     private val socketLock = Any()
@@ -385,6 +386,9 @@ class RouterOsApiClient {
                     command = "/ip/hotspot/active/print",
                     proplist = ".id,user,address,mac-address,uptime,bytes-in,bytes-out,login-by,session-time-left,comment,server"
                 )
+                extractTrapMessageIfNoRe(sentences)?.let { trapMsg ->
+                    return@withContext Result.failure(Exception("تعذر جلب الجلسات النشطة: $trapMsg"))
+                }
                 val list = mutableListOf<HotspotActiveUser>()
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
@@ -423,6 +427,9 @@ class RouterOsApiClient {
                     command = "/ip/hotspot/user/print",
                     proplist = ".id,name,password,profile,uptime,bytes-in,bytes-out,limit-uptime,limit-bytes-total,limit-bytes-out,limit-bytes-in,comment,disabled"
                 )
+                extractTrapMessageIfNoRe(sentences)?.let { trapMsg ->
+                    return@withContext Result.failure(Exception("تعذر جلب كروت الهوتسبوت: $trapMsg"))
+                }
                 val list = mutableListOf<HotspotCard>()
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
@@ -479,7 +486,12 @@ class RouterOsApiClient {
                 // 1. Fetch Hotspot User Profiles (/ip/hotspot/user/profile)
                 try {
                     val sentences = executeSentence(listOf("/ip/hotspot/user/profile/print"))
-                    if (sentences.any { it.firstOrNull() == "!done" }) anySystemSucceeded = true
+                    val trapMsg = extractTrapMessageIfNoRe(sentences)
+                    if (trapMsg != null) {
+                        lastSysError = Exception("تعذر جلب باقات الهوتسبوت: $trapMsg")
+                    } else if (sentences.any { it.firstOrNull() == "!done" }) {
+                        anySystemSucceeded = true
+                    }
                     for (s in sentences) {
                         if (s.firstOrNull() == "!re") {
                             val map = parseSentenceToMap(s)
@@ -546,7 +558,12 @@ class RouterOsApiClient {
                     } catch (_: Exception) {}
 
                     val umSentences = executeSentence(listOf("/user-manager/profile/print"))
-                    if (umSentences.any { it.firstOrNull() == "!done" }) anySystemSucceeded = true
+                    val umTrap = extractTrapMessageIfNoRe(umSentences)
+                    if (umTrap != null) {
+                        if (lastSysError == null) lastSysError = Exception("تعذر جلب باقات يوزرمانجر: $umTrap")
+                    } else if (umSentences.any { it.firstOrNull() == "!done" }) {
+                        anySystemSucceeded = true
+                    }
                     for (s in umSentences) {
                         if (s.firstOrNull() == "!re") {
                             val map = parseSentenceToMap(s)
@@ -646,7 +663,12 @@ class RouterOsApiClient {
                     } catch (_: Exception) {}
 
                     val tumSentences = executeSentence(listOf("/tool/user-manager/profile/print"))
-                    if (tumSentences.any { it.firstOrNull() == "!done" }) anySystemSucceeded = true
+                    val tumTrap = extractTrapMessageIfNoRe(tumSentences)
+                    if (tumTrap != null) {
+                        if (lastSysError == null) lastSysError = Exception("تعذر جلب باقات يوزرمانجر: $tumTrap")
+                    } else if (tumSentences.any { it.firstOrNull() == "!done" }) {
+                        anySystemSucceeded = true
+                    }
                     for (s in tumSentences) {
                         if (s.firstOrNull() == "!re") {
                             val map = parseSentenceToMap(s)
@@ -2507,6 +2529,9 @@ class RouterOsApiClient {
                 if (sentences.none { it.firstOrNull() == "!re" }) {
                     sentences = executeSentence(listOf("/interface/print"))
                 }
+                extractTrapMessageIfNoRe(sentences)?.let { trapMsg ->
+                    return@withContext Result.failure(Exception("تعذر جلب إحصائيات المنافذ: $trapMsg"))
+                }
                 val list = mutableListOf<InterfaceStats>()
                 for (s in sentences) {
                     if (s.firstOrNull() == "!re") {
@@ -2681,11 +2706,19 @@ class RouterOsApiClient {
             try {
                 val umProplist = ".id,name,username,password,actual-profile,profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,creation-time,start-time,started,last-seen,last-logged-in,till-time,end-time,comment,disabled"
                 // Try v7 user-manager first
-                var sentences = executeQueryWithProplist("/user-manager/user/print", umProplist)
-                val isV7Um = sentences.any { it.firstOrNull() == "!re" }
-                if (!isV7Um) {
+                val v7Sentences = executeQueryWithProplist("/user-manager/user/print", umProplist)
+                val isV7Um = v7Sentences.any { it.firstOrNull() == "!re" }
+                val v7Trap = extractTrapMessageIfNoRe(v7Sentences)
+                val sentences = if (isV7Um) {
+                    v7Sentences
+                } else {
                     // Try v6 /tool/user-manager/user
-                    sentences = executeQueryWithProplist("/tool/user-manager/user/print", umProplist)
+                    val v6Sentences = executeQueryWithProplist("/tool/user-manager/user/print", umProplist)
+                    val v6Trap = extractTrapMessageIfNoRe(v6Sentences)
+                    if (v6Sentences.none { it.firstOrNull() == "!re" } && v7Trap != null && v6Trap != null) {
+                        return@withContext Result.failure(Exception("تعذر جلب كروت يوزرمانجر: $v7Trap"))
+                    }
+                    v6Sentences
                 }
 
                 // In RouterOS v7, active/assigned profiles & subscription timestamps often live in /user-manager/user-profile
@@ -3161,6 +3194,13 @@ class RouterOsApiClient {
         return sentences
     }
 
+    private fun extractTrapMessageIfNoRe(sentences: List<List<String>>): String? {
+        if (sentences.any { it.firstOrNull() == "!re" }) return null
+        val trap = sentences.firstOrNull { it.firstOrNull() == "!trap" } ?: return null
+        return trap.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")?.ifBlank { null }
+            ?: "رفض الراوتر الاستعلام (!trap)"
+    }
+
     private fun writeSentenceToStream(out: OutputStream, words: List<String>) {
         for (word in words) {
             writeWord(out, word)
@@ -3240,6 +3280,9 @@ class RouterOsApiClient {
             }
         }
         if (len == 0) return ""
+        if (len < 0 || len > MAX_WORD_LENGTH_BYTES) {
+            throw java.io.IOException("استجابة غير متوافقة مع بروتوكول RouterOS API ($len بايت)")
+        }
         val buf = ByteArray(len)
         var read = 0
         while (read < len) {

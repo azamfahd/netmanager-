@@ -591,4 +591,86 @@ class ContinuousSyncRobolectricTest {
             try { serverSocket.close() } catch (_: Exception) {}
         }
     }
+
+    @Test
+    fun directModeRestJsonSyncSucceedsAndRefreshesData() {
+        val running = AtomicBoolean(true)
+        val restServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        val restPort = restServer.localPort
+
+        Thread {
+            while (running.get()) {
+                try {
+                    val s = restServer.accept()
+                    Thread {
+                        s.use { sock ->
+                            sock.soTimeout = 2000
+                            val input = sock.getInputStream()
+                            val firstByte = input.read()
+                            if (firstByte == -1 || (firstByte != 'G'.code && firstByte != 'P'.code && firstByte != 'D'.code && firstByte != 'H'.code)) {
+                                return@use
+                            }
+                            val reader = input.bufferedReader()
+                            val requestLine = "${firstByte.toChar()}${reader.readLine().orEmpty()}"
+                            while (true) {
+                                val line = reader.readLine() ?: break
+                                if (line.isEmpty()) break
+                            }
+                            val path = requestLine.split(" ").getOrNull(1).orEmpty()
+                            val json = when {
+                                path.startsWith("/rest/system/resource") ->
+                                    """{"uptime":"3d5h12m","version":"7.15 (stable)","board-name":"RB4011","cpu-load":"14","free-memory":"536870912","total-memory":"1073741824"}"""
+                                path.startsWith("/rest/system/identity") ->
+                                    """{"name":"YemenNetCore"}"""
+                                path.startsWith("/rest/ip/hotspot/user/profile") ->
+                                    """[{"name":"VIP-1000","rate-limit":"4M/4M","shared-users":"1","session-timeout":"1d"}]"""
+                                path.startsWith("/rest/ip/hotspot/user") ->
+                                    """[{".id":"*1","name":"778899","profile":"VIP-1000","uptime":"10m","bytes-in":"1024","bytes-out":"4096","disabled":"false"}]"""
+                                path.startsWith("/rest/ip/hotspot/active") ->
+                                    """[{".id":"*A1","user":"778899","address":"172.17.14.55","mac-address":"AA:BB:CC:11:22:33","uptime":"10m","bytes-in":"1024","bytes-out":"4096"}]"""
+                                path.startsWith("/rest/interface") ->
+                                    """[{".id":"*1","name":"ether1","type":"ether","rx-byte":"100000","tx-byte":"50000","running":"true","disabled":"false"}]"""
+                                else -> "[]"
+                            }
+                            val bytes = json.toByteArray()
+                            val resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n$json"
+                            sock.getOutputStream().write(resp.toByteArray())
+                            sock.getOutputStream().flush()
+                        }
+                    }.start()
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }.apply { isDaemon = true; start() }
+
+        try {
+            val repo = MikrotikRepository(appDao = null)
+            runBlocking {
+                val outcome = repo.verifyAndConnectSmart(
+                    RouterConnectionConfig(
+                        name = "راوتر 127.0.0.1",
+                        ipAddress = "127.0.0.1",
+                        port = restPort,
+                        username = "admin",
+                        password = "secret",
+                        useHttps = false,
+                        autoDetectProtocol = true,
+                        directApiOnly = true,
+                        preferWebPortal = false
+                    )
+                )
+                assertTrue("Expected MikroTikSuccess via direct REST JSON, got $outcome", outcome is MikrotikRepository.VerifyConnectOutcome.MikroTikSuccess)
+                org.junit.Assert.assertEquals("3d5h12m", repo.resourceState.value.uptime)
+                assertTrue(repo.cards.value.any { it.name == "778899" })
+                assertTrue(repo.profiles.value.any { it.name == "VIP-1000" })
+
+                val refreshRes = repo.refreshData(forceLiveRefresh = true)
+                assertTrue("Expected live REST refresh to succeed", refreshRes.isSuccess)
+            }
+        } finally {
+            running.set(false)
+            runCatching { restServer.close() }
+        }
+    }
 }

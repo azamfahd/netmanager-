@@ -297,8 +297,10 @@ fun ConnectRouterScreen(
     val autoDetectedIp = discoveredRouter?.ip?.ifBlank { null }
         ?: localNetwork.gatewayIp?.ifBlank { null }
         ?: ""
-    val autoDetectedApiPort = discoveredRouter?.port?.takeIf { it in listOf(8728, 8729) } ?: 8728
-    val autoDetectedApiHttps = autoDetectedApiPort == 8729
+    val autoDetectedApiPort = discoveredRouter?.port?.takeIf {
+        it in listOf(8728, 8729, 80, 443, 8080, 8443)
+    } ?: 8728
+    val autoDetectedApiHttps = autoDetectedApiPort in listOf(8729, 443, 8443)
 
     val parsedAutoCustomPort = autoCustomPortText.trim().toIntOrNull()?.takeIf { it in 1..65535 }
     val normalizedAutoOverride = remember(autoIpOverride) { RouterConnectionParser.normalizeHostInput(autoIpOverride) }

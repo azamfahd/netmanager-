@@ -57,13 +57,15 @@ object RouterCacheManager {
         logs: List<SystemLogEntry>
     ): Boolean {
         val hasUptime = resource.uptime.isNotBlank() && resource.uptime != "0s"
+        val hasVersion = resource.version.isNotBlank()
+        val hasRealNodes = nodes.any { it.id != "node_main_server" }
         return cards.isNotEmpty() ||
             profiles.isNotEmpty() ||
             activeUsers.isNotEmpty() ||
             servers.isNotEmpty() ||
-            nodes.isNotEmpty() ||
-            logs.isNotEmpty() ||
-            resource.version.isNotBlank() ||
+            hasRealNodes ||
+            (logs.isNotEmpty() && (hasUptime || hasVersion)) ||
+            hasVersion ||
             hasUptime
     }
 
@@ -517,6 +519,7 @@ object RouterCacheManager {
             }
 
             if (!isDemoSnapshot && !hasMeaningfulRouterData(resource, cardsList, profList, activeList, serversList, nodesList, logsList)) {
+                runCatching { file.delete() }
                 return null
             }
 

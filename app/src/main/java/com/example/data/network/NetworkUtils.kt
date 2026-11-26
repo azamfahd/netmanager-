@@ -28,23 +28,56 @@ object NetworkUtils {
     }
 
     @Suppress("DEPRECATION")
-    fun findLanNetwork(context: Context? = appContextRef): Network? {
+    fun findLanNetwork(context: Context? = appContextRef, targetHost: String? = null): Network? {
         val ctx = context ?: return null
         return try {
             val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return null
+
+            fun isUsableLanNetwork(net: Network?): Boolean {
+                if (net == null) return false
+                val caps = cm.getNetworkCapabilities(net) ?: return false
+                val isLan = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                if (!isLan) return false
+                val notSuspended = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)
+                } else {
+                    true
+                }
+                if (!notSuspended) return false
+                val lp = cm.getLinkProperties(net) ?: return false
+                return lp.linkAddresses.any { la ->
+                    val addr = la.address
+                    addr != null && !addr.isLoopbackAddress && (addr.hostAddress?.contains('.') == true)
+                }
+            }
+
+            fun matchesTargetSubnet(net: Network, host: String): Boolean {
+                if (!RouterConnectionParser.isIpv4(host)) return false
+                val lp = cm.getLinkProperties(net) ?: return false
+                val targetPrefix = host.substringBeforeLast('.')
+                val sameSubnetIp = lp.linkAddresses.any { la ->
+                    la.address?.hostAddress?.startsWith("$targetPrefix.") == true
+                }
+                val sameGatewayOrDns = lp.routes.any { it.gateway?.hostAddress == host } ||
+                    lp.dnsServers.any { it.hostAddress == host } ||
+                    (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+                        lp.dhcpServerAddress?.hostAddress == host)
+                return sameSubnetIp || sameGatewayOrDns
+            }
+
+            val cleanTarget = targetHost?.trim().orEmpty()
+            val allUsable = cm.allNetworks.filter { isUsableLanNetwork(it) }
+            if (cleanTarget.isNotBlank()) {
+                allUsable.firstOrNull { matchesTargetSubnet(it, cleanTarget) }?.let { return it }
+            }
+
             val active = cm.activeNetwork
-            val activeCaps = active?.let { cm.getNetworkCapabilities(it) }
-            if (active != null && activeCaps != null &&
-                (activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                    activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
-            ) {
+            if (isUsableLanNetwork(active)) {
                 return active
             }
-            cm.allNetworks.firstOrNull { net ->
-                val caps = cm.getNetworkCapabilities(net)
-                caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
-            }
+
+            allUsable.firstOrNull()
         } catch (_: Exception) {
             null
         }
@@ -53,7 +86,7 @@ object NetworkUtils {
     fun createRoutedSocket(host: String): Socket {
         val cleanHost = RouterConnectionParser.normalizeHostInput(host).host.ifBlank { host.trim() }
         if (RouterConnectionParser.isPrivateOrLocalIpv4(cleanHost)) {
-            val lanNet = findLanNetwork()
+            val lanNet = findLanNetwork(targetHost = cleanHost)
             if (lanNet != null) {
                 try {
                     return lanNet.socketFactory.createSocket()
@@ -204,6 +237,7 @@ object NetworkUtils {
             // Probe only MikroTik API & Web/REST ports gently in staggered pairs to avoid triggering router PSD port-scan rules
             val primaryPair = listOf(8728, 80)
             val secondaryPair = listOf(8729, 443)
+            val tertiaryPair = listOf(8080, 8443)
 
             var resolvedIp = gateway
             var activePort = 8728
@@ -220,7 +254,16 @@ object NetworkUtils {
                 val pair2 = coroutineScope {
                     secondaryPair.map { port -> async { port to testSocketConnection(targetIp, port, timeoutMs = 750) } }.awaitAll()
                 }
-                val reachablePorts = (pair1 + pair2).filter { it.second }.map { it.first }
+                val baseReachable = (pair1 + pair2).filter { it.second }.map { it.first }
+                val pair3 = if (baseReachable.isEmpty()) {
+                    kotlinx.coroutines.delay(120)
+                    coroutineScope {
+                        tertiaryPair.map { port -> async { port to testSocketConnection(targetIp, port, timeoutMs = 700) } }.awaitAll()
+                    }
+                } else {
+                    emptyList()
+                }
+                val reachablePorts = baseReachable + pair3.filter { it.second }.map { it.first }
                 if (reachablePorts.isNotEmpty()) {
                     resolvedIp = targetIp
                     foundReachable = true
@@ -229,16 +272,20 @@ object NetworkUtils {
                     activePort = when {
                         reachablePorts.contains(8728) -> 8728
                         reachablePorts.contains(8729) -> 8729
-                        reachablePorts.contains(80) -> 80
                         reachablePorts.contains(443) -> 443
+                        reachablePorts.contains(80) -> 80
+                        reachablePorts.contains(8443) -> 8443
+                        reachablePorts.contains(8080) -> 8080
                         else -> reachablePorts.first()
                     }
-                    isHttps = (activePort == 443 || activePort == 8729)
+                    isHttps = (activePort == 443 || activePort == 8729 || activePort == 8443)
                     serviceType = when (activePort) {
                         8728 -> "منفذ MikroTik API الرسمي (8728)"
                         8729 -> "منفذ MikroTik API-SSL المشفر (8729)"
                         80 -> "منفذ WebFig / REST (80)"
                         443 -> "منفذ WebFig HTTPS (443)"
+                        8080 -> "منفذ HTTP / REST البديل (8080)"
+                        8443 -> "منفذ HTTPS / REST البديل (8443)"
                         else -> "منفذ مخصص ($activePort)"
                     }
                     break

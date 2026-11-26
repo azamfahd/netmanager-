@@ -464,7 +464,7 @@ class MikrotikRepository(
     private fun clientForHost(host: String, isProbe: Boolean = false): OkHttpClient {
         val base = if (isProbe) probeHttpClient else httpClient
         if (!RouterConnectionParser.isPrivateOrLocalIpv4(host)) return base
-        val lanNet = NetworkUtils.findLanNetwork() ?: return base
+        val lanNet = NetworkUtils.findLanNetwork(targetHost = host) ?: return base
         return try {
             base.newBuilder().socketFactory(lanNet.socketFactory).build()
         } catch (_: Exception) {
@@ -474,6 +474,9 @@ class MikrotikRepository(
 
     private fun clientForUrl(url: String, isProbe: Boolean = false): OkHttpClient =
         clientForHost(extractHostFromUrl(url), isProbe)
+
+    private fun routerCall(request: Request, isProbe: Boolean = false): okhttp3.Call =
+        clientForUrl(request.url.toString(), isProbe).newCall(request)
 
     private val routerOsApiClient = RouterOsApiClient()
     @Volatile
@@ -2140,6 +2143,7 @@ class MikrotikRepository(
                 }
                 add(443 to true)
                 add(80 to false)
+                add(8443 to true)
                 add(8080 to false)
             }.distinct()
             tryRestJsonDirect(restCandidates)?.let { return it }
@@ -2357,12 +2361,26 @@ class MikrotikRepository(
                 }
             }
 
-            // If all core probes failed, the router connection is genuinely down — propagate error!
-            if (resResult.isFailure && activeResult.isFailure && interfaceStatsRes.isFailure) {
+            // Propagate failure if core resource/profiles/cards all failed (don't fake success with all-zero dashboard)
+            val hasZeroUsableCoreData = _profiles.value.isEmpty() &&
+                _cards.value.isEmpty() &&
+                _activeUsers.value.isEmpty()
+            val allCoreDataFailed = resResult.isFailure &&
+                profilesRes.isFailure &&
+                hotspotCardsRes.isFailure &&
+                umCardsRes.isFailure &&
+                activeResult.getOrDefault(emptyList()).isEmpty()
+            if ((resResult.isFailure && activeResult.isFailure && interfaceStatsRes.isFailure) ||
+                allCoreDataFailed ||
+                (resResult.isFailure && hasZeroUsableCoreData)
+            ) {
                 throw (resResult.exceptionOrNull()
+                    ?: hotspotCardsRes.exceptionOrNull()
+                    ?: profilesRes.exceptionOrNull()
+                    ?: umCardsRes.exceptionOrNull()
                     ?: activeResult.exceptionOrNull()
                     ?: interfaceStatsRes.exceptionOrNull()
-                    ?: Exception("انقطع الاتصال بالراوتر عبر منفذ API"))
+                    ?: Exception("تعذر جلب البيانات الأساسية من الراوتر عبر منفذ API"))
             }
 
             // Update topology whenever interface stats were successfully retrieved (even if empty)
@@ -4065,7 +4083,7 @@ class MikrotikRepository(
 
                     try {
                         val pReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile").header("Authorization", credential).build()
-                        httpClient.newCall(pReq).execute().use { pResp ->
+                        routerCall(pReq).execute().use { pResp ->
                             if (pResp.isSuccessful) {
                                 hsOk = true
                                 val jsonArray = JSONArray(pResp.body?.string().orEmpty())
@@ -4087,7 +4105,7 @@ class MikrotikRepository(
 
                     try {
                         val umReq = Request.Builder().url("$baseUrl/rest/user-manager/profile").header("Authorization", credential).build()
-                        httpClient.newCall(umReq).execute().use { umResp ->
+                        routerCall(umReq).execute().use { umResp ->
                             if (umResp.isSuccessful) {
                                 umOk = true
                                 val umArray = JSONArray(umResp.body?.string().orEmpty())
@@ -4174,7 +4192,7 @@ class MikrotikRepository(
                         .url("$baseUrl/rest/interface?.proplist=.id,name,type,mac-address,rx-byte,tx-byte,rx-packet,tx-packet,running,disabled,comment")
                         .header("Authorization", credential)
                         .build()
-                    httpClient.newCall(ifReq).execute().use { ifResp ->
+                    routerCall(ifReq).execute().use { ifResp ->
                         if (!ifResp.isSuccessful) {
                             return@withContext Result.failure(Exception("تعذر جلب إحصائيات المنافذ (HTTP ${ifResp.code})"))
                         }
@@ -4287,7 +4305,7 @@ class MikrotikRepository(
                     var umOk = false
 
                     val userReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user").header("Authorization", credential).build()
-                    httpClient.newCall(userReq).execute().use { userResp ->
+                    routerCall(userReq).execute().use { userResp ->
                         if (userResp.isSuccessful) {
                             hsOk = true
                             val userArray = JSONArray(userResp.body?.string() ?: "[]")
@@ -4332,7 +4350,7 @@ class MikrotikRepository(
                             .url("$baseUrl/rest/user-manager/user?.proplist=.id,name,username,password,profile,actual-profile,uptime,download-used,upload-used,download-limit,total-limit,transfer-limit,time-limit,creation-time,start-time,started,till-time,end-time,last-seen,last-logged-in,comment,disabled")
                             .header("Authorization", credential)
                             .build()
-                        httpClient.newCall(umReq).execute().use { umResp ->
+                        routerCall(umReq).execute().use { umResp ->
                             if (umResp.isSuccessful) {
                                 umOk = true
                                 val umArray = JSONArray(umResp.body?.string() ?: "[]")
@@ -4471,7 +4489,7 @@ class MikrotikRepository(
                         val credential = Credentials.basic(currentConfig.username, currentConfig.password)
                         try {
                             val resReq = Request.Builder().url("$baseUrl/rest/system/resource").header("Authorization", credential).build()
-                            httpClient.newCall(resReq).execute().use { resResp ->
+                            routerCall(resReq).execute().use { resResp ->
                                 if (resResp.isSuccessful) {
                                     parseResource(resResp.body?.string() ?: "")
                                 }
@@ -4512,7 +4530,7 @@ class MikrotikRepository(
                         .delete()
                         .header("Authorization", credential)
                         .build()
-                    val hsKicked = httpClient.newCall(delRequest).execute().use { resp ->
+                    val hsKicked = routerCall(delRequest).execute().use { resp ->
                         lastCode = resp.code
                         resp.isSuccessful
                     }
@@ -4531,7 +4549,7 @@ class MikrotikRepository(
                                 .get()
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(hsFind).execute().use { findResp ->
+                            routerCall(hsFind).execute().use { findResp ->
                                 if (findResp.isSuccessful) {
                                     val arr = JSONArray(findResp.body?.string().orEmpty())
                                     for (i in 0 until arr.length()) {
@@ -4542,7 +4560,7 @@ class MikrotikRepository(
                                                 .delete()
                                                 .header("Authorization", credential)
                                                 .build()
-                                            if (httpClient.newCall(rmReq).execute().use { it.isSuccessful }) {
+                                            if (routerCall(rmReq).execute().use { it.isSuccessful }) {
                                                 fallbackKicked = true
                                             }
                                         }
@@ -4558,7 +4576,7 @@ class MikrotikRepository(
                                     .get()
                                     .header("Authorization", credential)
                                     .build()
-                                httpClient.newCall(umReq).execute().use { umResp ->
+                                routerCall(umReq).execute().use { umResp ->
                                     if (umResp.isSuccessful) {
                                         val arr = JSONArray(umResp.body?.string().orEmpty())
                                         for (i in 0 until arr.length()) {
@@ -4571,7 +4589,7 @@ class MikrotikRepository(
                                                     .delete()
                                                     .header("Authorization", credential)
                                                     .build()
-                                                if (httpClient.newCall(rmReq).execute().use { it.isSuccessful }) {
+                                                if (routerCall(rmReq).execute().use { it.isSuccessful }) {
                                                     fallbackKicked = true
                                                 }
                                             }
@@ -4625,7 +4643,7 @@ class MikrotikRepository(
                     if (targetName.isNotBlank()) {
                         try {
                             val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${encSeg(targetName)}").get().header("Authorization", credential).build()
-                            httpClient.newCall(actReq).execute().use { actResp ->
+                            routerCall(actReq).execute().use { actResp ->
                                 if (actResp.isSuccessful) {
                                     val body = actResp.body?.string().orEmpty()
                                     val arr = org.json.JSONArray(body)
@@ -4633,7 +4651,7 @@ class MikrotikRepository(
                                         val actId = arr.getJSONObject(i).optString(".id")
                                         if (actId.isNotBlank()) {
                                             val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/${encSeg(actId)}").delete().header("Authorization", credential).build()
-                                            httpClient.newCall(delReq).execute().close()
+                                            routerCall(delReq).execute().close()
                                         }
                                     }
                                 }
@@ -4641,14 +4659,14 @@ class MikrotikRepository(
                         } catch (_: Exception) {}
                         try {
                             val umSessReq = Request.Builder().url("$baseUrl/rest/user-manager/session?user=${encSeg(targetName)}").get().header("Authorization", credential).build()
-                            httpClient.newCall(umSessReq).execute().use { sResp ->
+                            routerCall(umSessReq).execute().use { sResp ->
                                 if (sResp.isSuccessful) {
                                     val arr = org.json.JSONArray(sResp.body?.string().orEmpty())
                                     for (i in 0 until arr.length()) {
                                         val actId = arr.getJSONObject(i).optString(".id")
                                         if (actId.isNotBlank()) {
                                             val delReq = Request.Builder().url("$baseUrl/rest/user-manager/session/${encSeg(actId)}").delete().header("Authorization", credential).build()
-                                            httpClient.newCall(delReq).execute().close()
+                                            routerCall(delReq).execute().close()
                                         }
                                     }
                                 }
@@ -4659,7 +4677,7 @@ class MikrotikRepository(
                     // 1. Try Hotspot removal
                     var hsCode = 0
                     val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/${encSeg(cardId)}").delete().header("Authorization", credential).build()
-                    val hsDeleted = httpClient.newCall(hsReq).execute().use { hsResp ->
+                    val hsDeleted = routerCall(hsReq).execute().use { hsResp ->
                         hsCode = hsResp.code
                         hsResp.isSuccessful
                     }
@@ -4677,7 +4695,7 @@ class MikrotikRepository(
                     var um7Code = 0
                     if (targetName.isNotBlank()) {
                         val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${encSeg(targetName)}").delete().header("Authorization", credential).build()
-                        val um7Deleted = httpClient.newCall(um7Req).execute().use { um7Resp ->
+                        val um7Deleted = routerCall(um7Req).execute().use { um7Resp ->
                             um7Code = um7Resp.code
                             um7Resp.isSuccessful
                         }
@@ -4694,7 +4712,7 @@ class MikrotikRepository(
                     var um6Code = 0
                     if (targetName.isNotBlank()) {
                         val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${encSeg(targetName)}").delete().header("Authorization", credential).build()
-                        val um6Deleted = httpClient.newCall(um6Req).execute().use { um6Resp ->
+                        val um6Deleted = routerCall(um6Req).execute().use { um6Resp ->
                             um6Code = um6Resp.code
                             um6Resp.isSuccessful
                         }
@@ -4752,14 +4770,14 @@ class MikrotikRepository(
                         if (card.name.isNotBlank()) {
                             try {
                                 val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${encSeg(card.name)}").get().header("Authorization", credential).build()
-                                httpClient.newCall(actReq).execute().use { actResp ->
+                                routerCall(actReq).execute().use { actResp ->
                                     if (actResp.isSuccessful) {
                                         val arr = JSONArray(actResp.body?.string().orEmpty())
                                         for (i in 0 until arr.length()) {
                                             val actId = arr.getJSONObject(i).optString(".id")
                                             if (actId.isNotBlank()) {
                                                 val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/${encSeg(actId)}").delete().header("Authorization", credential).build()
-                                                httpClient.newCall(delReq).execute().close()
+                                                routerCall(delReq).execute().close()
                                             }
                                         }
                                     }
@@ -4772,7 +4790,7 @@ class MikrotikRepository(
                         if (realId.isBlank() && card.name.isNotBlank()) {
                             try {
                                 val findReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${encSeg(card.name)}").get().header("Authorization", credential).build()
-                                httpClient.newCall(findReq).execute().use { findResp ->
+                                routerCall(findReq).execute().use { findResp ->
                                     if (findResp.isSuccessful) {
                                         val arr = JSONArray(findResp.body?.string().orEmpty())
                                         if (arr.length() > 0) {
@@ -4786,11 +4804,11 @@ class MikrotikRepository(
                         if (realId.isNotBlank()) {
                             val resetBody = JSONObject().put("numbers", realId).toString().toRequestBody("application/json".toMediaType())
                             val resetReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/reset-counters").post(resetBody).header("Authorization", credential).build()
-                            httpClient.newCall(resetReq).execute().close()
+                            routerCall(resetReq).execute().close()
 
                             val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
                             val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/${encSeg(realId)}").patch(enableBody).header("Authorization", credential).build()
-                            httpClient.newCall(hsReq).execute().use { hsResp ->
+                            routerCall(hsReq).execute().use { hsResp ->
                                 if (!hsResp.isSuccessful) {
                                     val err = hsResp.body?.string().orEmpty()
                                     return@withContext Result.failure(Exception("رفض الراوتر إعادة تفعيل الكرت في الهوتسبوت: $err"))
@@ -4801,11 +4819,11 @@ class MikrotikRepository(
                             try {
                                 val umResetBody = JSONObject().put("numbers", card.name).toString().toRequestBody("application/json".toMediaType())
                                 val umResetReq = Request.Builder().url("$baseUrl/rest/user-manager/user/reset-counters").post(umResetBody).header("Authorization", credential).build()
-                                httpClient.newCall(umResetReq).execute().close()
+                                routerCall(umResetReq).execute().close()
 
                                 val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
                                 val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${encSeg(card.name)}").patch(enableBody).header("Authorization", credential).build()
-                                httpClient.newCall(um7Req).execute().use { um7Resp ->
+                                routerCall(um7Req).execute().use { um7Resp ->
                                     if (um7Resp.isSuccessful) umSuccess = true
                                 }
                             } catch (_: Exception) {}
@@ -4813,7 +4831,7 @@ class MikrotikRepository(
                             if (!umSuccess) {
                                 val enableBody = JSONObject().put("disabled", "false").toString().toRequestBody("application/json".toMediaType())
                                 val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${encSeg(card.name)}").patch(enableBody).header("Authorization", credential).build()
-                                httpClient.newCall(um6Req).execute().use { um6Resp ->
+                                routerCall(um6Req).execute().use { um6Resp ->
                                     if (!um6Resp.isSuccessful) {
                                         return@withContext Result.failure(Exception("رفض الراوتر إعادة تفعيل الكرت عبر واجهة REST"))
                                     }
@@ -4880,7 +4898,7 @@ class MikrotikRepository(
                         if (updatedCard.name.isNotBlank()) {
                             try {
                                 val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${encSeg(updatedCard.name)}").get().header("Authorization", credential).build()
-                                httpClient.newCall(actReq).execute().use { actResp ->
+                                routerCall(actReq).execute().use { actResp ->
                                     if (actResp.isSuccessful) {
                                         val body = actResp.body?.string().orEmpty()
                                         val arr = org.json.JSONArray(body)
@@ -4888,7 +4906,7 @@ class MikrotikRepository(
                                             val actId = arr.getJSONObject(i).optString(".id")
                                             if (actId.isNotBlank()) {
                                                 val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/${encSeg(actId)}").delete().header("Authorization", credential).build()
-                                                httpClient.newCall(delReq).execute().close()
+                                                routerCall(delReq).execute().close()
                                             }
                                         }
                                     }
@@ -4901,7 +4919,7 @@ class MikrotikRepository(
                         if (hsTargetId.isBlank() && updatedCard.name.isNotBlank()) {
                             try {
                                 val findReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${encSeg(updatedCard.name)}").get().header("Authorization", credential).build()
-                                httpClient.newCall(findReq).execute().use { findResp ->
+                                routerCall(findReq).execute().use { findResp ->
                                     if (findResp.isSuccessful) {
                                         val arr = org.json.JSONArray(findResp.body?.string().orEmpty())
                                         if (arr.length() > 0) {
@@ -4913,7 +4931,7 @@ class MikrotikRepository(
                         }
                         val effectiveId = hsTargetId.ifBlank { updatedCard.id.ifBlank { updatedCard.name } }
                         val hsReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/${encSeg(effectiveId)}").patch(jsonStr).header("Authorization", credential).build()
-                        val hsOk = httpClient.newCall(hsReq).execute().use { it.isSuccessful }
+                        val hsOk = routerCall(hsReq).execute().use { it.isSuccessful }
 
                         if (!hsOk) {
                             // 2. Try User Manager v7
@@ -4923,12 +4941,12 @@ class MikrotikRepository(
                                 put("disabled", if (updatedCard.disabled) "true" else "false")
                             }.toString().toRequestBody("application/json".toMediaType())
                             val um7Req = Request.Builder().url("$baseUrl/rest/user-manager/user/${encSeg(updatedCard.name)}").patch(um7Body).header("Authorization", credential).build()
-                            val um7Ok = httpClient.newCall(um7Req).execute().use { it.isSuccessful }
+                            val um7Ok = routerCall(um7Req).execute().use { it.isSuccessful }
 
                             if (!um7Ok) {
                                 // 3. Try User Manager v6
                                 val um6Req = Request.Builder().url("$baseUrl/rest/tool/user-manager/user/${encSeg(updatedCard.name)}").patch(jsonStr).header("Authorization", credential).build()
-                                val um6Ok = httpClient.newCall(um6Req).execute().use { it.isSuccessful }
+                                val um6Ok = routerCall(um6Req).execute().use { it.isSuccessful }
                                 if (!um6Ok) {
                                     return@withContext Result.failure(Exception("رفض راوتر ميكروتك تعديل الكرت عبر واجهة REST. تحقق من صحة الحقول وصلاحيات الحساب."))
                                 }
@@ -4967,7 +4985,7 @@ class MikrotikRepository(
             .build()
         var lastCode = 0
         var lastBody = ""
-        var toggledOk = httpClient.newCall(hsReq).execute().use { resp ->
+        var toggledOk = routerCall(hsReq).execute().use { resp ->
             lastCode = resp.code
             if (!resp.isSuccessful) lastBody = resp.body?.string().orEmpty()
             resp.isSuccessful
@@ -4978,7 +4996,7 @@ class MikrotikRepository(
                 .patch(jsonBody.toRequestBody("application/json".toMediaType()))
                 .header("Authorization", credential)
                 .build()
-            toggledOk = httpClient.newCall(um7Req).execute().use { resp ->
+            toggledOk = routerCall(um7Req).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     lastCode = resp.code
                     lastBody = resp.body?.string().orEmpty()
@@ -4992,7 +5010,7 @@ class MikrotikRepository(
                 .patch(jsonBody.toRequestBody("application/json".toMediaType()))
                 .header("Authorization", credential)
                 .build()
-            toggledOk = httpClient.newCall(um6Req).execute().use { resp ->
+            toggledOk = routerCall(um6Req).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     lastCode = resp.code
                     lastBody = resp.body?.string().orEmpty()
@@ -5171,7 +5189,7 @@ class MikrotikRepository(
                     val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                     val credential = Credentials.basic(config.username, config.password)
                     val req = Request.Builder().url("$baseUrl/rest/system/resource").header("Authorization", credential).build()
-                    httpClient.newCall(req).execute().use { it.isSuccessful }
+                    routerCall(req).execute().use { it.isSuccessful }
                 } catch (_: Exception) {
                     false
                 }
@@ -5198,12 +5216,12 @@ class MikrotikRepository(
                         val baseUrl = "$protocol://${config.ipAddress}:${config.port}"
                         val credential = Credentials.basic(config.username, config.password)
                         val r7 = Request.Builder().url("$baseUrl/rest/user-manager/profile/${encSeg(cleanName)}").header("Authorization", credential).build()
-                        val exists7 = httpClient.newCall(r7).execute().use { it.isSuccessful }
+                        val exists7 = routerCall(r7).execute().use { it.isSuccessful }
                         if (exists7) {
                             true
                         } else {
                             val r6 = Request.Builder().url("$baseUrl/rest/tool/user-manager/profile/${encSeg(cleanName)}").header("Authorization", credential).build()
-                            httpClient.newCall(r6).execute().use { it.isSuccessful }
+                            routerCall(r6).execute().use { it.isSuccessful }
                         }
                     }
                 } catch (_: Exception) {
@@ -5355,7 +5373,7 @@ class MikrotikRepository(
                                         .build()
                                     var umCode = 0
                                     var umErrBody = ""
-                                    var umCreated = httpClient.newCall(umReq).execute().use { r ->
+                                    var umCreated = routerCall(umReq).execute().use { r ->
                                         umCode = r.code
                                         if (!r.isSuccessful) umErrBody = r.body?.string().orEmpty()
                                         r.isSuccessful
@@ -5375,7 +5393,7 @@ class MikrotikRepository(
                                             .post(um6UserJson.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        umCreated = httpClient.newCall(um6Req).execute().use { r ->
+                                        umCreated = routerCall(um6Req).execute().use { r ->
                                             if (r.isSuccessful) {
                                                 umCode = r.code
                                                 true
@@ -5407,7 +5425,7 @@ class MikrotikRepository(
                                             .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        bindingSuccessful = httpClient.newCall(assignReq).execute().use { r ->
+                                        bindingSuccessful = routerCall(assignReq).execute().use { r ->
                                             if (!r.isSuccessful) bindError = r.body?.string().orEmpty()
                                             r.isSuccessful
                                         }
@@ -5418,7 +5436,7 @@ class MikrotikRepository(
                                                 .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                                 .header("Authorization", credential)
                                                 .build()
-                                            bindingSuccessful = httpClient.newCall(assign6Req).execute().use { r ->
+                                            bindingSuccessful = routerCall(assign6Req).execute().use { r ->
                                                 if (!r.isSuccessful) bindError = r.body?.string().orEmpty()
                                                 r.isSuccessful
                                             }
@@ -5435,14 +5453,14 @@ class MikrotikRepository(
                                                 .delete()
                                                 .header("Authorization", credential)
                                                 .build()
-                                            val delOk = httpClient.newCall(delReq).execute().use { it.isSuccessful }
+                                            val delOk = routerCall(delReq).execute().use { it.isSuccessful }
                                             if (!delOk) {
                                                 val del6Req = Request.Builder()
                                                     .url("$baseUrl/rest/tool/user-manager/user/${encSeg(card.name)}")
                                                     .delete()
                                                     .header("Authorization", credential)
                                                     .build()
-                                                httpClient.newCall(del6Req).execute().close()
+                                                routerCall(del6Req).execute().close()
                                             }
                                         } catch (_: Exception) {}
 
@@ -5462,7 +5480,7 @@ class MikrotikRepository(
                             if (cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
                                 try {
                                     val pCheck = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile/${encSeg(cleanProfileName)}").header("Authorization", credential).build()
-                                    val profExists = httpClient.newCall(pCheck).execute().use { it.isSuccessful }
+                                    val profExists = routerCall(pCheck).execute().use { it.isSuccessful }
                                     if (!profExists) {
                                         val createP = JSONObject().apply {
                                             put("name", cleanProfileName)
@@ -5473,7 +5491,7 @@ class MikrotikRepository(
                                             .post(createP.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        httpClient.newCall(createReq).execute().close()
+                                        routerCall(createReq).execute().close()
                                     }
                                 } catch (_: Exception) {}
                             }
@@ -5497,7 +5515,7 @@ class MikrotikRepository(
                                         .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                         .header("Authorization", credential)
                                         .build()
-                                    httpClient.newCall(postReq).execute().use { resp ->
+                                    routerCall(postReq).execute().use { resp ->
                                         if (resp.isSuccessful) {
                                             addedCards.add(card)
                                         } else {
@@ -5648,7 +5666,7 @@ class MikrotikRepository(
                                 .build()
                             var umCode = 0
                             var umErrBody = ""
-                            var umCreated = httpClient.newCall(umReq).execute().use { r ->
+                            var umCreated = routerCall(umReq).execute().use { r ->
                                 umCode = r.code
                                 if (!r.isSuccessful) umErrBody = r.body?.string().orEmpty()
                                 r.isSuccessful
@@ -5667,7 +5685,7 @@ class MikrotikRepository(
                                     .post(um6UserJson.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                umCreated = httpClient.newCall(um6Req).execute().use { r ->
+                                umCreated = routerCall(um6Req).execute().use { r ->
                                     if (r.isSuccessful) {
                                         umCode = r.code
                                         true
@@ -5697,7 +5715,7 @@ class MikrotikRepository(
                                     .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                bindingSuccessful = httpClient.newCall(assignReq).execute().use { r ->
+                                bindingSuccessful = routerCall(assignReq).execute().use { r ->
                                     if (!r.isSuccessful) bindError = r.body?.string().orEmpty()
                                     r.isSuccessful
                                 }
@@ -5708,7 +5726,7 @@ class MikrotikRepository(
                                         .post(umProfJson.toRequestBody("application/json".toMediaType()))
                                         .header("Authorization", credential)
                                         .build()
-                                    bindingSuccessful = httpClient.newCall(assign6Req).execute().use { r ->
+                                    bindingSuccessful = routerCall(assign6Req).execute().use { r ->
                                         if (!r.isSuccessful) bindError = r.body?.string().orEmpty()
                                         r.isSuccessful
                                     }
@@ -5724,7 +5742,7 @@ class MikrotikRepository(
                                         .delete()
                                         .header("Authorization", credential)
                                         .build()
-                                    httpClient.newCall(delReq).execute().close()
+                                    routerCall(delReq).execute().close()
                                 } catch (_: Exception) {}
 
                                 return@withContext Result.failure(Exception("فشل ربط باقة اليوزرمانجر (${cleanProfileName}) بالكرت: $bindError (تم التراجع عن إنشاء الكرت)"))
@@ -5734,7 +5752,7 @@ class MikrotikRepository(
                             if (cleanProfileName.isNotBlank() && !cleanProfileName.equals("default", ignoreCase = true)) {
                                 try {
                                     val pCheck = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile/${encSeg(cleanProfileName)}").header("Authorization", credential).build()
-                                    val profExists = httpClient.newCall(pCheck).execute().use { it.isSuccessful }
+                                    val profExists = routerCall(pCheck).execute().use { it.isSuccessful }
                                     if (!profExists) {
                                         val createP = JSONObject().apply {
                                             put("name", cleanProfileName)
@@ -5745,7 +5763,7 @@ class MikrotikRepository(
                                             .post(createP.toRequestBody("application/json".toMediaType()))
                                             .header("Authorization", credential)
                                             .build()
-                                        httpClient.newCall(createReq).execute().close()
+                                        routerCall(createReq).execute().close()
                                     }
                                 } catch (_: Exception) {}
                             }
@@ -5767,7 +5785,7 @@ class MikrotikRepository(
                                 .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(postReq).execute().use { resp ->
+                            routerCall(postReq).execute().use { resp ->
                                 if (!resp.isSuccessful) {
                                     val errBody = resp.body?.string().orEmpty()
                                     return@withContext Result.failure(Exception("استجاب الراوتر برفض إضافة الكرت: $errBody"))
@@ -5832,7 +5850,7 @@ class MikrotikRepository(
                                 .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(postReq).execute().use { resp ->
+                            routerCall(postReq).execute().use { resp ->
                                 if (!resp.isSuccessful) {
                                     val err = resp.body?.string().orEmpty()
                                     if (!err.contains("already", ignoreCase = true)) {
@@ -5853,7 +5871,7 @@ class MikrotikRepository(
                                 .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(postReq).execute().use { resp ->
+                            routerCall(postReq).execute().use { resp ->
                                 if (!resp.isSuccessful) {
                                     val err = resp.body?.string().orEmpty()
                                     if (!err.contains("already", ignoreCase = true)) {
@@ -5899,14 +5917,14 @@ class MikrotikRepository(
                         if (card.name.isNotBlank()) {
                             try {
                                 val actReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active?user=${encSeg(card.name)}").get().header("Authorization", credential).build()
-                                httpClient.newCall(actReq).execute().use { actResp ->
+                                routerCall(actReq).execute().use { actResp ->
                                     if (actResp.isSuccessful) {
                                         val arr = JSONArray(actResp.body?.string().orEmpty())
                                         for (i in 0 until arr.length()) {
                                             val actId = arr.getJSONObject(i).optString(".id")
                                             if (actId.isNotBlank()) {
                                                 val delReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/active/${encSeg(actId)}").delete().header("Authorization", credential).build()
-                                                httpClient.newCall(delReq).execute().close()
+                                                routerCall(delReq).execute().close()
                                             }
                                         }
                                     }
@@ -5918,7 +5936,7 @@ class MikrotikRepository(
                         if (realId.isBlank() && card.name.isNotBlank()) {
                             try {
                                 val getReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user?name=${encSeg(card.name)}").get().header("Authorization", credential).build()
-                                httpClient.newCall(getReq).execute().use { getResp ->
+                                routerCall(getReq).execute().use { getResp ->
                                     if (getResp.isSuccessful) {
                                         val arr = JSONArray(getResp.body?.string().orEmpty())
                                         if (arr.length() > 0) {
@@ -5940,7 +5958,7 @@ class MikrotikRepository(
                                 .patch(patchJson.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(patchReq).execute().use { patchResp ->
+                            routerCall(patchReq).execute().use { patchResp ->
                                 if (!patchResp.isSuccessful) {
                                     val err = patchResp.body?.string().orEmpty()
                                     return@withContext Result.failure(Exception("رفض الراوتر تفعيل الكرت في الهوتسبوت: $err"))
@@ -5955,7 +5973,7 @@ class MikrotikRepository(
                                     .patch(umPatch.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                um7Success = httpClient.newCall(umReq).execute().use { it.isSuccessful }
+                                um7Success = routerCall(umReq).execute().use { it.isSuccessful }
                             } catch (_: Exception) {}
 
                             if (!um7Success) {
@@ -5972,7 +5990,7 @@ class MikrotikRepository(
                                     .post(addJson.toRequestBody("application/json".toMediaType()))
                                     .header("Authorization", credential)
                                     .build()
-                                httpClient.newCall(addReq).execute().use { addResp ->
+                                routerCall(addReq).execute().use { addResp ->
                                     if (!addResp.isSuccessful) {
                                         val err = addResp.body?.string().orEmpty()
                                         return@withContext Result.failure(Exception("رفض الراوتر تفعيل أو إضافة الكرت: $err"))
@@ -6035,7 +6053,7 @@ class MikrotikRepository(
                                 .post(umJson.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            umResult = httpClient.newCall(postUm).execute().use { r ->
+                            umResult = routerCall(postUm).execute().use { r ->
                                 if (r.isSuccessful) {
                                     Result.success(true)
                                 } else {
@@ -6070,7 +6088,7 @@ class MikrotikRepository(
                                 .post(jsonBody.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(postReq).execute().use { resp ->
+                            routerCall(postReq).execute().use { resp ->
                                 if (!resp.isSuccessful) {
                                     val err = resp.body?.string().orEmpty()
                                     if (!err.contains("already exists", ignoreCase = true)) {
@@ -6128,7 +6146,7 @@ class MikrotikRepository(
                             if (umProfileId.isBlank()) {
                                 try {
                                     val getReq = Request.Builder().url("$baseUrl/rest/user-manager/profile?name=${encSeg(profile.name)}").get().header("Authorization", credential).build()
-                                    httpClient.newCall(getReq).execute().use { getResp ->
+                                    routerCall(getReq).execute().use { getResp ->
                                         if (getResp.isSuccessful) {
                                             val arr = JSONArray(getResp.body?.string().orEmpty())
                                             if (arr.length() > 0) umProfileId = arr.getJSONObject(0).optString(".id")
@@ -6148,7 +6166,7 @@ class MikrotikRepository(
                                 .patch(umJson.toRequestBody("application/json".toMediaType()))
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(patchUm).execute().use { resp ->
+                            routerCall(patchUm).execute().use { resp ->
                                 if (!resp.isSuccessful) {
                                     val err = resp.body?.string().orEmpty()
                                     return@withContext Result.failure(Exception("رفض الراوتر تعديل باقة يوزرمانجر: $err"))
@@ -6162,7 +6180,7 @@ class MikrotikRepository(
                         if (realId.isBlank()) {
                             try {
                                 val getReq = Request.Builder().url("$baseUrl/rest/ip/hotspot/user/profile?name=${encSeg(profile.name)}").get().header("Authorization", credential).build()
-                                httpClient.newCall(getReq).execute().use { getResp ->
+                                routerCall(getReq).execute().use { getResp ->
                                     if (getResp.isSuccessful) {
                                         val arr = JSONArray(getResp.body?.string().orEmpty())
                                         if (arr.length() > 0) realId = arr.getJSONObject(0).optString(".id")
@@ -6192,7 +6210,7 @@ class MikrotikRepository(
                             .patch(jsonBody.toRequestBody("application/json".toMediaType()))
                             .header("Authorization", credential)
                             .build()
-                        httpClient.newCall(patchReq).execute().use { resp ->
+                        routerCall(patchReq).execute().use { resp ->
                             if (!resp.isSuccessful) {
                                 val err = resp.body?.string().orEmpty()
                                 return@withContext Result.failure(Exception("فشل تعديل الباقة عبر واجهة REST: $err"))
@@ -6257,7 +6275,7 @@ class MikrotikRepository(
                                     .delete()
                                     .header("Authorization", credential)
                                     .build()
-                                httpClient.newCall(delReq).execute().use { resp ->
+                                routerCall(delReq).execute().use { resp ->
                                     if (resp.isSuccessful) {
                                         anyDeleted = true
                                     } else if (resp.code != 404) {
@@ -6501,7 +6519,7 @@ class MikrotikRepository(
                                 .post(body)
                                 .header("Authorization", credential)
                                 .build()
-                            httpClient.newCall(pingReq).execute().use { resp ->
+                            routerCall(pingReq).execute().use { resp ->
                                 if (resp.isSuccessful) {
                                     val arr = JSONArray(resp.body?.string().orEmpty())
                                     for (i in 0 until arr.length()) {
@@ -6664,7 +6682,7 @@ class MikrotikRepository(
                         .post("{}".toRequestBody("application/json".toMediaType()))
                         .header("Authorization", credential)
                         .build()
-                    httpClient.newCall(postReq).execute().close()
+                    routerCall(postReq).execute().close()
                     Result.success(true)
                 } catch (e: Exception) {
                     Result.failure(e)
@@ -6701,7 +6719,7 @@ class MikrotikRepository(
                     val baseUrl = "$protocol://${cfg.ipAddress}:${cfg.port}"
                     val credential = Credentials.basic(cfg.username, cfg.password)
                     val req = Request.Builder().url("$baseUrl/rest/ip/dns/cache").get().header("Authorization", credential).build()
-                    httpClient.newCall(req).execute().use { resp ->
+                    routerCall(req).execute().use { resp ->
                         if (resp.isSuccessful) {
                             val arr = JSONArray(resp.body?.string().orEmpty())
                             (0 until arr.length()).mapNotNull { i ->

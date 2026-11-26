@@ -109,9 +109,13 @@ fun DashboardScreen(
 
     var showRebootDialog by remember { mutableStateOf(false) }
 
-    val isConnectedAsDemo = (connectionState as? ConnectionState.Connected)?.isDemo == true
-    val connectedIp = (connectionState as? ConnectionState.Connected)?.ipAddress ?: "غير محدد"
-    val connectedRouterName = (connectionState as? ConnectionState.Connected)?.routerName ?: resource.boardName
+    val connectedState = connectionState as? ConnectionState.Connected
+    val isConnectedAsDemo = connectedState?.isDemo == true
+    val isOfflineState = connectedState?.isOffline == true
+    val isSyncingState = connectedState?.isSyncing == true
+    val offlineReasonText = connectedState?.offlineReason.orEmpty()
+    val connectedIp = connectedState?.ipAddress ?: "غير محدد"
+    val connectedRouterName = connectedState?.routerName ?: resource.boardName
 
     val onlineNodesCount = remember(networkNodes) { networkNodes.count { it.isOnline } }
     val availableCardsCount = remember(cards) { cards.count { !it.isActive && !it.isExpired } }
@@ -135,7 +139,13 @@ fun DashboardScreen(
                 ipAddress = connectedIp,
                 uptime = resource.uptime,
                 isDemo = isConnectedAsDemo,
-                onRefresh = { viewModel.refreshData(forceLiveRefresh = true, notifyOnError = true) }
+                isOffline = isOfflineState,
+                isSyncing = isSyncingState,
+                offlineReason = offlineReasonText,
+                onRefresh = {
+                    if (isOfflineState) viewModel.retrySync()
+                    else viewModel.refreshData(forceLiveRefresh = true, notifyOnError = true)
+                }
             )
         }
 
@@ -491,17 +501,29 @@ private fun CyberRouterHubCard(
     ipAddress: String,
     uptime: String,
     isDemo: Boolean,
+    isOffline: Boolean,
+    isSyncing: Boolean,
+    offlineReason: String,
     onRefresh: () -> Unit
 ) {
+    val cardAccentColor = when {
+        isOffline -> Color(0xFFFFA000)
+        isSyncing -> NetworkCyan
+        else -> CyberGreenNeon
+    }
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("router_status_banner"),
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
+            containerColor = if (isOffline) {
+                MaterialTheme.colorScheme.surfaceVariant
+            } else {
+                MaterialTheme.colorScheme.primaryContainer
+            }
         ),
-        border = BorderStroke(1.dp, CyberGreenNeon.copy(alpha = 0.4f)),
+        border = BorderStroke(1.dp, cardAccentColor.copy(alpha = 0.45f)),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(
@@ -516,7 +538,8 @@ private fun CyberRouterHubCard(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
                     Box(
                         modifier = Modifier
@@ -524,7 +547,11 @@ private fun CyberRouterHubCard(
                             .clip(RoundedCornerShape(12.dp))
                             .background(
                                 Brush.linearGradient(
-                                    listOf(CyberGreenBright, CyberGreenPrimary)
+                                    if (isOffline) {
+                                        listOf(Color(0xFFFFB300), Color(0xFFE65100))
+                                    } else {
+                                        listOf(CyberGreenBright, CyberGreenPrimary)
+                                    }
                                 )
                             ),
                         contentAlignment = Alignment.Center
@@ -546,15 +573,17 @@ private fun CyberRouterHubCard(
                                 text = routerName.ifEmpty { boardName },
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                color = if (isOffline) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimaryContainer
                             )
-                            CyberPulseDot()
+                            if (!isOffline) {
+                                CyberPulseDot()
+                            }
                         }
 
                         Text(
-                            text = "IP: $ipAddress • RouterOS: $version",
+                            text = "IP: $ipAddress • RouterOS: ${version.ifBlank { "غير متاح" }}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                            color = (if (isOffline) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimaryContainer).copy(alpha = 0.85f),
                             fontSize = 11.sp
                         )
                     }
@@ -565,21 +594,63 @@ private fun CyberRouterHubCard(
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     StatusPill(
-                        text = if (isDemo) "وضع تجريبي" else "متصل حقيقي",
-                        type = if (isDemo) StatusType.INFO else StatusType.SUCCESS
+                        text = when {
+                            isSyncing -> "جاري المزامنة..."
+                            isOffline -> "أوفلاين"
+                            isDemo -> "وضع تجريبي"
+                            else -> "متصل حقيقي"
+                        },
+                        type = when {
+                            isSyncing -> StatusType.INFO
+                            isOffline -> StatusType.WARNING
+                            isDemo -> StatusType.INFO
+                            else -> StatusType.SUCCESS
+                        }
                     )
 
                     IconButton(
                         onClick = onRefresh,
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(48.dp)
                             .testTag("dashboard_refresh_btn")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
-                            contentDescription = "تحديث البيانات الآن",
-                            tint = MaterialTheme.colorScheme.primary,
+                            contentDescription = if (isOffline) "إعادة المزامنة الآن" else "تحديث البيانات الآن",
+                            tint = if (isOffline) Color(0xFFE65100) else MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+
+            if (isOffline && offlineReason.isNotBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onRefresh() }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = offlineReason,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 2
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "إعادة الاتصال",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error
                         )
                     }
                 }
@@ -607,7 +678,7 @@ private fun CyberRouterHubCard(
                         Icon(
                             imageVector = Icons.Default.AccessTime,
                             contentDescription = null,
-                            tint = CyberGreenPrimary,
+                            tint = if (isOffline) Color(0xFFE65100) else CyberGreenPrimary,
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
@@ -623,7 +694,7 @@ private fun CyberRouterHubCard(
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp,
-                        color = CyberGreenPrimary
+                        color = if (isOffline) Color(0xFFE65100) else CyberGreenPrimary
                     )
                 }
             }
